@@ -9,6 +9,8 @@ $KillScript = Join-Path $PSScriptRoot "kill-orphans.ps1"
 $BuildScript = Join-Path $PSScriptRoot "build.ps1"
 $Esc = [char]27
 
+. (Join-Path $PSScriptRoot "console-progress.ps1")
+
 function Enable-PrettyConsole {
   try {
     $Host.UI.RawUI.WindowTitle = "VTM Noble"
@@ -142,7 +144,8 @@ function Invoke-EnsureModel {
   } else {
     Write-Host ""
     Write-Ansi "==> Downloading DiT model (Hugging Face -> models\dit\VTM-ELF.pt)" cyan
-    Write-Ansi "    sinBoo1/VTM-Elf-0.01 - this can take a few minutes on first setup." slate
+    Write-Ansi "    sinBoo1/VTM-Elf-0.01 - first setup can take several minutes." slate
+    Write-Ansi "    Progress bars / heartbeat lines mean it is still working - not frozen." slate
     Write-Host ""
 
     $prevPyPath = $env:PYTHONPATH
@@ -224,7 +227,7 @@ function Show-Menu {
 
   Write-Ansi "  -- actions --------------------------------------" teal
   Write-Ansi "  [1]  Smart Build" gold -NoNewline
-  Write-Ansi "   deps / UI + download DiT model" slate
+  Write-Ansi "   deps / UI + drop VTMNoble.exe here" slate
   if ($state.HasVenv -and $state.HasUi) {
     Write-Ansi "  [2]  Start" gold -NoNewline
     Write-Ansi "       ensure model, then run app" slate
@@ -270,6 +273,7 @@ function Invoke-SmartBuild {
   Write-Ansi "==> Clearing leftovers..." amber
   Invoke-KillOrphans
   Write-Ansi "==> Smart build (checks deps - skips pip when venv is ready)" cyan
+  Write-Ansi "    Long steps (CUDA torch, copies, model download) show progress bars." slate
   Write-Host ""
   $code = 0
   try {
@@ -293,6 +297,15 @@ function Invoke-SmartBuild {
 
   Write-Host ""
   Write-Ansi "Smart Build finished." green
+  $rootExe = Join-Path $Root "VTMNoble.exe"
+  if (Test-Path -LiteralPath $rootExe) {
+    Write-Ansi "  Double-click " slate -NoNewline
+    Write-Ansi "VTMNoble.exe" mint -NoNewline
+    Write-Ansi " next to start.bat to launch the app." slate
+    Write-Ansi "  (You do not need to dig into dist\VTMNoble\.)" slate
+  } else {
+    Write-Ansi "  Or use menu [2] Start after models are ready." slate
+  }
   Write-Host ""
   Write-Ansi "Press Enter to return..." slate
   [void][Console]::ReadLine()

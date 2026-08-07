@@ -110,21 +110,36 @@ def _cleanup_child() -> None:
 
 
 
+def _package_root() -> Path:
+    """Directory that contains runtime/, backend/, etc.
+
+    Supports two layouts:
+      - Shipped folder:  <dir>/VTMNoble.exe + <dir>/runtime/...
+      - Repo convenience: real_stream/VTMNoble.exe → uses real_stream/dist/VTMNoble/
+    """
+    if getattr(sys, "frozen", False):
+        here = Path(sys.executable).resolve().parent
+    else:
+        here = Path(__file__).resolve().parent.parent
+
+    def _has_runtime(base: Path) -> bool:
+        return (base / "runtime" / "Scripts" / "python.exe").is_file()
+
+    if _has_runtime(here):
+        return here
+
+    dist = here / "dist" / "VTMNoble"
+    if _has_runtime(dist):
+        return dist
+
+    return here
+
+
 def main() -> int:
 
     global _child
 
-
-
-    if getattr(sys, "frozen", False):
-
-        root = Path(sys.executable).resolve().parent
-
-    else:
-
-        root = Path(__file__).resolve().parent.parent
-
-
+    root = _package_root()
 
     runtime_py = root / "runtime" / "Scripts" / "python.exe"
 
@@ -132,7 +147,11 @@ def main() -> int:
 
         print(f"Missing runtime Python:\n  {runtime_py}", flush=True)
 
-        print("Rebuild with packaging\\build.ps1", flush=True)
+        print(
+            "Run start.bat → [1] Smart Build, then double-click VTMNoble.exe "
+            "next to start.bat.",
+            flush=True,
+        )
 
         try:
 

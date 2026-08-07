@@ -14,7 +14,10 @@ Windows desktop app for real-time pose-driven anime generation (keypoint DiT + l
 1. Clone this repo.
 2. Double-click `start.bat`.
 3. Choose **[1] Smart Build** (creates `.venv-build`, builds the UI, downloads models).
-4. Choose **[2] Start**.
+4. After build, double-click **`VTMNoble.exe`** in this same folder (next to `start.bat`).  
+   Or use menu **[2] Start** from `start.bat`.
+
+Smart Build places `VTMNoble.exe` beside `start.bat` on purpose — you should not need to open `dist\VTMNoble\` to run the app. Package files still live under `dist\VTMNoble\` (runtime, backend, vendor); the root exe just points at them. Re-running Smart Build skips heavy steps when they are already up to date (deps, UI, runtime copy, launcher).
 
 Models download automatically into:
 
@@ -42,7 +45,10 @@ Setup also runs a **model checklist** — all required files must be present bef
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-Output: `dist/VTMNoble/` (thin `VTMNoble.exe` + CUDA `runtime/` — ship the whole folder, not the exe alone).
+Output:
+
+- **Run locally:** `VTMNoble.exe` appears next to `start.bat` (convenience launcher).
+- **Ship / zip:** copy the whole `dist/VTMNoble/` folder (thin exe + CUDA `runtime/` — not the exe alone).
 
 Vendor code is committed under `vendor/`. Only pass `-SyncVendor` if you are developing inside the optional parent monorepo and need to refresh vendor copies.
 

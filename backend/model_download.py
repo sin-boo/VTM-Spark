@@ -22,10 +22,106 @@ _state: dict[str, Any] = {
     "error": "",
     "files_done": 0,
     "files_total": 0,
+    "bytes_done": 0,
+    "bytes_total": 0,
 }
 
 # Minimum size to treat an existing file as a real checkpoint (not a stub).
 _MIN_CKPT_BYTES = 1_000_000
+
+# When True, print ASCII progress to stderr (Smart Build / CLI). Off inside the live app UI.
+_console_progress = False
+
+
+def _use_console_progress() -> bool:
+    return bool(_console_progress) or (
+        stream_runtime_is_idle() and (sys.stderr.isatty() or sys.stdout.isatty())
+    )
+
+
+def stream_runtime_is_idle() -> bool:
+    try:
+        from . import stream as stream_mod
+
+        return stream_mod._runtime is None
+    except Exception:
+        return True
+
+
+def enable_console_progress(enabled: bool = True) -> None:
+    global _console_progress
+    _console_progress = bool(enabled)
+
+
+def _fmt_bytes(n: int | float) -> str:
+    n = float(n)
+    if n >= 1024**3:
+        return f"{n / (1024**3):.2f} GB"
+    if n >= 1024**2:
+        return f"{n / (1024**2):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{int(n)} B"
+
+
+def _print_bar(
+    *,
+    label: str,
+    frac: float,
+    detail: str = "",
+    width: int = 28,
+) -> None:
+    frac = max(0.0, min(1.0, float(frac)))
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    pct = 100.0 * frac
+    line = f"    [{bar}] {pct:5.1f}%  {label}"
+    if detail:
+        line = f"{line}  {detail}"
+    # Carriage-return update; keep under ~100 cols for typical terminals.
+    if len(line) > 100:
+        line = line[:99]
+    sys.stderr.write("\r" + line.ljust(100))
+    sys.stderr.flush()
+
+
+def _finish_bar(label: str = "done", detail: str = "") -> None:
+    _print_bar(label=label, frac=1.0, detail=detail)
+    sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def _copy_with_progress(src: Path, dest: Path, *, label: str) -> None:
+    total = src.stat().st_size
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    done = 0
+    chunk = 1024 * 1024
+    show = _use_console_progress()
+    if show:
+        print(f"  copying {label} ({_fmt_bytes(total)})...", flush=True)
+    with src.open("rb") as inp, tmp.open("wb") as out:
+        while True:
+            buf = inp.read(chunk)
+            if not buf:
+                break
+            out.write(buf)
+            done += len(buf)
+            if show and total > 0:
+                _print_bar(
+                    label=label,
+                    frac=done / total,
+                    detail=f"{_fmt_bytes(done)} / {_fmt_bytes(total)}",
+                )
+                _set_state(
+                    progress=min(0.99, done / max(total, 1)),
+                    bytes_done=done,
+                    bytes_total=total,
+                    message=f"Copying {label}…",
+                )
+    tmp.replace(dest)
+    if show:
+        _finish_bar(label=label, detail=_fmt_bytes(total))
 
 
 def model_sources_path() -> Path:
@@ -397,6 +493,11 @@ def _download_hf(
         raise RuntimeError("huggingface_hub is required for HF downloads") from exc
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    show = _use_console_progress()
+    if show:
+        print(f"  downloading {filename} from {repo_id}...", flush=True)
+        print("  (Hugging Face progress below; large files can take several minutes)", flush=True)
+
     with tempfile.TemporaryDirectory(prefix="vtm-hf-") as tmp:
         path = hf_hub_download(
             repo_id=repo_id,
@@ -407,26 +508,65 @@ def _download_hf(
         src = Path(path)
         if not src.is_file():
             raise RuntimeError(f"HF download missing file for {filename}")
-        # Atomic-ish replace
-        tmp_out = dest_path.with_suffix(dest_path.suffix + ".partial")
-        shutil.copy2(src, tmp_out)
-        tmp_out.replace(dest_path)
+        # Atomic-ish replace with progress (copy can look frozen on big checkpoints).
+        label = Path(filename).name
+        if show and src.stat().st_size >= 8 * 1024 * 1024:
+            _copy_with_progress(src, dest_path, label=label)
+        else:
+            tmp_out = dest_path.with_suffix(dest_path.suffix + ".partial")
+            shutil.copy2(src, tmp_out)
+            tmp_out.replace(dest_path)
 
     if not dest_path.is_file() or dest_path.stat().st_size < min_bytes:
         raise RuntimeError(f"Download did not produce a valid file at {dest_path}")
+    if show:
+        print(f"  OK {dest_path.name} ({_fmt_bytes(dest_path.stat().st_size)})", flush=True)
 
 
 def _download_http(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".partial")
+    show = _use_console_progress()
+    label = dest.name
     try:
         with urllib.request.urlopen(url, timeout=120) as resp, tmp.open("wb") as out:
+            total = -1
+            try:
+                total = int(resp.headers.get("Content-Length") or -1)
+            except Exception:
+                total = -1
+            if show:
+                size_hint = _fmt_bytes(total) if total > 0 else "unknown size"
+                print(f"  downloading {label} ({size_hint})...", flush=True)
+            done = 0
             while True:
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
                     break
                 out.write(chunk)
+                done += len(chunk)
+                if show:
+                    if total > 0:
+                        _print_bar(
+                            label=label,
+                            frac=done / total,
+                            detail=f"{_fmt_bytes(done)} / {_fmt_bytes(total)}",
+                        )
+                        _set_state(
+                            progress=min(0.99, done / total),
+                            bytes_done=done,
+                            bytes_total=total,
+                            message=f"Downloading {label}…",
+                        )
+                    else:
+                        _print_bar(
+                            label=label,
+                            frac=0.0,
+                            detail=f"{_fmt_bytes(done)} downloaded",
+                        )
         tmp.replace(dest)
+        if show:
+            _finish_bar(label=label, detail=_fmt_bytes(dest.stat().st_size))
     except urllib.error.URLError as exc:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
@@ -467,6 +607,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     checklist_only = "--checklist-only" in args
     dry_run = "--dry-run" in args
+    enable_console_progress(True)
 
     if checklist_only:
         from .model_checklist import print_checklist
@@ -477,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dry_run_download()
 
     print(f"DiT directory: {models_dir()}")
+    print("Progress bars below mean the download is still running (not frozen).")
     st = ensure_default_model(blocking=True)
     status = st.get("status")
     if status == "done" or has_local_checkpoints():
@@ -513,7 +655,9 @@ def _dry_run_download() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="vtm-dry-dl-"))
     print(f"Dry-run download -> temp {tmp}")
     print(f"  repo={hf_repo} assets={len(jobs)}")
+    print("  Progress bars below mean the download is still running (not frozen).")
     try:
+        enable_console_progress(True)
         for job in jobs:
             dest = tmp / str(job["dest"])
             print(f"  downloading {job['hf']} -> {job['dest']}...")
