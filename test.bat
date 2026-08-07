@@ -9,24 +9,15 @@ set PYTHONIOENCODING=utf-8
 chcp 65001 >nul
 
 set "PY="
-if exist "%~dp0..\pipeline\i1\torch_train\.venv\Scripts\python.exe" (
-  set "PY=%~dp0..\pipeline\i1\torch_train\.venv\Scripts\python.exe"
-  echo Using torch_train venv.
+if exist "%~dp0.venv-build\Scripts\python.exe" (
+  set "PY=%~dp0.venv-build\Scripts\python.exe"
+  echo Using .venv-build.
 ) else if exist "%~dp0.venv\Scripts\python.exe" (
   set "PY=%~dp0.venv\Scripts\python.exe"
-  echo Using vtm-noble\.venv.
-) else if exist "%~dp0..\UI\.venv\Scripts\python.exe" (
-  set "PY=%~dp0..\UI\.venv\Scripts\python.exe"
-  echo Using UI\.venv.
+  echo Using .venv.
 ) else (
-  echo No venv found. Creating vtm-noble\.venv and installing requirements...
-  python -m venv .venv
-  if errorlevel 1 goto :error
-  set "PY=%~dp0.venv\Scripts\python.exe"
-  "%PY%" -m pip install --upgrade pip
-  if errorlevel 1 goto :error
-  "%PY%" -m pip install --disable-pip-version-check -r requirements.txt
-  if errorlevel 1 goto :error
+  echo No venv found. Run start.bat → [1] Smart Build first.
+  goto :error
 )
 
 if not exist "%~dp0test-pose\input" (

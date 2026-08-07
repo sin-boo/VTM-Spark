@@ -90,8 +90,9 @@ from tracking_filters import FilterSettings, MotionSmoother
 
 ROOT = Path(__file__).resolve().parent
 BRIDGE_JSON_PATH = ROOT / 'live_keypoints.json'
-TORCH_TRAIN = ROOT.parents[1] / 'send2pod' / 'torch_train'
-if str(TORCH_TRAIN) not in sys.path:
+# vendor/tools/live-poser -> vendor/torch_train
+TORCH_TRAIN = ROOT.parents[1] / 'torch_train'
+if TORCH_TRAIN.is_dir() and str(TORCH_TRAIN) not in sys.path:
     sys.path.insert(0, str(TORCH_TRAIN))
 
 # Downscale huge virtual-cam frames before tracking (keeps FPS usable).

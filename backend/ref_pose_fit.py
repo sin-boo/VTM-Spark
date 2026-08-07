@@ -26,13 +26,11 @@ from .paths import (
     ensure_import_paths,
     live_poser_dir,
     pose_traker_dir,
-    repo_root,
     torch_train_dir,
     trackers_dir,
 )
 
 ensure_import_paths()
-ROOT = repo_root()
 ANIME_DET_SRC = anime_face_detector_src()
 TORCH_TRAIN = torch_train_dir()
 POSE_TRAKER = pose_traker_dir()
@@ -67,7 +65,6 @@ IRIS_MODEL_CANDIDATES = (
     POSE_TRAKER / "models" / "iris_pose.pt",
     POSE_TRAKER / "iris-model" / "models" / "iris_pose.pt",
     live_poser_dir() / "models" / "iris_pose.pt",
-    ROOT / "tools" / "live-poser" / "models" / "iris_pose.pt",
 )
 SKELETON_MODEL_CANDIDATES = (
     TRACKERS / "dwpose_v2.pt",

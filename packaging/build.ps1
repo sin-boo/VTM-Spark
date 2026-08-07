@@ -12,7 +12,8 @@ param(
   [switch]$SkipDeps,
   [switch]$ForceBundle,
   [switch]$SkipLauncher,
-  [switch]$SkipVendorSync
+  [switch]$SkipVendorSync,
+  [switch]$SyncVendor
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,17 +29,25 @@ Write-Host "    NOTE: PyInstaller will NOT analyze torch. Peak RAM should stay n
 Write-Host "==> Killing leftover VTM Noble / backend processes"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "kill-orphans.ps1")
 
-# --- Vendor (self-contained) ----------------------------------------------
-if (-not $SkipVendorSync) {
-  Write-Host "==> Syncing lean vendor/"
+# --- Vendor: use committed vendor/ by default (opt-in -SyncVendor for monorepo) ----
+$MonorepoMarker = Join-Path (Split-Path $Root -Parent) "send2pod\torch_train"
+$HasMonorepo = Test-Path -LiteralPath $MonorepoMarker
+$DoSync = $SyncVendor -and (-not $SkipVendorSync)
+if ($DoSync) {
+  if (-not $HasMonorepo) {
+    throw "-SyncVendor requires parent monorepo (send2pod/torch_train). Standalone clones use committed vendor/."
+  }
+  Write-Host "==> Syncing lean vendor/ from monorepo parent (-SyncVendor)"
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-vendor.ps1")
   if ($LASTEXITCODE -ne 0) { throw "vendor sync failed" }
+} else {
+  Write-Host "==> Using committed vendor/ (pass -SyncVendor only when refreshing from monorepo)"
 }
 if (-not (Test-Path (Join-Path $Root "vendor\torch_train\inference_keypoint.py"))) {
-  throw "vendor/torch_train missing — run packaging\sync-vendor.ps1 from the monorepo once"
+  throw "vendor/torch_train missing - re-clone the repo (vendor/ must be present)"
 }
 if (-not (Test-Path (Join-Path $Root "vendor\tools\live-poser\live_poser.py"))) {
-  throw "vendor/tools/live-poser missing"
+  throw "vendor/tools/live-poser missing - re-clone the repo (vendor/ must be present)"
 }
 
 # --- UI --------------------------------------------------------------------
@@ -235,7 +244,7 @@ if ($NeedDeps) {
 
   # If anything clobbered the CUDA wheel, put it back.
   if (-not (Test-CudaTorch)) {
-    Write-Host "==> torch was replaced by a CPU wheel — reinstalling cu128"
+    Write-Host "==> torch was replaced by a CPU wheel - reinstalling cu128"
     Install-CudaTorch
   }
 
@@ -243,11 +252,11 @@ if ($NeedDeps) {
   if ($code -ne 0) { throw "PyInstaller install failed (exit $code)" }
 
   # Windows: official PyPI triton has no wheels; torch.compile needs triton-windows.
-  # Pin to Triton's minor for the installed torch (2.11 → 3.6.x).
+  # Pin to Triton's minor for the installed torch (2.11 -> 3.6.x).
   Write-Host "==> Ensuring triton-windows for torch.compile"
   $code = Invoke-Pip @("install", "--disable-pip-version-check", "-q", "triton-windows>=3.6,<3.7")
   if ($code -ne 0) {
-    Write-Host "    WARNING: triton-windows install failed (exit $code) — Fast will stay eager"
+    Write-Host "    WARNING: triton-windows install failed (exit $code) - Fast will stay eager"
   } else {
     Write-Host "    triton-windows ready"
   }
@@ -257,7 +266,7 @@ if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages
 if (-not (Test-CudaTorch)) { throw "Build venv must have torch+cu128" }
 Write-Host "    runtime imports OK (CUDA torch)"
 
-# --- Prepare dist folder (overwrite in place — no .old stashes) ------------
+# --- Prepare dist folder (overwrite in place - no .old stashes) ------------
 function Clear-DistSoft {
   param([string]$DistDir)
   Write-Host "==> Preparing $DistDir (overwrite in place)"
@@ -296,7 +305,7 @@ function Clear-DistSoft {
     ForEach-Object {
       Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
-  Write-Host "    overwriting package (kept runtime/ — use -ForceBundle to refresh it)"
+  Write-Host "    overwriting package (kept runtime/ - use -ForceBundle to refresh it)"
 }
 
 Clear-DistSoft -DistDir $Out
@@ -347,7 +356,7 @@ $env:PYTHONPATH = $Root
 try {
   & $Py -m backend.model_download
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: DiT download failed — app will retry on first launch." -ForegroundColor Yellow
+    Write-Host "WARNING: DiT download failed - app will retry on first launch." -ForegroundColor Yellow
   }
 } finally {
   if ($null -eq $prevPyPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }

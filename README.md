@@ -44,6 +44,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1
 
 Output: `dist/VTMNoble/` (thin `VTMNoble.exe` + CUDA `runtime/` — ship the whole folder, not the exe alone).
 
+Vendor code is committed under `vendor/`. Only pass `-SyncVendor` if you are developing inside the optional parent monorepo and need to refresh vendor copies.
+
 **License**
 
 Apache License 2.0 — see [LICENSE](LICENSE).  

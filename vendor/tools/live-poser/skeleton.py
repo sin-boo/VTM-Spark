@@ -149,7 +149,7 @@ def ensure_mediapipe_lite(path: Path | None = None) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     for url in (MEDIAPIPE_LITE_URL, MEDIAPIPE_LITE_URL_FALLBACK):
         try:
-            print(f'[skeleton] Downloading MediaPipe lite → {path.name} …')
+            print(f'[skeleton] Downloading MediaPipe lite -> {path.name} ...')
             urllib.request.urlretrieve(url, path)
             if path.is_file() and path.stat().st_size > 1000:
                 return path

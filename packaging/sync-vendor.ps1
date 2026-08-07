@@ -1,5 +1,5 @@
-# Sync lean runtime deps into vendor/ (self-contained GitHub / package source).
-# Pulls from the monorepo parent when present; safe to re-run.
+# Sync lean runtime deps into vendor/ from the optional parent monorepo.
+# On a standalone GitHub clone, vendor/ is already committed - this is a no-op.
 param(
   [switch]$Force
 )
@@ -9,7 +9,22 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Repo = Split-Path $Root -Parent
 $Vendor = Join-Path $Root "vendor"
 
-Write-Host "==> Syncing lean vendor into $Vendor"
+$TorchSrc = Join-Path $Repo "send2pod\torch_train"
+$HasMonorepo = Test-Path -LiteralPath $TorchSrc
+
+if (-not $HasMonorepo) {
+  Write-Host "==> No parent monorepo detected - keeping committed vendor/"
+  if (-not (Test-Path (Join-Path $Vendor "torch_train\inference_keypoint.py"))) {
+    throw "vendor/torch_train missing. Clone the full VTM-Noble repo (vendor/ included)."
+  }
+  if (-not (Test-Path (Join-Path $Vendor "tools\live-poser\live_poser.py"))) {
+    throw "vendor/tools/live-poser missing. Clone the full VTM-Noble repo (vendor/ included)."
+  }
+  Write-Host "    vendor OK (standalone mode)"
+  exit 0
+}
+
+Write-Host "==> Syncing lean vendor into $Vendor (from monorepo parent)"
 
 function Copy-Lean {
   param(
@@ -19,7 +34,7 @@ function Copy-Lean {
   )
   if (-not (Test-Path -LiteralPath $Src)) {
     Write-Host "    skip missing: $Src"
-    return
+    return $false
   }
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
   $xd = @(".git", ".pytest_cache", "__pycache__", ".venv", "debug_frames", "training", "datasets", "tests", "Tests") + $ExcludeDirs
@@ -27,25 +42,32 @@ function Copy-Lean {
   foreach ($d in $xd) { $xdArgs += @("/XD", $d) }
   & robocopy $Src $Dest /E /MT:4 @xdArgs /XF *.pyc *.pyo /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
   Write-Host "    synced $Src -> $Dest"
+  return $true
+}
+
+function Remove-DestIfSourceExists {
+  param([string]$Src, [string]$Dest)
+  if ($Force -and (Test-Path -LiteralPath $Src) -and (Test-Path -LiteralPath $Dest)) {
+    Remove-Item -Recurse -Force $Dest
+  }
 }
 
 # --- torch_train (inference only) ------------------------------------------
-$TorchSrc = Join-Path $Repo "send2pod\torch_train"
 $TorchDest = Join-Path $Vendor "torch_train"
-if ($Force -and (Test-Path $TorchDest)) { Remove-Item -Recurse -Force $TorchDest }
-Copy-Lean -Src $TorchSrc -Dest $TorchDest -ExcludeDirs @("datasets", "training", "tests", ".pytest_cache")
+Remove-DestIfSourceExists -Src $TorchSrc -Dest $TorchDest
+[void](Copy-Lean -Src $TorchSrc -Dest $TorchDest -ExcludeDirs @("datasets", "training", "tests", ".pytest_cache"))
 
 # --- live-poser ------------------------------------------------------------
 $LpSrc = Join-Path $Repo "tools\live-poser"
 $LpDest = Join-Path $Vendor "tools\live-poser"
-if ($Force -and (Test-Path $LpDest)) { Remove-Item -Recurse -Force $LpDest }
-Copy-Lean -Src $LpSrc -Dest $LpDest
+Remove-DestIfSourceExists -Src $LpSrc -Dest $LpDest
+[void](Copy-Lean -Src $LpSrc -Dest $LpDest)
 
 # --- OpenSeeFace (flattened) -----------------------------------------------
 $OsfSrc = Join-Path $Repo "tools\vedio traker\OpenSeeFace"
 $OsfDest = Join-Path $Vendor "tools\openseeface"
-if ($Force -and (Test-Path $OsfDest)) { Remove-Item -Recurse -Force $OsfDest }
-Copy-Lean -Src $OsfSrc -Dest $OsfDest -ExcludeDirs @("Unity", "Examples", "Images", ".github")
+Remove-DestIfSourceExists -Src $OsfSrc -Dest $OsfDest
+[void](Copy-Lean -Src $OsfSrc -Dest $OsfDest -ExcludeDirs @("Unity", "Examples", "Images", ".github"))
 
 # --- lean pose-traker (ref-fit helpers + anime detector src) ---------------
 $PtDest = Join-Path $Vendor "tools\pose-traker"
@@ -98,7 +120,7 @@ foreach ($w in $weightPairs) {
   Write-Host "    weight $name"
 }
 
-# Ensure dit folder exists (empty — downloads only)
+# Ensure dit folder exists (empty - downloads only)
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "models\dit") | Out-Null
 if (-not (Test-Path (Join-Path $Root "models\dit\.gitkeep"))) {
   Set-Content -Path (Join-Path $Root "models\dit\.gitkeep") -Value ""

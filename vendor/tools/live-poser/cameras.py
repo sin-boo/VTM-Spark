@@ -38,13 +38,12 @@ def resolve_openseeface(path: Path | None = None) -> Path:
         return osf
     for cand in (
         TOOLS / 'openseeface',
-        TOOLS / 'vedio traker' / 'OpenSeeFace',
     ):
         if (cand / 'tracker.py').is_file():
             return cand.resolve()
     raise FileNotFoundError(
         'OpenSeeFace not found.\n'
-        'Expected vendor/tools/openseeface (or tools/vedio traker/OpenSeeFace).'
+        'Expected vendor/tools/openseeface.'
     )
 
 

@@ -1,4 +1,4 @@
-"""Resolve project / packaged data paths (dev vs VTM Noble install)."""
+"""Resolve project / packaged data paths (self-contained install root only)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 
 
 def package_root() -> Path:
-    """Directory that contains `backend/`, `ui/`, and `models/`.
+    """Directory that contains `backend/`, `ui/`, `vendor/`, and `models/`.
 
-    - Dev / GitHub tree: vtm-noble/ (or legacy real_stream/)
-    - Packaged thin-launcher layout: dist/VTMNoble/ (runtime python, not frozen)
+    - Dev / GitHub tree: VTM-Noble /
+    - Packaged thin-launcher layout: dist/VTMNoble/
     - Legacy PyInstaller onedir: exe folder or `_internal`
     """
     env_root = (
@@ -31,7 +31,6 @@ def package_root() -> Path:
                 (candidate / "data").is_dir()
                 or (candidate / "ui" / "dist").is_dir()
                 or (candidate / "vendor" / "torch_train").is_dir()
-                or (candidate / "send2pod" / "torch_train").is_dir()
             ):
                 return candidate
         return meipass
@@ -40,53 +39,36 @@ def package_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def repo_root() -> Path:
+    """Install / GitHub root (same as package_root — no parent monorepo)."""
+    return package_root()
+
+
 def _path_roots() -> list[Path]:
-    """Candidate roots for relative display / resolve (deduped)."""
-    roots: list[Path] = []
-    for root in (package_root(), repo_root(), package_root().parent):
-        resolved = root.resolve()
-        if resolved not in roots:
-            roots.append(resolved)
-    return roots
+    """Candidate roots for relative display / resolve (package only)."""
+    return [package_root().resolve()]
 
 
 def display_path(path: Path | str) -> str:
-    """Package- or repo-relative posix path for UI / API responses."""
+    """Package-relative posix path for UI / API responses."""
     p = Path(path)
     try:
         resolved = p.resolve() if p.is_absolute() else (package_root() / p).resolve()
     except OSError:
         return Path(path).as_posix().replace("\\", "/")
-    for root in _path_roots():
-        try:
-            return resolved.relative_to(root).as_posix()
-        except ValueError:
-            continue
-    return resolved.as_posix().replace("\\", "/")
+    root = package_root().resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return resolved.as_posix().replace("\\", "/")
 
 
 def resolve_user_path(path: Path | str) -> Path:
-    """Resolve an absolute, package-relative, or repo-relative path from the UI/API."""
+    """Resolve an absolute or package-relative path from the UI/API."""
     p = Path(path)
     if p.is_absolute():
         return p
-    for root in _path_roots():
-        candidate = (root / p).resolve()
-        if candidate.exists():
-            return candidate
     return (package_root() / p).resolve()
-
-
-def repo_root() -> Path:
-    """Monorepo root in development; install root when packaged."""
-    root = package_root()
-    if getattr(sys, "frozen", False):
-        return root
-    if (root / "vendor" / "torch_train").is_dir() or (root / "runtime").is_dir():
-        return root
-    if (root / "send2pod" / "torch_train").is_dir():
-        return root
-    return root.parent
 
 
 def data_dir() -> Path:
@@ -115,7 +97,6 @@ def models_dir() -> Path:
                 dest = preferred / src.name
                 if not dest.exists():
                     src.replace(dest)
-            # Remove empty typo directory (ignore leftovers).
             if not any(typo.iterdir()):
                 typo.rmdir()
         except OSError:
@@ -141,7 +122,7 @@ def refs_dir() -> Path:
 
 
 def trackers_dir() -> Path:
-    """Small tracker weights shipped with the app."""
+    """Small tracker weights shipped with the app / downloaded on setup."""
     preferred = models_root() / "trackers"
     preferred.mkdir(parents=True, exist_ok=True)
     if any(preferred.iterdir()):
@@ -182,22 +163,16 @@ def _first_existing(*candidates: Path, marker: str | None = None) -> Path:
 
 def torch_train_dir() -> Path:
     """DiT inference helpers (`inference_keypoint`, `models`, `vae`, …)."""
-    root = package_root()
     return _first_existing(
-        root / "vendor" / "torch_train",
-        root / "send2pod" / "torch_train",
-        repo_root() / "send2pod" / "torch_train",
+        package_root() / "vendor" / "torch_train",
         marker="inference_keypoint.py",
     )
 
 
 def tools_dir() -> Path:
-    """Vendored or monorepo tools (live-poser + OSF layout)."""
-    root = package_root()
+    """Vendored tools (live-poser + OpenSeeFace + pose-traker)."""
     return _first_existing(
-        root / "vendor" / "tools",
-        root / "tools",
-        repo_root() / "tools",
+        package_root() / "vendor" / "tools",
         marker="live-poser",
     )
 
@@ -217,30 +192,16 @@ def anime_face_detector_src() -> Path:
 def openseeface_dir() -> Path:
     return _first_existing(
         tools_dir() / "openseeface",
-        tools_dir() / "vedio traker" / "OpenSeeFace",
         marker="tracker.py",
     )
 
 
 def default_ref_candidates() -> list[Path]:
+    """Reference stills under data/refs only (user uploads / shipped defaults)."""
     return [
         refs_dir() / "default.png",
         refs_dir() / "train_char_1.png",
-        repo_root()
-        / "send2pod"
-        / "data"
-        / "train_crop"
-        / "images"
-        / "cherecter 3"
-        / "001.png",
-        repo_root() / "UI" / "outputs" / "_refs" / "train_char_1.png",
-        package_root()
-        / "send2pod"
-        / "data"
-        / "train_crop"
-        / "images"
-        / "cherecter 3"
-        / "001.png",
+        refs_dir() / "upload.png",
     ]
 
 
@@ -252,7 +213,7 @@ def default_ref_path() -> Path:
 
 
 def ensure_import_paths() -> None:
-    """Add vendored / monorepo tool roots to sys.path for tracker / DiT helpers."""
+    """Add vendored tool roots to sys.path for tracker / DiT helpers."""
     for path in (
         torch_train_dir(),
         live_poser_dir(),

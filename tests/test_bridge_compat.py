@@ -9,10 +9,10 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-TORCH = ROOT.parent / "send2pod" / "torch_train"
-LIVE = ROOT.parent / "tools" / "live-poser"
+TORCH = ROOT / "vendor" / "torch_train"
+LIVE = ROOT / "vendor" / "tools" / "live-poser"
 for p in (TORCH, ROOT, LIVE):
-    if str(p) not in sys.path:
+    if p.is_dir() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 from bridge import build_bridge_frame  # noqa: E402

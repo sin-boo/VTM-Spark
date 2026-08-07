@@ -1,4 +1,4 @@
-﻿# VTM Noble start menu — Smart Build + Start. Kill orphans is automatic.
+﻿# VTM Noble start menu - Smart Build + Start. Kill orphans is automatic.
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
@@ -130,7 +130,7 @@ function Invoke-EnsureModel {
 
   if (-not (Test-Path -LiteralPath $VenvPy)) {
     if ($Required) {
-      Write-Ansi "No .venv-build Python — run [1] Smart Build first." rose
+      Write-Ansi "No .venv-build Python - run [1] Smart Build first." rose
       return $false
     }
     return $false
@@ -141,8 +141,8 @@ function Invoke-EnsureModel {
     Write-Ansi " models\dit\VTM-ELF.pt" mint
   } else {
     Write-Host ""
-    Write-Ansi "==> Downloading DiT model (Hugging Face → models\dit\VTM-ELF.pt)" cyan
-    Write-Ansi "    sinBoo1/VTM-Elf-0.01 — this can take a few minutes on first setup." slate
+    Write-Ansi "==> Downloading DiT model (Hugging Face -> models\dit\VTM-ELF.pt)" cyan
+    Write-Ansi "    sinBoo1/VTM-Elf-0.01 - this can take a few minutes on first setup." slate
     Write-Host ""
 
     $prevPyPath = $env:PYTHONPATH
@@ -177,7 +177,7 @@ function Invoke-EnsureModel {
 
   # Full weight checklist (DiT + trackers + OpenSeeFace).
   Write-Host ""
-  Write-Ansi "==> Scanning model checklist…" cyan
+  Write-Ansi "==> Scanning model checklist..." cyan
   $prevPyPath = $env:PYTHONPATH
   $env:PYTHONPATH = $Root
   $prev = $ErrorActionPreference
@@ -199,11 +199,11 @@ function Invoke-EnsureModel {
   }
 
   if ($checkCode -eq 0) {
-    Write-Ansi "Checklist passed — all required models found." green
+    Write-Ansi "Checklist passed - all required models found." green
     return $true
   }
 
-  Write-Ansi "Checklist incomplete — some required models are missing." amber
+  Write-Ansi "Checklist incomplete - some required models are missing." amber
   if ($Required) { return $false }
   return $false
 }
@@ -230,7 +230,7 @@ function Show-Menu {
     Write-Ansi "       ensure model, then run app" slate
   } else {
     Write-Ansi "  [2]  Start" dim -NoNewline
-    Write-Ansi "       (need venv + ui\dist — use [1])" dim
+    Write-Ansi "       (need venv + ui\dist - use [1])" dim
   }
   Write-Ansi "  ------------------------------------------------" teal
   Write-Host ""
@@ -269,7 +269,7 @@ function Invoke-SmartBuild {
   Write-Host ""
   Write-Ansi "==> Clearing leftovers..." amber
   Invoke-KillOrphans
-  Write-Ansi "==> Smart build (checks deps — skips pip when venv is ready)" cyan
+  Write-Ansi "==> Smart build (checks deps - skips pip when venv is ready)" cyan
   Write-Host ""
   $code = 0
   try {

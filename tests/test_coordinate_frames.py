@@ -8,8 +8,8 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-TORCH = ROOT.parent / "send2pod" / "torch_train"
-if str(TORCH) not in sys.path:
+TORCH = ROOT / "vendor" / "torch_train"
+if TORCH.is_dir() and str(TORCH) not in sys.path:
     sys.path.insert(0, str(TORCH))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

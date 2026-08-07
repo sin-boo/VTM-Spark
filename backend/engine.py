@@ -27,7 +27,7 @@ ensure_import_paths()
 TORCH_TRAIN_DIR = torch_train_dir()
 # Resolved dynamically via models_dir() so downloads into models/dit are picked up.
 STREAM_CKPT_NAME = "VTM-ELF.pt"
-# Default still — packaged refs first, then monorepo train_crop / UI fallbacks.
+# Default still — data/refs only (user upload / shipped default).
 DEFAULT_REF = default_ref_path()
 DEFAULT_REF_FALLBACK = default_ref_path()
 
@@ -88,7 +88,7 @@ def checkpoint_label(path: Path) -> str:
 
 
 def list_stream_checkpoints() -> list[tuple[str, Path]]:
-    """List DiT checkpoints under models/dit (or monorepo fallback)."""
+    """List DiT checkpoints under models/dit."""
     ckpt_dir = models_dir()
     if not ckpt_dir.is_dir():
         return []
@@ -626,7 +626,7 @@ def neutral_keypoints() -> np.ndarray:
     upper mouth ≈ -0.26, lower mouth ≈ -0.12, chin ≈ +0.06.
     """
     out = np.zeros((NUM_KEYPOINTS, KEYPOINT_DIM), dtype=np.float32)
-    # Rough upright face — proportions from send2pod train_crop medians.
+    # Rough upright face — proportions from historical train_crop medians.
     face_xy = [
         # outline 0-4
         (-0.42, -0.05), (-0.28, 0.15), (0.00, 0.22), (0.28, 0.15), (0.42, -0.05),

@@ -19,7 +19,7 @@ from bridge import IrisPoint
 from label_schema import LEFT_EYE, RIGHT_EYE
 
 ROOT = Path(__file__).resolve().parent
-# Prefer package models/trackers (user upload / ship location), then vendor mirrors.
+# Prefer package models/trackers (HF download / ship location), then vendor mirrors.
 _PACKAGE_TRACKERS = ROOT.parent.parent.parent / 'models' / 'trackers'
 DEFAULT_IRIS_CANDIDATES = [
     _PACKAGE_TRACKERS / 'iris_pose.pt',
