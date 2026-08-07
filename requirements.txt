@@ -1,0 +1,52 @@
+# Torch is installed separately from the CUDA index (cu128) by packaging/build.ps1.
+
+# Do NOT add torch here — a bare "torch" pin overwrites the CUDA wheel with CPU.
+
+numpy
+
+pillow
+
+tqdm
+
+transformers==4.57.1
+
+diffusers==0.35.1
+
+accelerate
+
+safetensors
+
+sentencepiece
+
+huggingface_hub
+
+# LivePoser (embedded tracker) + OpenSeeFace
+
+onnxruntime
+
+opencv-python
+
+ultralytics>=8.0.0
+
+onnx>=1.12.0
+
+mediapipe>=0.10.14,<0.11
+
+# Desktop shell (FastAPI + embedded webview)
+
+fastapi
+
+uvicorn
+
+pywebview
+
+python-multipart
+
+websockets
+
+psutil
+
+# torch.compile on Windows (official triton has no Win wheels).
+# packaging/build.ps1 also installs this explicitly after requirements.
+triton-windows>=3.6,<3.7; platform_system=="Windows"
+

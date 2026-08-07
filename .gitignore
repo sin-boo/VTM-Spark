@@ -1,0 +1,49 @@
+# VTM Noble — local / package artifacts (do not push)
+.venv/
+.venv-build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Builds
+build/
+dist/
+*.egg-info/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# Runtime outputs / logs
+outputs/
+*.log
+vtm_noble.log
+real_stream.log
+
+# DiT weights (download into models/dit — never commit)
+models/dit/**
+!models/dit/.gitkeep
+# Typo folder leftover (correct path is models/dit)
+models/iamge/
+
+# User reference uploads (local only)
+data/refs/**
+!data/refs/.gitkeep
+
+# Large local caches
+data/models/
+**/__pycache__/
+
+# Prefer models/trackers (downloaded from HF). Skip duplicate vendor copies.
+vendor/tools/live-poser/models/*.pt
+vendor/tools/live-poser/models/*.onnx
+vendor/tools/live-poser/models/*.task
+vendor/tools/pose-traker/**/iris_pose.pt
+vendor/tools/pose-traker/**/dwpose_v2.pt
+vendor/tools/pose-traker/**/dwpose_v2.onnx
+
+# Local experiments
+test-pose/
+_bench_fast.py

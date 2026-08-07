@@ -1,0 +1,82 @@
+[project]
+name = "anime-face-detector"
+version = "0.1.0"
+description = "Anime Face Detector using YOLOv8 and HRNetV2 (pure PyTorch)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "hysts" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.21.3",
+    "opencv-python-headless>=4.5.4.58",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "huggingface-hub>=0.20.0",
+    "ultralytics>=8.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hysts/anime-face-detector"
+
+[project.optional-dependencies]
+demo = ["gradio>=5.0.0"]
+dev = [
+    "poethepoet==0.40.0",
+    "pre-commit>=3.0.0",
+    "pytest>=9.0.0",
+    "ruff>=0.8.0",
+    "ty==0.0.14",
+]
+legacy = [
+    "mmcv==2.1.0",
+    "mmdet==3.3.0",
+    "mmengine==0.10.7",
+    "mmpose==1.3.2",
+]
+
+[dependency-groups]
+demo = ["anime-face-detector[demo]"]
+dev = ["anime-face-detector[dev]"]
+legacy = ["anime-face-detector[legacy]"]
+
+[tool.uv]
+default-groups = ["dev"]
+python-preference = "only-managed"
+package = true
+
+[tool.uv.extra-build-dependencies]
+chumpy = ["pip"]
+xtcocotools = ["numpy"]
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B028", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"anime_face_detector/src/configs/**/*.py" = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.poe]
+executor = { type = "uv", no-project = true }
+verbosity = 0
+
+[tool.poe.tasks]
+download_image_png = "curl -L https://private-user-images.githubusercontent.com/3664/542476758-9d9898a7-ecc0-4628-b28c-0f359ee09204.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3Njk3Mjc2MTgsIm5iZiI6MTc2OTcyNzMxOCwicGF0aCI6Ii8zNjY0LzU0MjQ3Njc1OC05ZDk4OThhNy1lY2MwLTQ2MjgtYjI4Yy0wZjM1OWVlMDkyMDQucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDEyOSUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAxMjlUMjI1NTE4WiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9OTczYmRiODk4NGJjMmQ4Mjg0ODk1YWVkNmVlZjM4MzIzZmY4MmI1YWE2YzY0OTNhMGIyM2U4Yjg5M2I5MGE3YyZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.C-5qvmA7QX4raSNASL-Z0ygDsDeBsAhbq2rDKJHJZes -o tests/assets/image.png"
+precommit = ["sync", "ty_check", "ruff_fix", "test"]
+ruff_fix = "ruff check --fix"
+sync = "uv sync"
+test = "pytest"
+ty_check = "ty check src"
+
+[tool.ty.src]
+exclude = [".venv/**", "venv/**", "build/**"]

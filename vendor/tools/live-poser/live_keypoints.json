@@ -1,0 +1,319 @@
+{
+  "t": 1785463661.821,
+  "schema": "KEYPOINT_SCHEMA",
+  "shape": [
+    37,
+    4
+  ],
+  "image_wh": [
+    640,
+    480
+  ],
+  "mirrored": false,
+  "iris_method": "none",
+  "skeleton_method": "mediapipe_pose_lite_held",
+  "pose": {},
+  "meta": {
+    "fps": 17.30615944317909,
+    "body_lost": true,
+    "note": "face_lost_skeleton_held"
+  },
+  "keypoints": [
+    {
+      "i": 0,
+      "name": "face_0",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 1,
+      "name": "face_1",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 2,
+      "name": "face_2",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 3,
+      "name": "face_3",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 4,
+      "name": "face_4",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 5,
+      "name": "face_5",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 6,
+      "name": "face_6",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 7,
+      "name": "face_7",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 8,
+      "name": "face_8",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 9,
+      "name": "face_9",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 10,
+      "name": "face_10",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 11,
+      "name": "face_11",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 12,
+      "name": "face_12",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 13,
+      "name": "face_13",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 14,
+      "name": "face_14",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 15,
+      "name": "face_15",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 16,
+      "name": "face_16",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 17,
+      "name": "face_17",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 18,
+      "name": "face_18",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 19,
+      "name": "face_19",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 20,
+      "name": "face_20",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 21,
+      "name": "face_21",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 22,
+      "name": "face_22",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 23,
+      "name": "face_23",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 24,
+      "name": "face_24",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 25,
+      "name": "face_25",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 26,
+      "name": "face_26",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 27,
+      "name": "face_27",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 28,
+      "name": "right_iris",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 29,
+      "name": "left_iris",
+      "x": 0.0,
+      "y": 0.0,
+      "score": 0.0,
+      "visible": false
+    },
+    {
+      "i": 30,
+      "name": "nose",
+      "x": 154.91,
+      "y": 340.64,
+      "score": 0.968,
+      "visible": true
+    },
+    {
+      "i": 31,
+      "name": "neck",
+      "x": 151.43,
+      "y": 280.16,
+      "score": 0.97,
+      "visible": true
+    },
+    {
+      "i": 32,
+      "name": "right_shoulder",
+      "x": 174.63,
+      "y": 290.55,
+      "score": 0.976,
+      "visible": true
+    },
+    {
+      "i": 33,
+      "name": "right_elbow",
+      "x": 211.96,
+      "y": 223.41,
+      "score": 0.493,
+      "visible": false
+    },
+    {
+      "i": 34,
+      "name": "left_shoulder",
+      "x": 128.23,
+      "y": 277.19,
+      "score": 0.97,
+      "visible": true
+    },
+    {
+      "i": 35,
+      "name": "left_elbow",
+      "x": 147.77,
+      "y": 210.19,
+      "score": 0.512,
+      "visible": true
+    },
+    {
+      "i": 36,
+      "name": "chest",
+      "x": 151.43,
+      "y": 294.08,
+      "score": 0.97,
+      "visible": true
+    }
+  ]
+}

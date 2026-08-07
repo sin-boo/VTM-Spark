@@ -1,0 +1,6 @@
+# Keep vendor committed; only ignore local junk
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.pyc

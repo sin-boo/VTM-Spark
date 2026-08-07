@@ -1,0 +1,57 @@
+{
+  "enabled": true,
+  "message": "Downloads DiT + trackers + OpenSeeFace from Hugging Face on setup.",
+  "hf_repo": "sinBoo1/VTM-Elf-0.01",
+  "hf_revision": "main",
+  "files": [
+    "VTM-ELF.pt"
+  ],
+  "assets": [
+    {
+      "hf": "VTM-ELF.pt",
+      "dest": "models/dit/VTM-ELF.pt",
+      "min_bytes": 1000000
+    },
+    {
+      "hf": "trackers/iris_pose.pt",
+      "dest": "models/trackers/iris_pose.pt",
+      "min_bytes": 1000000
+    },
+    {
+      "hf": "trackers/dwpose_v2.pt",
+      "dest": "models/trackers/dwpose_v2.pt",
+      "min_bytes": 1000000
+    },
+    {
+      "hf": "trackers/pose_landmarker_lite.task",
+      "dest": "models/trackers/pose_landmarker_lite.task",
+      "min_bytes": 100000
+    },
+    {
+      "hf": "openseeface/lm_model3_opt.onnx",
+      "dest": "vendor/tools/openseeface/models/lm_model3_opt.onnx",
+      "min_bytes": 1000000
+    },
+    {
+      "hf": "openseeface/retinaface_640x640_opt.onnx",
+      "dest": "vendor/tools/openseeface/models/retinaface_640x640_opt.onnx",
+      "min_bytes": 100000
+    },
+    {
+      "hf": "openseeface/mnv3_detection_opt.onnx",
+      "dest": "vendor/tools/openseeface/models/mnv3_detection_opt.onnx",
+      "min_bytes": 100000
+    },
+    {
+      "hf": "openseeface/mnv3_gaze32_split_opt.onnx",
+      "dest": "vendor/tools/openseeface/models/mnv3_gaze32_split_opt.onnx",
+      "min_bytes": 100000
+    },
+    {
+      "hf": "openseeface/priorbox_640x640.json",
+      "dest": "vendor/tools/openseeface/models/priorbox_640x640.json",
+      "min_bytes": 100
+    }
+  ],
+  "http_files": []
+}

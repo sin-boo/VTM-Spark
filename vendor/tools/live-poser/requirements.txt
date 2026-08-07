@@ -1,0 +1,10 @@
+numpy>=1.19.0
+opencv-python>=4.5.0
+onnxruntime>=1.8.0
+Pillow>=8.0.0
+# Face iris (optional) + YOLO fallback body
+ultralytics>=8.0.0
+onnx>=1.12.0
+# Dedicated human body tracker
+mediapipe>=0.10.14,<0.11
+# tkinter is included with standard Python on Windows
