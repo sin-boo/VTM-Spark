@@ -92,12 +92,13 @@ function Invoke-RobocopyWithProgress {
   ) + $ExtraArgs + @(
     "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np"
   )
+  $argString = Format-ProcessArgumentList -Args $argList
 
   $stdoutLog = [System.IO.Path]::GetTempFileName()
   $stderrLog = [System.IO.Path]::GetTempFileName()
   try {
     $p = Start-Process -FilePath "robocopy.exe" `
-      -ArgumentList $argList `
+      -ArgumentList $argString `
       -NoNewWindow -PassThru `
       -RedirectStandardOutput $stdoutLog `
       -RedirectStandardError $stderrLog
@@ -141,6 +142,24 @@ function Invoke-RobocopyWithProgress {
   }
 }
 
+function Format-ProcessArgumentList {
+  <#
+  .SYNOPSIS
+    Build a single Start-Process command-line string (array ArgumentList is unreliable).
+  #>
+  param([Parameter(Mandatory = $true)][string[]]$Args)
+  $parts = foreach ($a in @($Args)) {
+    if ($null -eq $a) { continue }
+    $s = "$a"
+    if ($s -match '[\s"]') {
+      '"' + ($s -replace '"', '\"') + '"'
+    } else {
+      $s
+    }
+  }
+  return (($parts) -join " ")
+}
+
 function Invoke-ProcessWithHeartbeat {
   <#
   .SYNOPSIS
@@ -154,8 +173,9 @@ function Invoke-ProcessWithHeartbeat {
   )
 
   Write-LongStepHint "$Activity"
-  Write-LongStepHint "Live output below. If quiet for a bit, a heartbeat keeps the line alive."
+  Write-LongStepHint "Live output below. A heartbeat appears if this step goes quiet."
 
+  $argString = Format-ProcessArgumentList -Args $ArgumentList
   $stdoutLog = [System.IO.Path]::GetTempFileName()
   $stderrLog = [System.IO.Path]::GetTempFileName()
   $lastBeat = Get-Date
@@ -164,7 +184,7 @@ function Invoke-ProcessWithHeartbeat {
 
   try {
     $p = Start-Process -FilePath $FilePath `
-      -ArgumentList $ArgumentList `
+      -ArgumentList $argString `
       -NoNewWindow -PassThru `
       -RedirectStandardOutput $stdoutLog `
       -RedirectStandardError $stderrLog
@@ -183,7 +203,13 @@ function Invoke-ProcessWithHeartbeat {
         $chunk = $reader.ReadToEnd()
         $Pos.Value = $fs.Position
         if (-not $chunk) { return @() }
-        return @($chunk -split "`r?`n" | Where-Object { $_ -ne "" })
+        # pip/npm progress uses \r; keep the latest segment of each update only.
+        $chunk = $chunk -replace "`r`n", "`n" -replace "`r", "`n"
+        return @(
+          $chunk -split "`n" |
+            ForEach-Object { $_.TrimEnd() } |
+            Where-Object { $_.Trim() -ne "" }
+        )
       } finally {
         $fs.Close()
       }
@@ -211,7 +237,6 @@ function Invoke-ProcessWithHeartbeat {
     }
     $p.WaitForExit()
 
-    # Drain remaining output
     foreach ($line in @(Read-NewLines -LogPath $stdoutLog -Pos ([ref]$outPos))) {
       if ($line -match '^(WARNING:|WARN:)') { continue }
       Write-Host $line
@@ -224,5 +249,34 @@ function Invoke-ProcessWithHeartbeat {
     return [int]$p.ExitCode
   } finally {
     Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Invoke-NativeWithHeartbeat {
+  <#
+  .SYNOPSIS
+    Run via the call operator so TTY progress bars (pip/npm) work.
+    Avoid Start-Process redirection — that turns progress into blank scrolling lines.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+    [string]$Activity = "Working",
+    [int]$HeartbeatSeconds = 12
+  )
+
+  Write-LongStepHint "$Activity"
+  Write-LongStepHint "Progress should update live below (large downloads can take several minutes)."
+  # HeartbeatSeconds reserved for API compatibility with callers.
+  $null = $HeartbeatSeconds
+
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $FilePath @ArgumentList
+    if ($null -eq $LASTEXITCODE) { return 0 }
+    return [int]$LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
   }
 }

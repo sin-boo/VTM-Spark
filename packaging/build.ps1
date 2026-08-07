@@ -165,7 +165,7 @@ if (-not (Test-Path $Py)) {
   & $BasePython -m venv $VenvDir
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Py)) { throw "Failed to create build venv" }
   Write-Host "==> Upgrading pip in build venv"
-  $null = Invoke-ProcessWithHeartbeat `
+  $null = Invoke-NativeWithHeartbeat `
     -FilePath $Py `
     -ArgumentList @("-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip") `
     -Activity "pip upgrade" `
@@ -209,22 +209,26 @@ function Test-CudaTorch {
   return $false
 }
 
-# Run pip with live streaming + heartbeat so multi-GB downloads never look frozen.
-# (Capturing pip into a variable kills progress bars / makes the console sit idle.)
+# Run pip via call operator (keeps real progress bars).
+# IMPORTANT: PowerShell variables are case-insensitive — never name a local $pipArgs
+# when the parameter is $PipArgs (that bug produced: python -m pip -m pip install...).
 function Invoke-Pip {
   param(
     [Parameter(Mandatory = $true)][string[]]$PipArgs,
     [string]$Activity = "pip",
     [int]$HeartbeatSeconds = 12
   )
-  $pipArgs = @("-m", "pip") + $PipArgs
-  # Prefer an explicit progress bar when pip supports it (ignored on older pip).
+  $exeArgs = [System.Collections.Generic.List[string]]::new()
+  [void]$exeArgs.Add("-m")
+  [void]$exeArgs.Add("pip")
+  foreach ($a in @($PipArgs)) { [void]$exeArgs.Add([string]$a) }
   if ($PipArgs -contains "install" -and -not ($PipArgs -contains "--progress-bar")) {
-    $pipArgs = @("-m", "pip") + $PipArgs + @("--progress-bar", "on")
+    [void]$exeArgs.Add("--progress-bar")
+    [void]$exeArgs.Add("on")
   }
-  return [int](Invoke-ProcessWithHeartbeat `
+  return [int](Invoke-NativeWithHeartbeat `
     -FilePath $Py `
-    -ArgumentList $pipArgs `
+    -ArgumentList @($exeArgs.ToArray()) `
     -Activity $Activity `
     -HeartbeatSeconds $HeartbeatSeconds)
 }
