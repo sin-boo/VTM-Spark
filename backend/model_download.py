@@ -31,12 +31,24 @@ _MIN_CKPT_BYTES = 1_000_000
 
 # When True, print ASCII progress to stderr (Smart Build / CLI). Off inside the live app UI.
 _console_progress = False
+_progress_line_len = 0
+_progress_last_newline_at = 0.0
+# Cap hard so IDE terminals (RawUI often reports 120 while the panel is narrower)
+# cannot wrap every \r update into a scroll waterfall.
+_PROGRESS_MAX_COLS = 76
 
 
 def _use_console_progress() -> bool:
     return bool(_console_progress) or (
         stream_runtime_is_idle() and (sys.stderr.isatty() or sys.stdout.isatty())
     )
+
+
+def _progress_supports_inplace() -> bool:
+    try:
+        return bool(sys.stderr.isatty())
+    except Exception:
+        return False
 
 
 def stream_runtime_is_idle() -> bool:
@@ -70,7 +82,10 @@ def _print_bar(
     frac: float,
     detail: str = "",
     width: int = 28,
+    force: bool = False,
 ) -> None:
+    global _progress_line_len, _progress_last_newline_at
+
     frac = max(0.0, min(1.0, float(frac)))
     filled = int(width * frac)
     bar = "#" * filled + "-" * (width - filled)
@@ -78,17 +93,37 @@ def _print_bar(
     line = f"    [{bar}] {pct:5.1f}%  {label}"
     if detail:
         line = f"{line}  {detail}"
-    # Carriage-return update; keep under ~100 cols for typical terminals.
-    if len(line) > 100:
-        line = line[:99]
-    sys.stderr.write("\r" + line.ljust(100))
+    if len(line) >= _PROGRESS_MAX_COLS:
+        line = line[: _PROGRESS_MAX_COLS - 1]
+
+    if not _progress_supports_inplace():
+        # Redirected stderr: \r does not overwrite — throttle to avoid spam.
+        now = time.monotonic()
+        if (
+            not force
+            and (now - _progress_last_newline_at) < 1.5
+            and frac < 0.995
+        ):
+            return
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+        _progress_last_newline_at = now
+        _progress_line_len = 0
+        return
+
+    pad = max(0, _progress_line_len - len(line))
+    sys.stderr.write("\r" + line + (" " * pad))
     sys.stderr.flush()
+    _progress_line_len = len(line)
 
 
 def _finish_bar(label: str = "done", detail: str = "") -> None:
-    _print_bar(label=label, frac=1.0, detail=detail)
-    sys.stderr.write("\n")
-    sys.stderr.flush()
+    global _progress_line_len
+    _print_bar(label=label, frac=1.0, detail=detail, force=True)
+    if _progress_supports_inplace():
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+    _progress_line_len = 0
 
 
 def _copy_with_progress(src: Path, dest: Path, *, label: str) -> None:

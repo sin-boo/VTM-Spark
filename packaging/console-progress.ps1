@@ -18,16 +18,62 @@ function Format-ByteSize {
   return "$Bytes B"
 }
 
+# Last in-place progress line length (for clearing leftovers without full-width pad).
+$script:ProgressLineLen = 0
+$script:ProgressLastNewlineAt = [datetime]::MinValue
+
+function Test-ProgressSupportsInPlace {
+  <#
+  .SYNOPSIS
+    True when carriage-return overwrite is likely to work (real console, not redirected).
+  #>
+  try {
+    if ([Console]::IsOutputRedirected) { return $false }
+  } catch { }
+  # Cursor/VS Code / some hosts report RawUI width but still redirect agent shells.
+  # Prefer in-place when we have an interactive ConsoleHost and no redirect flag.
+  try {
+    if ($Host.Name -ne "ConsoleHost") { return $false }
+  } catch {
+    return $false
+  }
+  return $true
+}
+
+function Get-ProgressMaxCols {
+  <#
+  .SYNOPSIS
+    Safe column budget for a single progress line.
+    Never use full RawUI width — IDE terminals often report 120 while the panel is narrower,
+    which wraps every update and scrolls the console instead of showing one bar.
+  #>
+  $cols = 72
+  try {
+    $w = [Console]::WindowWidth
+    if ($w -gt 20) { $cols = $w - 1 }
+  } catch {
+    try {
+      if ($Host.UI.RawUI -and $Host.UI.RawUI.WindowSize.Width -gt 20) {
+        $cols = $Host.UI.RawUI.WindowSize.Width - 1
+      }
+    } catch { }
+  }
+  # Cap hard: keep the bar on one visual row even when RawUI lies about width.
+  return [Math]::Max(40, [Math]::Min(76, $cols))
+}
+
 function Write-ProgressLine {
   <#
   .SYNOPSIS
     Overwrite the current console line with an ASCII progress bar.
+    Falls back to throttled newlines when stdout is redirected / non-TTY.
   #>
   param(
     [ValidateRange(0, 100)][double]$Percent,
     [string]$Label = "",
     [string]$Detail = "",
-    [int]$Width = 28
+    [int]$Width = 28,
+    [switch]$Force
   )
   $pct = [Math]::Max(0.0, [Math]::Min(100.0, $Percent))
   $filled = [int][Math]::Floor($Width * $pct / 100.0)
@@ -35,18 +81,34 @@ function Write-ProgressLine {
   $bar = ("#" * $filled) + ("-" * ($Width - $filled))
   $line = "    [{0}] {1,5:N1}%  {2}" -f $bar, $pct, $Label
   if ($Detail) { $line = "$line  $Detail" }
-  $cols = 100
-  try {
-    if ($Host.UI.RawUI -and $Host.UI.RawUI.WindowSize.Width -gt 20) {
-      $cols = [Math]::Max(40, $Host.UI.RawUI.WindowSize.Width - 1)
-    }
-  } catch { }
+
+  $cols = Get-ProgressMaxCols
   if ($line.Length -ge $cols) {
-    $line = $line.Substring(0, $cols - 1)
-  } else {
-    $line = $line.PadRight($cols)
+    $line = $line.Substring(0, [Math]::Max(1, $cols - 1))
   }
-  Write-Host "`r$line" -NoNewline
+
+  $inPlace = Test-ProgressSupportsInPlace
+  if (-not $inPlace) {
+    # Redirected / captured output: \r does not overwrite — throttle so we don't spam.
+    $now = Get-Date
+    if (-not $Force -and (($now - $script:ProgressLastNewlineAt).TotalSeconds -lt 1.5) -and $pct -lt 99.5) {
+      return
+    }
+    Write-Host $line
+    $script:ProgressLastNewlineAt = $now
+    $script:ProgressLineLen = 0
+    return
+  }
+
+  # Clear only as far as the previous render (avoids full-width pad → wrap → scroll).
+  $pad = [Math]::Max(0, $script:ProgressLineLen - $line.Length)
+  $render = $line + (" " * $pad)
+  try {
+    [Console]::Write("`r$render")
+  } catch {
+    Write-Host "`r$render" -NoNewline
+  }
+  $script:ProgressLineLen = $line.Length
 }
 
 function Complete-ProgressLine {
@@ -54,8 +116,11 @@ function Complete-ProgressLine {
     [string]$Label = "done",
     [string]$Detail = ""
   )
-  Write-ProgressLine -Percent 100 -Label $Label -Detail $Detail
-  Write-Host ""
+  Write-ProgressLine -Percent 100 -Label $Label -Detail $Detail -Force
+  if (Test-ProgressSupportsInPlace) {
+    Write-Host ""
+  }
+  $script:ProgressLineLen = 0
 }
 
 function Write-LongStepHint {
