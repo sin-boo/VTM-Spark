@@ -268,13 +268,93 @@ function Show-Menu {
   Write-Host ""
 }
 
+function Invoke-EnsureVtmNobleCam {
+  # Register bundled DirectShow filter as 'VTM Noble Cam' (UAC once).
+  $installBat = Join-Path $Root "vendor\tools\vtm_noble_cam\Install-VTMNobleCam.bat"
+  $dll64 = Join-Path $Root "vendor\tools\vtm_noble_cam\UnityCaptureFilter64.dll"
+  if (-not (Test-Path -LiteralPath $installBat) -or -not (Test-Path -LiteralPath $dll64)) {
+    Write-Ansi "==> VTM Noble Cam filters missing under vendor\tools\vtm_noble_cam" amber
+    return $false
+  }
+  if (-not (Test-Path -LiteralPath $VenvPy)) {
+    return $false
+  }
+
+  $prevPyPath = $env:PYTHONPATH
+  $env:PYTHONPATH = $Root
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $ready = $false
+  try {
+    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+    $ready = ($LASTEXITCODE -eq 0)
+  } catch {
+    $ready = $false
+  } finally {
+    $ErrorActionPreference = $prev
+    if ($null -eq $prevPyPath) {
+      Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+      $env:PYTHONPATH = $prevPyPath
+    }
+  }
+
+  if ($ready) {
+    Write-Ansi "==> Virtual camera ready:" cyan -NoNewline
+    Write-Ansi " VTM Noble Cam" mint
+    return $true
+  }
+
+  Write-Host ""
+  Write-Ansi "==> Installing virtual camera: VTM Noble Cam" cyan
+  Write-Ansi "    Approve the Windows UAC prompt once (DirectShow register)." slate
+  Write-Host ""
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    Start-Process -FilePath $installBat -WorkingDirectory (Split-Path $installBat -Parent) -Wait -Verb RunAs
+  } catch {
+    Write-Ansi "Virtual camera install failed (need admin once): $_" amber
+    Write-Ansi "You can still click Virtual camera in the app to retry." slate
+    $ErrorActionPreference = $prev
+    return $false
+  }
+  $ErrorActionPreference = $prev
+
+  Start-Sleep -Milliseconds 800
+  $prevPyPath = $env:PYTHONPATH
+  $env:PYTHONPATH = $Root
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+    $ready = ($LASTEXITCODE -eq 0)
+  } catch {
+    $ready = $false
+  } finally {
+    $ErrorActionPreference = $prev
+    if ($null -eq $prevPyPath) {
+      Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+      $env:PYTHONPATH = $prevPyPath
+    }
+  }
+
+  if ($ready) {
+    Write-Ansi "VTM Noble Cam installed." green
+    return $true
+  }
+  Write-Ansi "VTM Noble Cam not detected yet — open Virtual camera in the app after Start." amber
+  return $false
+}
+
 function Invoke-SmartBuild {
   Write-Host ""
   Write-Ansi "==> Clearing leftovers..." amber
   Invoke-KillOrphans
   $state = Get-RunState
   if ($state.HasVenv) {
-    Write-Ansi "==> Smart build (checks deps - skips pip when venv is ready)" cyan
+    Write-Ansi "==> Smart build (checks deps - installs anything missing, e.g. pyvirtualcam)" cyan
   } else {
     Write-Ansi "==> Smart build (first install - creating venv and installing deps)" cyan
   }
@@ -283,7 +363,8 @@ function Invoke-SmartBuild {
   $code = 0
   try {
     # First install: do not pass -SkipDeps so pip/torch run immediately.
-    # Later builds: -SkipDeps, and build.ps1 still installs if imports/CUDA are incomplete.
+    # Later builds: -SkipDeps, and build.ps1 still installs if imports/CUDA
+    # (or new requirements like pyvirtualcam) are incomplete.
     if ($state.HasVenv) {
       & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps
     } else {
@@ -305,6 +386,9 @@ function Invoke-SmartBuild {
 
   # Explicit setup step: fetch DiT weights into models\dit if missing.
   [void](Invoke-EnsureModel)
+
+  # Register bundled DirectShow virtual camera (VTM Noble Cam) once.
+  [void](Invoke-EnsureVtmNobleCam)
 
   Write-Host ""
   Write-Ansi "Smart Build finished." green

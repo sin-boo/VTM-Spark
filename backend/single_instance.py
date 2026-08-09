@@ -16,9 +16,9 @@ _mutex_handle = None
 
 
 def lock_path() -> Path:
-    from .paths import outputs_dir
+    from .paths import data_dir
 
-    return outputs_dir() / "vtm_noble.lock"
+    return data_dir() / "vtm_noble.lock"
 
 
 def _try_windows_mutex(name: str = "Local\\VTMNobleSingleInstance") -> bool:

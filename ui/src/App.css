@@ -87,9 +87,32 @@
   box-shadow: 0 0 0 2px rgba(239, 90, 103, 0.14);
 }
 
-.track-mirror {
+.track-cam-row {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.track-cam-field {
+  min-width: 0;
+}
+
+.track-cam-controls {
+  display: flex;
+  gap: var(--space-2);
   align-items: center;
+  min-width: 0;
+}
+
+.track-cam-controls .camera-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.track-cam-controls .btn-compact {
+  flex: 0 0 auto;
+  width: auto;
+  padding-inline: 10px;
 }
 
 .camera-select {

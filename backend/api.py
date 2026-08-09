@@ -13,7 +13,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .paths import default_ref_path, display_path, outputs_dir, refs_dir, ui_dist_dir
+from .paths import (
+    default_ref_path,
+    display_path,
+    ensure_under_models,
+    models_dir,
+    refs_dir,
+    ui_dist_dir,
+)
 from .stream import get_runtime, shutdown_runtime
 
 HOST = "127.0.0.1"
@@ -38,13 +45,19 @@ _dialog_lock = threading.Lock()
 
 
 def _pick_checkpoint_file() -> str | None:
-    """Native OS file dialog for selecting a DiT .pt checkpoint."""
+    """Native OS file dialog scoped to package ``models/`` (opens in models/dit).
+
+    Returns a package-relative path under ``models/``, or None if cancelled.
+    Raises HTTPException if the user picks a file outside ``models/``.
+    """
     with _dialog_lock:
         try:
             import tkinter as tk
             from tkinter import filedialog
         except Exception:
             return None
+        start = models_dir()
+        start.mkdir(parents=True, exist_ok=True)
         root = tk.Tk()
         root.withdraw()
         try:
@@ -53,7 +66,8 @@ def _pick_checkpoint_file() -> str | None:
             pass
         try:
             path = filedialog.askopenfilename(
-                title="Select DiT checkpoint",
+                title="Select DiT checkpoint (models/)",
+                initialdir=str(start),
                 filetypes=[
                     ("Checkpoints", "*.pt*"),
                     ("PyTorch weights", "*.pt"),
@@ -65,7 +79,13 @@ def _pick_checkpoint_file() -> str | None:
                 root.destroy()
             except Exception:
                 pass
-        return str(path).strip() or None
+        picked = str(path).strip() or None
+        if not picked:
+            return None
+        try:
+            return display_path(ensure_under_models(picked))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 
 class SettingsBody(BaseModel):
@@ -332,6 +352,21 @@ def stream_stop() -> dict[str, Any]:
     return get_runtime().status()
 
 
+@app.post("/api/virtual-cam/start")
+def virtual_cam_start() -> dict[str, Any]:
+    try:
+        get_runtime().start_virtual_cam()
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return get_runtime().status()
+
+
+@app.post("/api/virtual-cam/stop")
+def virtual_cam_stop() -> dict[str, Any]:
+    get_runtime().stop_virtual_cam()
+    return get_runtime().status()
+
+
 @app.post("/api/mesh/press")
 def mesh_press(body: MeshBody) -> dict[str, str]:
     get_runtime().mesh_press(body.x, body.y)
@@ -357,11 +392,9 @@ def mesh_reset() -> dict[str, str]:
 
 
 @app.get("/api/outputs/last")
-def last_output() -> FileResponse:
-    path = outputs_dir() / "last.png"
-    if not path.is_file():
-        raise HTTPException(404, "No output yet")
-    return FileResponse(path)
+def last_output() -> None:
+    """Disabled — frames stay in-memory / UI only; nothing is written to outputs/."""
+    raise HTTPException(404, "Output folder writes are disabled")
 
 
 @app.websocket("/api/ws")

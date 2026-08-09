@@ -140,6 +140,14 @@ export default function App() {
         onToggleStream={() =>
           run('Stream', () => (status?.streaming ? api.stopStream() : api.startStream()))
         }
+        onToggleVirtualCam={() =>
+          run('Virtual camera', async () => {
+            const next = status?.virtual_cam
+              ? await api.stopVirtualCam()
+              : await api.startVirtualCam()
+            applyStatus(next)
+          })
+        }
         onRefreshCameras={() => void refreshCameras()}
       />
 

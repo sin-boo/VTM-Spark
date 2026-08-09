@@ -71,8 +71,23 @@ def resolve_user_path(path: Path | str) -> Path:
     return (package_root() / p).resolve()
 
 
+def ensure_under_models(path: Path | str) -> Path:
+    """Resolve *path* and require it stay under the package ``models/`` tree."""
+    resolved = resolve_user_path(path).resolve()
+    root = models_root().resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Checkpoint must be inside models/ (got {display_path(resolved)})"
+        ) from exc
+    return resolved
+
+
 def data_dir() -> Path:
-    return package_root() / "data"
+    d = package_root() / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def models_root() -> Path:
@@ -102,16 +117,6 @@ def models_dir() -> Path:
         except OSError:
             pass
 
-    if any(p.is_file() and not p.name.startswith(".") for p in preferred.iterdir()):
-        return preferred
-
-    # Legacy packaged path (older installs put DiT under data/models/dit).
-    legacy_packaged = data_dir() / "models" / "dit"
-    if legacy_packaged.is_dir() and any(
-        p.is_file() and not p.name.startswith(".") for p in legacy_packaged.iterdir()
-    ):
-        return legacy_packaged
-
     return preferred
 
 
@@ -134,9 +139,8 @@ def trackers_dir() -> Path:
 
 
 def outputs_dir() -> Path:
-    d = package_root() / "outputs"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """Legacy folder — do not write app frames or logs here."""
+    return package_root() / "outputs"
 
 
 def ui_dist_dir() -> Path:

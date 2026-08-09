@@ -38,7 +38,7 @@ if str(_ROOT) not in sys.path:
 def _log_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "vtm_noble.log"
-    return _ROOT / "outputs" / "vtm_noble.log"
+    return _ROOT / "data" / "vtm_noble.log"
 
 
 def _file_log(msg: str) -> None:

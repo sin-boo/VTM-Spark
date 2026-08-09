@@ -36,7 +36,7 @@ from .live_poser_client import (
     pick_default_camera_index,
 )
 from .live_retarget import is_mouth_closed_snap
-from .paths import display_path, outputs_dir, resolve_user_path
+from .paths import display_path, ensure_under_models, resolve_user_path
 from .pose_controller import draw_keypoint_mesh, nearest_keypoint, pixels_to_normalized
 
 # Product defaults for options hidden when DEVELOPER is False.
@@ -156,6 +156,9 @@ class StreamRuntime:
             "compile_on": False,
             "compile_status": "off",
             "compile_detail": "",
+            "virtual_cam": False,
+            "virtual_cam_device": "",
+            "virtual_cam_error": "",
         }
         if not DEVELOPER:
             self._status.update(_PRODUCT_LOCKED_SETTINGS)
@@ -184,6 +187,7 @@ class StreamRuntime:
         self._prev_stream_kps: np.ndarray | None = None
         self._ema_frame: np.ndarray | None = None
         self._fast_warmed: bool = False
+        self._vcam_wanted: bool = False
         self._gen_queue: queue.Queue = queue.Queue(maxsize=1)
         self._model_load_lock = threading.Lock()
         self._worker_stop = threading.Event()
@@ -403,9 +407,9 @@ class StreamRuntime:
         ]
 
     def set_checkpoint(self, path: str | Path) -> None:
-        ckpt = resolve_user_path(path)
+        ckpt = ensure_under_models(path)
         if not ckpt.is_file():
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+            raise FileNotFoundError(f"Checkpoint not found: {display_path(ckpt)}")
         self._set_status(busy=True, message="Switching model…", error="")
         try:
             def _swap() -> None:
@@ -1004,7 +1008,61 @@ class StreamRuntime:
             raise RuntimeError("No pose available yet — start tracking or apply a reference")
         steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
         self._set_status(busy=True, message="Generating…")
-        self._enqueue_generate(steps=steps, streaming=False, save=True, keypoints=kps)
+        self._enqueue_generate(steps=steps, streaming=False, keypoints=kps)
+
+    def _vcam_frame_size(self) -> tuple[int, int]:
+        """Match DiT output resolution (not the desktop)."""
+        if self._last_image is not None:
+            w, h = self._last_image.size
+            if w > 0 and h > 0:
+                return int(w), int(h)
+        size = int(getattr(self.engine, "image_size", 768) or 768)
+        return size, size
+
+    def start_virtual_cam(self) -> None:
+        """Open bundled VTM Noble Cam at the generated-image resolution."""
+        from .vcam_device import DEVICE_NAME
+        from .virtual_cam import get_virtual_cam
+
+        w, h = self._vcam_frame_size()
+        fps = float(self.status().get("gen_fps") or 0.0)
+        if fps < 1.0:
+            fps = 15.0
+        try:
+            device = get_virtual_cam().start(w, h, fps=fps)
+        except Exception as exc:
+            self._vcam_wanted = False
+            self._set_status(
+                virtual_cam=False,
+                virtual_cam_device="",
+                virtual_cam_error=str(exc),
+                error=str(exc),
+                message="Virtual camera failed",
+            )
+            raise
+        self._vcam_wanted = True
+        self._set_status(
+            virtual_cam=True,
+            virtual_cam_device=device or DEVICE_NAME,
+            virtual_cam_error="",
+            error="",
+            message=f"Virtual camera on · {device or DEVICE_NAME} ({w}×{h})",
+        )
+        # Push last frame so OBS sees something before the next generate.
+        if self._last_image is not None:
+            get_virtual_cam().send(self._last_image)
+
+    def stop_virtual_cam(self) -> None:
+        from .virtual_cam import get_virtual_cam
+
+        self._vcam_wanted = False
+        get_virtual_cam().stop()
+        self._set_status(
+            virtual_cam=False,
+            virtual_cam_device="",
+            virtual_cam_error="",
+            message="Virtual camera off",
+        )
 
     def start_stream(self) -> None:
         if self._streaming:
@@ -1064,20 +1122,18 @@ class StreamRuntime:
             keypoints = current
         self._prev_stream_kps = current.copy()
         steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
-        self._enqueue_generate(steps=steps, streaming=True, save=False, keypoints=keypoints)
+        self._enqueue_generate(steps=steps, streaming=True, keypoints=keypoints)
 
     def _enqueue_generate(
         self,
         *,
         steps: int,
         streaming: bool,
-        save: bool,
         keypoints: np.ndarray,
     ) -> None:
         job = {
             "steps": steps,
             "streaming": streaming,
-            "save": save,
             "keypoints": np.asarray(keypoints, dtype=np.float32),
             "sanitize": "constrained",
         }
@@ -1129,10 +1185,6 @@ class StreamRuntime:
                     used_batch = np.asarray(keypoints, dtype=np.float32)
                     if used_batch.ndim == 2:
                         used_batch = used_batch[None, ...]
-
-                if job.get("save") and images:
-                    out = outputs_dir() / "last.png"
-                    images[-1].save(out)
 
                 n = max(1, len(images))
                 per = float(elapsed) / float(n) if elapsed > 0 else 0.0
@@ -1186,6 +1238,9 @@ class StreamRuntime:
         if keypoints is not None:
             self._last_overlay_kps = np.asarray(keypoints, dtype=np.float32)
         fps = (1.0 / elapsed) if elapsed > 0 else 0.0
+        # Clean RGB (pre-mesh) → virtual camera for OBS / Discord / etc.
+        if self._vcam_wanted:
+            self._push_virtual_cam(image)
         with self._lock:
             prev = float(self._status.get("gen_fps") or 0.0)
             ema = fps if prev <= 0 else (0.7 * prev + 0.3 * fps)
@@ -1214,6 +1269,41 @@ class StreamRuntime:
             self._frame_in_flight = False
             if self._streaming:
                 self._schedule_next_frame()
+
+    def _push_virtual_cam(self, image: Image.Image) -> None:
+        from .vcam_device import DEVICE_NAME
+        from .virtual_cam import get_virtual_cam
+
+        vcam = get_virtual_cam()
+        if not vcam.active:
+            try:
+                w, h = image.size if image is not None else self._vcam_frame_size()
+                fps = float(self.status().get("gen_fps") or 15.0)
+                device = vcam.start(int(w), int(h), fps=max(1.0, fps))
+                self._set_status(
+                    virtual_cam=True,
+                    virtual_cam_device=device or DEVICE_NAME,
+                    virtual_cam_error="",
+                )
+            except Exception as exc:
+                self._vcam_wanted = False
+                self._set_status(
+                    virtual_cam=False,
+                    virtual_cam_device="",
+                    virtual_cam_error=str(exc),
+                    error=str(exc),
+                )
+                return
+        vcam.send(image)
+        err = vcam.error
+        if err and self.status().get("virtual_cam"):
+            self._vcam_wanted = False
+            self._set_status(
+                virtual_cam=False,
+                virtual_cam_device="",
+                virtual_cam_error=err,
+                error=err,
+            )
 
     def _frame_payload(
         self, image: Image.Image | None, keypoints: np.ndarray | None
@@ -1342,6 +1432,10 @@ class StreamRuntime:
 
     def shutdown(self) -> None:
         self.stop_stream()
+        try:
+            self.stop_virtual_cam()
+        except Exception:
+            pass
         try:
             self.stop_tracking()
         except Exception:

@@ -177,8 +177,9 @@ Write-Host "==> Using Python: $Py"
 function Test-RuntimeImports {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
+  # Keep in sync with requirements.txt essentials (incl. virtual camera for OBS).
   & $Py -c "import importlib; bad=[]
-for m in ['torch','transformers','diffusers','fastapi','uvicorn','webview','PIL','cv2']:
+for m in ['torch','transformers','diffusers','fastapi','uvicorn','webview','PIL','cv2','pyvirtualcam']:
   try: importlib.import_module(m)
   except Exception: bad.append(m)
 raise SystemExit(1 if bad else 0)"
@@ -261,10 +262,11 @@ function Install-CudaTorch {
 }
 
 $NeedDeps = -not $SkipDeps
+$DidInstallDeps = $false
 if (-not $NeedDeps) {
   Write-Host "==> -SkipDeps set - checking imports only"
   if (-not (Test-RuntimeImports) -or -not (Test-CudaTorch)) {
-    Write-Host "    imports/CUDA incomplete - installing deps anyway"
+    Write-Host "    imports/CUDA incomplete - installing deps anyway (includes pyvirtualcam)"
     $NeedDeps = $true
   } else {
     Write-Host "    build venv imports OK - skipping pip/torch install"
@@ -272,6 +274,7 @@ if (-not $NeedDeps) {
 }
 
 if ($NeedDeps) {
+  $DidInstallDeps = $true
   # Install CUDA torch FIRST so transformers/diffusers/ultralytics see it as satisfied
   # and do not pull a CPU torch from PyPI.
   if (-not (Test-CudaTorch)) {
@@ -362,8 +365,26 @@ Clear-DistSoft -DistDir $Out
 # Copy runtime venv
 $RuntimeDest = Join-Path $Out "runtime"
 $RuntimeMarker = Join-Path $RuntimeDest "Scripts\python.exe"
+$RuntimePy = Join-Path $RuntimeDest "Scripts\python.exe"
 if ((Test-Path $RuntimeMarker) -and -not $ForceBundle) {
   Write-Host "==> runtime/ already present - skipping venv copy (use -ForceBundle to refresh)"
+  # Still sync new wheels (e.g. pyvirtualcam) into the packaged runtime when deps changed.
+  if ($DidInstallDeps -and (Test-Path -LiteralPath $RuntimePy)) {
+    Write-Host "==> Syncing requirements into existing dist runtime (new packages)"
+    $code = Invoke-ProcessWithHeartbeat `
+      -FilePath $RuntimePy `
+      -ArgumentList @(
+        "-m", "pip", "install", "--disable-pip-version-check",
+        "-r", "$Root\requirements.txt", "--progress-bar", "on"
+      ) `
+      -Activity "runtime requirements sync" `
+      -HeartbeatSeconds 12
+    if ($code -ne 0) {
+      Write-Host "    WARNING: runtime pip sync failed (exit $code) - use -ForceBundle to refresh runtime/"
+    } else {
+      Write-Host "    runtime packages updated"
+    }
+  }
 } else {
   New-Item -ItemType Directory -Force -Path $RuntimeDest | Out-Null
   Write-LongStepHint "Copy uses disk I/O (not tens of GB of RAM)."
@@ -439,29 +460,21 @@ $null = Invoke-RobocopyWithProgress `
   -ExtraArgs @("/E", "/MT:4", "/XD", "__pycache__", ".git", ".pytest_cache", "tests", "Tests", "training", "datasets", "data", "input", "/XF", "*.pyc")
 
 # Tiny launcher exe — also dropped next to start.bat for one-click run.
+# Always rebuild unless -SkipLauncher: Explorer "Date modified" on root VTMNoble.exe
+# must reflect this Smart Build (skipping left a stale  stamp while dist/ refreshed).
 $LauncherExe = Join-Path $Out "VTMNoble.exe"
 $RootExe = Join-Path $Root "VTMNoble.exe"
-$NeedLauncher = $true
 if ($SkipLauncher) {
-  $NeedLauncher = $false
   Write-Host "==> Launcher skip requested (-SkipLauncher)"
-} elseif (-not $ForceBundle -and (Test-Path -LiteralPath $RootExe)) {
-  $exeTime = (Get-Item -LiteralPath $RootExe).LastWriteTimeUtc
-  $launchSrcs = @(
-    (Join-Path $Root "packaging\launcher.py"),
-    (Join-Path $Root "packaging\launcher.spec")
-  ) | Where-Object { Test-Path -LiteralPath $_ }
-  $newestSrc = (
-    $launchSrcs | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } |
-      Sort-Object -Descending | Select-Object -First 1
-  )
-  if ($null -ne $newestSrc -and $newestSrc -le $exeTime) {
-    $NeedLauncher = $false
-    Write-Host "==> Launcher up to date - reusing root VTMNoble.exe (no PyInstaller reload)"
+  if (-not (Test-Path -LiteralPath $RootExe)) {
+    throw "No VTMNoble.exe at repo root to reuse. Re-run without -SkipLauncher."
   }
-}
-
-if ($NeedLauncher) {
+  Copy-Item -Force $RootExe $LauncherExe
+  $now = Get-Date
+  (Get-Item -LiteralPath $RootExe).LastWriteTime = $now
+  (Get-Item -LiteralPath $LauncherExe).LastWriteTime = $now
+  Write-Host "    stamped Date modified -> $now"
+} else {
   Write-Host "==> Building tiny launcher exe (stdlib only - low memory)"
   $null = Invoke-Pip -PipArgs @("install", "--disable-pip-version-check", "pyinstaller") `
     -Activity "pyinstaller" -HeartbeatSeconds 10
@@ -483,12 +496,7 @@ if ($NeedLauncher) {
   if (-not (Test-Path $built)) { throw "Launcher exe not produced" }
   Copy-Item -Force $built $LauncherExe
   Copy-Item -Force $built $RootExe
-} else {
-  if (-not (Test-Path -LiteralPath $RootExe)) {
-    throw "No VTMNoble.exe at repo root to reuse. Re-run without -SkipLauncher."
-  }
-  # dist/ was wiped (kept runtime/); put the clickable exe back into the package folder too.
-  Copy-Item -Force $RootExe $LauncherExe
+  Write-Host "    wrote $RootExe"
 }
 
 $Bat = @"
@@ -506,6 +514,44 @@ start "" "%~dp0VTMNoble.exe" %*
 "@
 Set-Content -Path (Join-Path $Root "VTMNoble.bat") -Value $RootBat -Encoding ASCII
 
+# Register VTM Noble Cam DirectShow filter (bundled Unity Capture, custom name).
+$VcamInstall = Join-Path $Root "vendor\tools\vtm_noble_cam\Install-VTMNobleCam.bat"
+if (Test-Path -LiteralPath $VcamInstall) {
+  Write-Host "==> Ensuring virtual camera device: VTM Noble Cam"
+  Write-LongStepHint "Approve UAC once if Windows asks (DirectShow registration)."
+  $prevPyPath = $env:PYTHONPATH
+  $env:PYTHONPATH = $Root
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $vcamReady = $false
+  try {
+    & $Py -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+    $vcamReady = ($LASTEXITCODE -eq 0)
+  } catch {
+    $vcamReady = $false
+  }
+  if (-not $vcamReady) {
+    try {
+      Start-Process -FilePath $VcamInstall -WorkingDirectory (Split-Path $VcamInstall -Parent) -Wait -Verb RunAs
+      Start-Sleep -Milliseconds 800
+      & $Py -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+      $vcamReady = ($LASTEXITCODE -eq 0)
+    } catch {
+      Write-Host "    WARNING: VTM Noble Cam install skipped ($_)" -ForegroundColor Yellow
+    }
+  }
+  $ErrorActionPreference = $prev
+  if ($null -eq $prevPyPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
+  else { $env:PYTHONPATH = $prevPyPath }
+  if ($vcamReady) {
+    Write-Host "    VTM Noble Cam ready"
+  } else {
+    Write-Host "    WARNING: VTM Noble Cam not registered yet - app will prompt on first use" -ForegroundColor Yellow
+  }
+} else {
+  Write-Host "==> WARNING: vendor\tools\vtm_noble_cam missing - virtual camera unavailable" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "==> Done"
 Write-Host "    Click to run:  $RootExe"
@@ -513,4 +559,5 @@ Write-Host "    (same folder as start.bat — you do not need to open dist\ )"
 Write-Host "    Package data:  $Out"
 Write-Host "    Fallback:      $Out\VTMNoble.bat"
 Write-Host "DiT models: auto-download VTM-ELF.pt into models\dit (sinBoo1/VTM-Elf-0.01)"
+Write-Host "Virtual cam: VTM Noble Cam (OBS Video Capture Device)"
 Write-Host "Supported GPUs: GeForce RTX 30 / 40 / 50 (CUDA). No AMD."

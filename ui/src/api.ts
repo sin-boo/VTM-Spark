@@ -33,6 +33,9 @@ export type AppStatus = {
   compile_on: boolean
   compile_status: string
   compile_detail: string
+  virtual_cam: boolean
+  virtual_cam_device: string
+  virtual_cam_error: string
 }
 
 export type Checkpoint = { label: string; path: string }
@@ -148,6 +151,10 @@ export const api = {
     fetch('/api/stream/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   stopStream: () =>
     fetch('/api/stream/stop', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  startVirtualCam: () =>
+    fetch('/api/virtual-cam/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  stopVirtualCam: () =>
+    fetch('/api/virtual-cam/stop', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   meshPress: (x: number, y: number) =>
     fetch('/api/mesh/press', {
       method: 'POST',

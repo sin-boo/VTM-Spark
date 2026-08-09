@@ -18,6 +18,7 @@ type Props = {
   onCalibrate: () => void
   onGenerate: () => void
   onToggleStream: () => void
+  onToggleVirtualCam: () => void
   onRefreshCameras: () => void
 }
 
@@ -32,6 +33,7 @@ export function ControlRail(props: Props) {
   const busy = Boolean(s?.busy)
   const streaming = Boolean(s?.streaming)
   const tracking = Boolean(s?.tracking)
+  const virtualCam = Boolean(s?.virtual_cam)
   const progress = Number(s?.progress ?? 0)
   const showProgress =
     busy && Boolean(s?.progress_kind) && (progress > 0 || Boolean(s?.progress_label))
@@ -170,41 +172,42 @@ export function ControlRail(props: Props) {
           />
         </div>
 
-        <div className="track-mirror">
+        <div className="track-cam-row">
           <Toggle
             label="Mirror"
             checked={Boolean(s?.mirror)}
             onChange={(v) => props.onSettings({ mirror: v })}
           />
+          <label className="field track-cam-field">
+            <span>Camera</span>
+            <div className="track-cam-controls">
+              <select
+                className="camera-select"
+                value={s?.camera_index ?? 0}
+                onChange={(e) =>
+                  props.onSettings({ camera_index: Number(e.target.value) })
+                }
+                disabled={tracking || busy}
+              >
+                {props.cameras.length === 0 && <option value={0}>Camera 0</option>}
+                {props.cameras.map((c) => (
+                  <option key={c.index} value={c.index}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn ghost btn-compact"
+                onClick={props.onRefreshCameras}
+                disabled={tracking}
+                title="Refresh cameras"
+              >
+                Refresh
+              </button>
+            </div>
+          </label>
         </div>
-
-        <label className="field">
-          <span>Camera</span>
-          <select
-            className="camera-select"
-            value={s?.camera_index ?? 0}
-            onChange={(e) =>
-              props.onSettings({ camera_index: Number(e.target.value) })
-            }
-            disabled={tracking || busy}
-          >
-            {props.cameras.length === 0 && <option value={0}>Camera 0</option>}
-            {props.cameras.map((c) => (
-              <option key={c.index} value={c.index}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <button
-          type="button"
-          className="btn ghost"
-          onClick={props.onRefreshCameras}
-          disabled={tracking}
-        >
-          Refresh
-        </button>
 
         {DEVELOPER ? (
           <div className="toggles">
@@ -248,7 +251,26 @@ export function ControlRail(props: Props) {
       </section>
 
       <section className="group">
-        <h2 className="group-title">Stream</h2>
+        <div className="group-head">
+          <h2 className="group-title">Stream</h2>
+          <span
+            className={`lamp ${streaming || virtualCam ? 'is-on' : 'is-off'}`}
+            title={
+              streaming
+                ? 'Streaming'
+                : virtualCam
+                  ? 'Virtual camera on'
+                  : 'Stream idle'
+            }
+            aria-label={
+              streaming
+                ? 'Streaming'
+                : virtualCam
+                  ? 'Virtual camera on'
+                  : 'Stream idle'
+            }
+          />
+        </div>
         <label className="field inline">
           <span>Steps</span>
           <input
@@ -351,13 +373,33 @@ export function ControlRail(props: Props) {
           </button>
           <button
             type="button"
-            className="btn"
+            className={virtualCam ? 'btn danger' : 'btn'}
+            onClick={props.onToggleVirtualCam}
+            disabled={busy && !virtualCam}
+            title="Send avatar frames to a virtual camera for OBS"
+          >
+            {virtualCam ? 'Stop virtual cam' : 'Virtual camera'}
+          </button>
+        </div>
+        <div className="row">
+          <button
+            type="button"
+            className="btn ghost"
             onClick={props.onGenerate}
             disabled={busy || streaming || Boolean(s?.fast_warming)}
           >
             Generate once
           </button>
         </div>
+        {virtualCam ? (
+          <p className="hint">
+            OBS → Video Capture Device →{' '}
+            {s?.virtual_cam_device || 'VTM Noble Cam'}
+          </p>
+        ) : null}
+        {s?.virtual_cam_error ? (
+          <p className="status-error">{s.virtual_cam_error}</p>
+        ) : null}
         {s?.fast_warming ? (
           <p className="hint">Please wait — torch.compile is still running.</p>
         ) : null}

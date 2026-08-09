@@ -46,6 +46,9 @@ websockets
 
 psutil
 
+# Virtual camera output for OBS / Discord / Zoom (Windows: OBS or Unity Capture).
+pyvirtualcam
+
 # torch.compile on Windows (official triton has no Win wheels).
 # packaging/build.ps1 also installs this explicitly after requirements.
 triton-windows>=3.6,<3.7; platform_system=="Windows"
