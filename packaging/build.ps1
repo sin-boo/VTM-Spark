@@ -214,7 +214,8 @@ function Test-CudaTorch {
 # when the parameter is $PipArgs (that bug produced: python -m pip -m pip install...).
 function Invoke-Pip {
   param(
-    [Parameter(Mandatory = $true)][string[]]$PipArgs,
+    [Parameter(Mandatory = $true)]
+    [string[]]$PipArgs,
     [string]$Activity = "pip",
     [int]$HeartbeatSeconds = 12
   )
@@ -226,22 +227,27 @@ function Invoke-Pip {
     [void]$exeArgs.Add("--progress-bar")
     [void]$exeArgs.Add("on")
   }
-  return [int](Invoke-NativeWithHeartbeat `
+  $code = Invoke-NativeWithHeartbeat `
     -FilePath $Py `
     -ArgumentList @($exeArgs.ToArray()) `
     -Activity $Activity `
-    -HeartbeatSeconds $HeartbeatSeconds)
+    -HeartbeatSeconds $HeartbeatSeconds
+  # Defensive: never let a multi-object pipeline result blow up the [int] cast.
+  if ($code -is [System.Array]) {
+    $code = $code | Select-Object -Last 1
+  }
+  return [int]$code
 }
 
 function Install-CudaTorch {
   Write-Host "==> Ensuring CUDA torch (cu128)"
   Write-LongStepHint "CUDA wheels are large (often 2+ GB). Downloads can take several minutes."
   Write-LongStepHint "Progress / heartbeat lines mean it is still working - not frozen."
-  $null = Invoke-Pip @("uninstall", "-y", "torch", "torchvision", "torchaudio") `
+  $null = Invoke-Pip -PipArgs @("uninstall", "-y", "torch", "torchvision", "torchaudio") `
     -Activity "uninstalling previous torch" `
     -HeartbeatSeconds 8
   # Avoid -q so failures and download progress stay visible. Index-only from pytorch cu128.
-  $code = Invoke-Pip @(
+  $code = Invoke-Pip -PipArgs @(
     "install", "--disable-pip-version-check",
     "torch", "torchvision",
     "--index-url", "https://download.pytorch.org/whl/cu128"
@@ -276,7 +282,7 @@ if ($NeedDeps) {
 
   Write-Host "==> Installing requirements (torch already provided by cu128 wheel)"
   Write-LongStepHint "Installing Python deps from requirements.txt (can take a few minutes)..."
-  $code = Invoke-Pip @(
+  $code = Invoke-Pip -PipArgs @(
     "install", "--disable-pip-version-check", "-r", "$Root\requirements.txt"
   ) -Activity "requirements.txt" -HeartbeatSeconds 12
   if ($code -ne 0) { throw "pip install failed (exit $code)" }
@@ -288,14 +294,14 @@ if ($NeedDeps) {
   }
 
   Write-Host "==> Ensuring PyInstaller"
-  $code = Invoke-Pip @("install", "--disable-pip-version-check", "pyinstaller") `
+  $code = Invoke-Pip -PipArgs @("install", "--disable-pip-version-check", "pyinstaller") `
     -Activity "pyinstaller" -HeartbeatSeconds 10
   if ($code -ne 0) { throw "PyInstaller install failed (exit $code)" }
 
   # Windows: official PyPI triton has no wheels; torch.compile needs triton-windows.
   # Pin to Triton's minor for the installed torch (2.11 -> 3.6.x).
   Write-Host "==> Ensuring triton-windows for torch.compile"
-  $code = Invoke-Pip @(
+  $code = Invoke-Pip -PipArgs @(
     "install", "--disable-pip-version-check", "triton-windows>=3.6,<3.7"
   ) -Activity "triton-windows" -HeartbeatSeconds 10
   if ($code -ne 0) {
@@ -361,7 +367,7 @@ if ((Test-Path $RuntimeMarker) -and -not $ForceBundle) {
 } else {
   New-Item -ItemType Directory -Force -Path $RuntimeDest | Out-Null
   Write-LongStepHint "Copy uses disk I/O (not tens of GB of RAM)."
-  Invoke-RobocopyWithProgress `
+  $null = Invoke-RobocopyWithProgress `
     -Source $VenvDir `
     -Dest $RuntimeDest `
     -Label "Copying Python runtime (venv -> dist/VTMNoble/runtime)" `
@@ -371,14 +377,14 @@ if ((Test-Path $RuntimeMarker) -and -not $ForceBundle) {
 
 # App code
 Write-Host "==> Copying app code (backend, ui/dist, data, models placeholders)"
-Invoke-RobocopyWithProgress `
+$null = Invoke-RobocopyWithProgress `
   -Source (Join-Path $Root "backend") `
   -Dest (Join-Path $Out "backend") `
   -Label "Copying backend/" `
   -ExtraArgs @("/E", "/XD", "__pycache__", ".pytest_cache", "/XF", "*.pyc")
 if (Test-Path (Join-Path $Root "ui\dist")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Out "ui\dist") | Out-Null
-  Invoke-RobocopyWithProgress `
+  $null = Invoke-RobocopyWithProgress `
     -Source (Join-Path $Root "ui\dist") `
     -Dest (Join-Path $Out "ui\dist") `
     -Label "Copying ui/dist/" `
@@ -387,7 +393,7 @@ if (Test-Path (Join-Path $Root "ui\dist")) {
 if (Test-Path (Join-Path $Root "data")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Out "data") | Out-Null
   # Keep config; skip local user uploads under data/refs and cached data/models.
-  Invoke-RobocopyWithProgress `
+  $null = Invoke-RobocopyWithProgress `
     -Source (Join-Path $Root "data") `
     -Dest (Join-Path $Out "data") `
     -Label "Copying data/" `
@@ -401,7 +407,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Out "models\dit") | Out-Nu
 Set-Content -Path (Join-Path $Out "models\dit\.gitkeep") -Value ""
 if (Test-Path (Join-Path $Root "models\trackers")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Out "models\trackers") | Out-Null
-  Invoke-RobocopyWithProgress `
+  $null = Invoke-RobocopyWithProgress `
     -Source (Join-Path $Root "models\trackers") `
     -Dest (Join-Path $Out "models\trackers") `
     -Label "Copying models/trackers/" `
@@ -426,7 +432,7 @@ try {
 # Runtime downloads into <install>/models/dit via data/model_sources.json.
 
 # Lean vendor only (never monorepo tools/ datasets)
-Invoke-RobocopyWithProgress `
+$null = Invoke-RobocopyWithProgress `
   -Source (Join-Path $Root "vendor") `
   -Dest (Join-Path $Out "vendor") `
   -Label "Copying vendor/ (lean)" `
@@ -457,7 +463,7 @@ if ($SkipLauncher) {
 
 if ($NeedLauncher) {
   Write-Host "==> Building tiny launcher exe (stdlib only - low memory)"
-  $null = Invoke-Pip @("install", "--disable-pip-version-check", "pyinstaller") `
+  $null = Invoke-Pip -PipArgs @("install", "--disable-pip-version-check", "pyinstaller") `
     -Activity "pyinstaller" -HeartbeatSeconds 10
   $LaunchWork = Join-Path $Root "build\launcher"
   New-Item -ItemType Directory -Force -Path $LaunchWork | Out-Null

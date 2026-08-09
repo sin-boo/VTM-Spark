@@ -272,12 +272,23 @@ function Invoke-SmartBuild {
   Write-Host ""
   Write-Ansi "==> Clearing leftovers..." amber
   Invoke-KillOrphans
-  Write-Ansi "==> Smart build (checks deps - skips pip when venv is ready)" cyan
-  Write-Ansi "    Long steps (CUDA torch, copies, model download) show progress bars." slate
+  $state = Get-RunState
+  if ($state.HasVenv) {
+    Write-Ansi "==> Smart build (checks deps - skips pip when venv is ready)" cyan
+  } else {
+    Write-Ansi "==> Smart build (first install - creating venv and installing deps)" cyan
+  }
+  Write-Ansi "    Long steps show host progress bars; pip keeps its own download bar." slate
   Write-Host ""
   $code = 0
   try {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps
+    # First install: do not pass -SkipDeps so pip/torch run immediately.
+    # Later builds: -SkipDeps, and build.ps1 still installs if imports/CUDA are incomplete.
+    if ($state.HasVenv) {
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps
+    } else {
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript
+    }
     $code = [int]$LASTEXITCODE
   } catch {
     Write-Ansi "Build threw: $_" rose
@@ -347,6 +358,8 @@ function Invoke-StartApp {
   Write-Host ""
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
+  $prevPyPath = $env:PYTHONPATH
+  $env:PYTHONPATH = $Root
   try {
     & $VenvPy -m backend --ui webview
     $code = $LASTEXITCODE
@@ -355,6 +368,11 @@ function Invoke-StartApp {
     $code = 1
   } finally {
     $ErrorActionPreference = $prev
+    if ($null -eq $prevPyPath) {
+      Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+      $env:PYTHONPATH = $prevPyPath
+    }
   }
   Write-Host ""
   if ($code -and $code -ne 0) {
