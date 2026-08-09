@@ -145,7 +145,7 @@ function Invoke-EnsureModel {
     Write-Host ""
     Write-Ansi "==> Downloading DiT model (Hugging Face -> models\dit\VTM-ELF.pt)" cyan
     Write-Ansi "    sinBoo1/VTM-Elf-0.01 - first setup can take several minutes." slate
-    Write-Ansi "    Progress bars / heartbeat lines mean it is still working - not frozen." slate
+    Write-Ansi "    Progress below means it is still working - not frozen." slate
     Write-Host ""
 
     $prevPyPath = $env:PYTHONPATH
@@ -278,7 +278,7 @@ function Invoke-SmartBuild {
   } else {
     Write-Ansi "==> Smart build (first install - creating venv and installing deps)" cyan
   }
-  Write-Ansi "    Long steps show host progress bars; pip keeps its own download bar." slate
+  Write-Ansi "    Long steps use each tool's own progress (pip/npm); copies print start/done." slate
   Write-Host ""
   $code = 0
   try {

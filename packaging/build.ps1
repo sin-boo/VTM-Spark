@@ -242,7 +242,7 @@ function Invoke-Pip {
 function Install-CudaTorch {
   Write-Host "==> Ensuring CUDA torch (cu128)"
   Write-LongStepHint "CUDA wheels are large (often 2+ GB). Downloads can take several minutes."
-  Write-LongStepHint "Progress / heartbeat lines mean it is still working - not frozen."
+  Write-LongStepHint "pip shows its own download progress below."
   $null = Invoke-Pip -PipArgs @("uninstall", "-y", "torch", "torchvision", "torchaudio") `
     -Activity "uninstalling previous torch" `
     -HeartbeatSeconds 8
@@ -416,7 +416,7 @@ if (Test-Path (Join-Path $Root "models\trackers")) {
 
 # Download default DiT into source models/dit (packaged app also downloads on first launch).
 Write-Host "==> Ensuring DiT checkpoint (models/dit/VTM-ELF.pt from Hugging Face)"
-Write-LongStepHint "Large model download - console shows a byte progress bar."
+Write-LongStepHint "Large model download - Hugging Face / tqdm progress appears below when fetching."
 $prevPyPath = $env:PYTHONPATH
 $env:PYTHONPATH = $Root
 try {
