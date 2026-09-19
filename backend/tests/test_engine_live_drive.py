@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from engine import apply_live_deltas_to_ref, neutral_keypoints
-from live_poser_client import (
+from backend.engine import apply_live_deltas_to_ref, neutral_keypoints
+from backend.live_poser_client import (
     body_method_kind,
     body_tracking_active,
     body_tracking_label,
@@ -255,3 +255,79 @@ def test_mismatched_shoulder_motion_is_relative() -> None:
     # Still character-proportioned, not human-wide.
     assert abs(_shoulder_width(out) - ref_sw) < 0.08
     assert _shoulder_width(out) < _shoulder_width(origin) - 0.15
+
+
+def test_desk_webcam_elbow_delta_reaches_character() -> None:
+    """A ~10° elbow swing from a close-up webcam must show up on the overlay.
+
+    3° deadzone + 0.65 damp previously ate desk-cam arm motion and left the
+    character on the reference T-pose while MediaPipe elbows were moving.
+    """
+    ref = neutral_keypoints()
+    origin = neutral_keypoints()
+    live = origin.copy()
+    sh = live[32, :2].copy()
+    bone = live[33, :2] - sh
+    ang = np.radians(10.0)
+    c, s = float(np.cos(ang)), float(np.sin(ang))
+    live[33, 0] = float(sh[0] + c * bone[0] - s * bone[1])
+    live[33, 1] = float(sh[1] + s * bone[0] + c * bone[1])
+    out = apply_live_deltas_to_ref(
+        ref,
+        live,
+        origin,
+        body_method="mediapipe_pose_lite",
+        body_lost=False,
+        live_coord_space="norm_crop",
+        origin_coord_space="norm_crop",
+    )
+    dist = float(np.linalg.norm(out[33, :2] - ref[33, :2]))
+    assert dist > 0.04
+
+
+def test_live_face_up_keeps_neck_attached() -> None:
+    ref = neutral_keypoints()
+    origin = neutral_keypoints()
+    live = origin.copy()
+    live[list(range(28)) + [28, 29], 1] -= 0.22
+    out = apply_live_deltas_to_ref(
+        ref,
+        live,
+        origin,
+        body_method="mediapipe_pose_lite",
+        body_lost=False,
+        live_coord_space="norm_crop",
+        origin_coord_space="norm_crop",
+    )
+    rest = float(np.linalg.norm(ref[31, :2] - ref[2, :2]))
+    now = float(np.linalg.norm(out[31, :2] - out[2, :2]))
+    assert now <= rest * 1.30 + 1e-3
+    assert float(out[31, 1]) >= float(out[2, 1]) - 0.01
+    assert float(np.linalg.norm(out[30, :2] - out[15, :2])) < 0.04
+
+
+def test_held_body_follows_moved_face() -> None:
+    ref = neutral_keypoints()
+    origin = neutral_keypoints()
+    live = origin.copy()
+    live[list(range(28)) + [28, 29], 1] -= 0.20
+    prev = ref[30:37].copy()
+    out = apply_live_deltas_to_ref(
+        ref,
+        live,
+        origin,
+        body_method="mediapipe_pose_lite_held",
+        body_lost=True,
+        prev_body=prev,
+        live_coord_space="norm_crop",
+        origin_coord_space="norm_crop",
+    )
+    rest = float(np.linalg.norm(ref[31, :2] - ref[2, :2]))
+    now = float(np.linalg.norm(out[31, :2] - out[2, :2]))
+    assert now <= rest * 1.30 + 1e-3
+    # Relative shoulder offset from neck is preserved; the chain just follows.
+    np.testing.assert_allclose(
+        out[32, :2] - out[31, :2],
+        prev[2, :2] - prev[1, :2],
+        atol=2e-3,
+    )

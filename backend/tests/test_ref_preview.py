@@ -7,10 +7,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from ref_pose_fit import _align_body_nose_to_face, reference_display_rgb
+from backend.ref_pose_fit import _align_body_nose_to_face, reference_display_rgb
 
 GIGI = (
-    Path(__file__).resolve().parents[1]
+    Path(__file__).resolve().parents[2]
     / "test-pose"
     / "input"
     / "vtuber_ref_gigi_mood_green.png"

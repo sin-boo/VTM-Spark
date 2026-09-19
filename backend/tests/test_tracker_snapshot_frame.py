@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from live_poser_client import LivePoserTracker, TrackerSnapshot
+from backend.live_poser_client import LivePoserTracker, TrackerSnapshot
 from cameras import CameraCapture
 
 

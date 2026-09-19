@@ -20,11 +20,7 @@ ensure_import_paths()
 LIVE_POSER_DIR = live_poser_dir()
 TORCH_TRAIN_DIR = torch_train_dir()
 
-from bridge import (  # noqa: E402
-    BridgeFrame,
-    build_bridge_frame,
-    flip_iris_pair,
-)
+from bridge import BridgeFrame  # noqa: E402
 from calibration import CenterCalibration, RelativePose  # noqa: E402
 from cameras import (  # noqa: E402
     CameraCapture,
@@ -35,22 +31,19 @@ from cameras import (  # noqa: E402
     resolve_openseeface,
     uninit_com,
 )
-from iris_tracker import (  # noqa: E402
-    CustomIrisTracker,
-    merge_iris,
-    osf_gaze_to_iris,
-    resolve_iris_weights,
-)
-from label_schema import flip_label28_x, osf_to_label28  # noqa: E402
-from skeleton import (  # noqa: E402
-    SkeletonHold,
-    SkeletonLiteTracker,
-    flip_body7_x,
-    resolve_body7,
-    resolve_skeleton_weights,
-    synth_upper_body,
-)
+from label_schema import normalize_mouth_osf_map  # noqa: E402
 from tracking_filters import FilterSettings, MotionSmoother  # noqa: E402
+
+from .tracking import (  # noqa: E402
+    BodyTrack,
+    BodyTracker,
+    FaceTrack,
+    FaceTracker,
+    HairTracker,
+    IrisTrack,
+    IrisTracker,
+    merge_tracks,
+)
 
 # Reuse helpers from live_poser without importing the Tk UI class.
 from live_poser import (  # noqa: E402
@@ -84,7 +77,6 @@ from utils.coordinate_frames import (  # noqa: E402
     COORD_NORM_CROP,
     DEFAULT_IMAGE_SIZE,
     CropRect,
-    coord_meta_dict,
     webcam_pixels_to_norm_crop,
 )
 
@@ -168,6 +160,10 @@ class TrackerSnapshot:
     capture_health: str = "ok"
     read_fail_streak: int = 0
     capture_session: int = 0
+    hair_segments_px: list | None = None
+    hair_segments_norm: list | None = None
+    hair_method: str = "none"
+    hair_lost: bool = False
 
 
 def is_body_tracked(method: str | None) -> bool:
@@ -254,6 +250,7 @@ class LivePoserTracker:
         use_gaze: bool = True,
         use_iris: bool = True,
         use_skeleton: bool = True,
+        use_hair: bool = False,
         threads: int = 1,
         faces: int = 1,
     ) -> None:
@@ -263,12 +260,14 @@ class LivePoserTracker:
         self.model = int(model)
         self.sensitivity = float(sensitivity)
         self.smoothing = float(smoothing)
-        self.use_gaze = bool(use_gaze)
-        self.use_iris = bool(use_iris)
-        self.use_skeleton = bool(use_skeleton)
         self.threads = int(threads)
         self.faces = int(faces)
         self.mirror = False
+
+        self._face = FaceTracker()
+        self._iris = IrisTracker(use_iris=use_iris, use_gaze=use_gaze)
+        self._body = BodyTracker(enabled=use_skeleton)
+        self._hair = HairTracker(enabled=use_hair)
 
         self.osf = resolve_openseeface(None)
         self.model_dir = str(self.osf / "models")
@@ -284,13 +283,42 @@ class LivePoserTracker:
 
         self.calib = CenterCalibration()
         self._smoother = MotionSmoother()
-        self._skel_hold = SkeletonHold()
-        self._iris_tracker: CustomIrisTracker | None = None
-        self._skel_tracker: SkeletonLiteTracker | None = None
 
         self._latest: TrackerSnapshot | None = None
         self._track_fps = 0.0
         self._capture_session = 0
+
+    @property
+    def use_iris(self) -> bool:
+        return self._iris.use_iris
+
+    @use_iris.setter
+    def use_iris(self, value: bool) -> None:
+        self._iris.use_iris = bool(value)
+
+    @property
+    def use_gaze(self) -> bool:
+        return self._iris.use_gaze
+
+    @use_gaze.setter
+    def use_gaze(self, value: bool) -> None:
+        self._iris.use_gaze = bool(value)
+
+    @property
+    def use_skeleton(self) -> bool:
+        return self._body.enabled
+
+    @use_skeleton.setter
+    def use_skeleton(self, value: bool) -> None:
+        self._body.enabled = bool(value)
+
+    @property
+    def use_hair(self) -> bool:
+        return self._hair.enabled
+
+    @use_hair.setter
+    def use_hair(self, value: bool) -> None:
+        self._hair.enabled = bool(value)
 
     @property
     def track_fps(self) -> float:
@@ -334,6 +362,13 @@ class LivePoserTracker:
     def reset_center(self) -> None:
         self.calib.clear()
 
+    def set_mouth_osf_map(self, raw: object | None) -> dict[int, int]:
+        """Replace overlay 20–27 ← OSF ids. Takes effect on the next frame."""
+        return self._face.set_mouth_osf_map(raw)
+
+    def mouth_osf_map(self) -> dict[int, int]:
+        return self._face.mouth_osf_map()
+
     def start(self, camera_index: int, *, camera_name: str = "") -> None:
         # Always fully release the previous capture before reopening — DroidCam /
         # DirectShow reject a second open while the old reader still holds the device.
@@ -355,7 +390,8 @@ class LivePoserTracker:
         self._recover_capture.clear()
         self.running = True
         self._smoother.reset()
-        self._skel_hold.reset()
+        self._body.reset()
+        self._hair.reset()
         self.calib.clear()
         with self._lock:
             self._latest = None
@@ -420,26 +456,6 @@ class LivePoserTracker:
     def _filter_settings(self) -> FilterSettings:
         return FilterSettings(sensitivity=self.sensitivity, smoothing=self.smoothing)
 
-    def _resolve_iris(self, frame, face, pts28_raw, filters: FilterSettings):
-        custom = None
-        osf = None
-        if self.use_iris and self._iris_tracker is not None and pts28_raw is not None:
-            try:
-                custom = self._iris_tracker.match_to_face(
-                    frame,
-                    pts28_raw,
-                    conf=filters.iris_box_conf(),
-                    pupil_vis_thr=filters.iris_pupil_vis(),
-                )
-            except Exception:
-                custom = None
-        if self.use_gaze and face is not None:
-            try:
-                osf = osf_gaze_to_iris(face, conf_thr=filters.iris_pupil_vis())
-            except Exception:
-                osf = None
-        return merge_iris(custom, osf, prefer="custom_then_osf")
-
     def _loop(self, camera_index: int, camera_name: str) -> None:
         capture = None
         ema = 0.0
@@ -448,26 +464,13 @@ class LivePoserTracker:
             os.environ["OMP_NUM_THREADS"] = str(self.threads)
             ensure_osf_on_path(self.osf)
 
-            self._iris_tracker = None
-            if self.use_iris:
-                weights = resolve_iris_weights(None)
-                if weights is not None:
-                    try:
-                        # Always CPU — DiT/VAE own the GPU; CUDA iris races cause
-                        # "no face" / silent stalls after Stop stream → Start LivePoser.
-                        self._iris_tracker = CustomIrisTracker(weights, device="cpu")
-                    except Exception as exc:
-                        print(f"Iris load failed: {exc}")
-
-            self._skel_tracker = None
-            if self.use_skeleton:
-                sk_weights = resolve_skeleton_weights(None)
-                try:
-                    self._skel_tracker = SkeletonLiteTracker(
-                        sk_weights, device="cpu", backend="auto"
-                    )
-                except Exception as exc:
-                    print(f"Body tracker failed ({exc}) - synth fallback")
+            # Always CPU — DiT/VAE own the GPU; CUDA iris races cause
+            # "no face" / silent stalls after Stop stream → Start LivePoser.
+            self._iris.load(device="cpu")
+            self._body.load(device="cpu")
+            # Hair stays off the live camera loop by default. Per-frame
+            # animeseg on CPU was the tracking FPS cliff.
+            self._hair.load(device="cpu")
 
             # Resolve CameraInfo for DirectShow name probing. Prefer name match so
             # index drift after Refresh / virtual-cam reopen doesn't open the wrong device.
@@ -620,7 +623,8 @@ class LivePoserTracker:
                         capture = _open_capture()
                         self._capture_session += 1
                         self._smoother.reset()
-                        self._skel_hold.reset()
+                        self._body.reset()
+                        self._hair.reset()
                         self.calib.clear()
                         read_fail_streak = 0
                         black_frame_streak = 0
@@ -732,73 +736,72 @@ class LivePoserTracker:
                         no_face_since = now_wall
                         continue
                 mirror = bool(self.mirror)
-                pts28 = None
-                eye_lower = None
                 rel = None
-                right_iris = left_iris = None
-                iris_method = "none"
-                body7 = None
-                skel_method = "none"
-                body_lost = False
                 bridge = None
                 reason = ""
+                face_obj = alive[0] if alive else None
+                face_track = (
+                    self._face.decode(
+                        face_obj, landmark_threshold=filters.landmark_threshold()
+                    )
+                    if face_obj is not None
+                    else FaceTrack()
+                )
+                iris_track = self._iris.detect(
+                    frame, face_obj, face_track.pts28, filters
+                )
 
                 raw_body = None
                 raw_method = "none"
                 if self.use_skeleton:
-                    raw_body, raw_method = resolve_body7(
+                    raw_body, raw_method = self._body.resolve(
                         frame,
                         None,
-                        self._skel_tracker,
-                        allow_synth_fallback=self._skel_tracker is None,
-                        vis_thr=filters.body_vis_thr(),
-                        box_conf=filters.iris_box_conf(),
+                        filters,
+                        allow_synth_fallback=not self._body.has_model,
                     )
-
-                if alive:
-                    face = alive[0]
-                    pts28, eye_lower = osf_to_label28(face.lms)
-                    lms_thr = filters.landmark_threshold()
-                    if pts28 is not None:
-                        weak = pts28[:, 2] < lms_thr
-                        pts28[weak, 2] = 0.0
-                    right_iris, left_iris, iris_method = self._resolve_iris(
-                        frame, face, pts28, filters
-                    )
-                    if (
-                        raw_body is None
-                        and self._skel_hold.last is None
-                        and self.use_skeleton
-                    ):
+                    if raw_body is None and not self._body.has_hold and face_track.alive:
                         # Retry with face landmarks; keep the real tracker if present
                         # so MediaPipe/YOLO get another chance before synth fallback.
-                        raw_body, raw_method = resolve_body7(
+                        raw_body, raw_method = self._body.resolve(
                             frame,
-                            pts28,
-                            self._skel_tracker,
+                            face_track.pts28,
+                            filters,
                             allow_synth_fallback=True,
-                            rel_pitch=0.0,
-                            rel_yaw=0.0,
-                            rel_roll=0.0,
-                            vis_thr=filters.body_vis_thr(),
-                            box_conf=filters.iris_box_conf(),
                         )
-                else:
+                body_track = (
+                    self._body.hold_update(raw_body, raw_method)
+                    if self.use_skeleton
+                    else BodyTrack()
+                )
+                hair_track = self._hair.detect(frame)
+                if not alive:
                     reason = detection_reason(frame, alive) or "No face in view"
 
-                if self.use_skeleton:
-                    body7, body_lost, skel_method = self._skel_hold.update(
-                        raw_body, raw_method
-                    )
-
                 pts28, eye_lower, right_iris, left_iris, body7 = self._smoother.apply(
+                    pts28=face_track.pts28,
+                    eye_lower=face_track.eye_lower,
+                    right_iris=iris_track.right,
+                    left_iris=iris_track.left,
+                    body7=body_track.joints,
+                    smoothing=filters.smoothing,
+                    freeze_body=body_track.lost,
+                )
+                face_track = FaceTrack(
                     pts28=pts28,
                     eye_lower=eye_lower,
-                    right_iris=right_iris,
-                    left_iris=left_iris,
-                    body7=body7,
-                    smoothing=filters.smoothing,
-                    freeze_body=body_lost,
+                    mouth_osf=face_track.mouth_osf,
+                    alive=pts28 is not None,
+                )
+                iris_track = IrisTrack(
+                    right=right_iris,
+                    left=left_iris,
+                    method=iris_track.method,
+                )
+                body_track = BodyTrack(
+                    joints=body7,
+                    method=body_track.method,
+                    lost=body_track.lost,
                 )
 
                 import cv2
@@ -808,47 +811,44 @@ class LivePoserTracker:
                 if mirror:
                     display_frame = cv2.flip(frame, 1)
                     display_shape = display_frame.shape
-                    if pts28 is not None:
-                        pts28, eye_lower = flip_label28_x(
-                            pts28, display_shape[1], eye_lower
-                        )
-                        right_iris, left_iris = flip_iris_pair(
-                            right_iris, left_iris, display_shape[1]
-                        )
-                    if body7 is not None:
-                        body7 = flip_body7_x(body7, display_shape[1])
+                    width = display_shape[1]
+                    if face_track.pts28 is not None:
+                        face_track = FaceTracker.flip(face_track, width)
+                        iris_track = IrisTracker.flip(iris_track, width)
+                    if body_track.joints is not None:
+                        body_track = BodyTracker.flip(body_track, width)
+                    if hair_track.segments:
+                        hair_track = HairTracker.flip(hair_track, width)
 
                 kps_px = None
                 kps_norm = None
                 crop = None
-                if alive and pts28 is not None:
-                    rel = self.calib.remap(pts28, display_shape)
+                hair_segments_px = None
+                hair_segments_norm = None
+                merged = None
+                if alive and face_track.pts28 is not None:
+                    rel = self.calib.remap(face_track.pts28, display_shape)
                     pose_dict = self.calib.to_dict(rel)
                     if (
                         self.use_skeleton
-                        and skel_method == "synthetic_from_face"
-                        and not body_lost
+                        and body_track.method == "synthetic_from_face"
+                        and not body_track.lost
                     ):
                         # Re-synth with calibrated head angles (better than the
                         # zero-angle fallback produced before CenterCalibration).
-                        body7 = synth_upper_body(
-                            pts28,
+                        body_track = self._body.resynth_from_face(
+                            face_track.pts28,
                             pitch=rel.pitch,
                             yaw=rel.yaw,
                             roll=rel.roll,
                         )
-                        body7, body_lost, skel_method = self._skel_hold.update(
-                            body7, "synthetic_from_face"
-                        )
-                    bridge = build_bridge_frame(
-                        pts28,
-                        display_shape,
-                        right_iris=right_iris,
-                        left_iris=left_iris,
-                        body7=body7,
+                    merged = merge_tracks(
+                        image_shape=display_shape,
+                        face=face_track,
+                        iris=iris_track,
+                        body=body_track,
+                        hair=hair_track,
                         mirrored=mirror,
-                        iris_method=iris_method,
-                        skeleton_method=skel_method,
                         pose=pose_dict,
                         meta={
                             "fps": self._track_fps,
@@ -856,69 +856,44 @@ class LivePoserTracker:
                             "sensitivity": filters.sensitivity,
                             "smoothing": filters.smoothing,
                             "det_thr": filters.detection_threshold(),
-                            "body_lost": body_lost,
+                            "body_lost": body_track.lost,
                         },
+                        image_size=LIVE_IMAGE_SIZE,
+                        calibrated=bool(rel is not None and rel.calibrated),
                     )
-                    kps_px = bridge.keypoints.copy()
-                    src_w = int(bridge.image_wh[0])
-                    src_h = int(bridge.image_wh[1])
-                    kps_norm, crop = keypoints_to_norm_crop(
-                        kps_px, src_w, src_h, image_size=LIVE_IMAGE_SIZE
+                elif body_track.joints is not None:
+                    body_track = BodyTrack(
+                        joints=body_track.joints,
+                        method=body_track.method,
+                        lost=True,
                     )
-                    bridge.keypoints_norm = kps_norm.copy()
-                    bridge.coord_space = COORD_NORM_CROP
-                    bridge.crop = crop
-                    bridge.image_size = LIVE_IMAGE_SIZE
-                    bridge.meta.update(
-                        coord_meta_dict(
-                            coord_space=COORD_NORM_CROP,
-                            source_wh=(src_w, src_h),
-                            crop=crop,
-                            image_size=LIVE_IMAGE_SIZE,
-                            mirrored=mirror,
-                            calibrated=bool(rel is not None and rel.calibrated),
-                            skeleton_method=skel_method,
-                            body_lost=body_lost,
-                        )
-                    )
-                elif body7 is not None:
-                    bridge = build_bridge_frame(
-                        None,
-                        display_shape,
-                        body7=body7,
+                    merged = merge_tracks(
+                        image_shape=display_shape,
+                        face=None,
+                        iris=iris_track,
+                        body=body_track,
+                        hair=hair_track,
                         mirrored=mirror,
-                        skeleton_method=skel_method,
                         meta={"fps": self._track_fps, "body_lost": True},
-                    )
-                    kps_px = bridge.keypoints.copy()
-                    src_w = int(bridge.image_wh[0])
-                    src_h = int(bridge.image_wh[1])
-                    kps_norm, crop = keypoints_to_norm_crop(
-                        kps_px, src_w, src_h, image_size=LIVE_IMAGE_SIZE
-                    )
-                    bridge.keypoints_norm = kps_norm.copy()
-                    bridge.coord_space = COORD_NORM_CROP
-                    bridge.crop = crop
-                    bridge.image_size = LIVE_IMAGE_SIZE
-                    bridge.meta.update(
-                        coord_meta_dict(
-                            coord_space=COORD_NORM_CROP,
-                            source_wh=(src_w, src_h),
-                            crop=crop,
-                            image_size=LIVE_IMAGE_SIZE,
-                            mirrored=mirror,
-                            calibrated=False,
-                            skeleton_method=skel_method,
-                            body_lost=True,
-                        )
+                        image_size=LIVE_IMAGE_SIZE,
+                        calibrated=False,
                     )
                     reason = "face lost — skeleton held"
+                if merged is not None:
+                    bridge = merged.bridge
+                    kps_px = merged.keypoints_px
+                    kps_norm = merged.keypoints_norm
+                    crop = merged.crop
+                    hair_segments_px = merged.hair_segments_px
+                    hair_segments_norm = merged.hair_segments_norm
 
                 # Defensive copy so the UI thread can safely read while the
                 # capture loop overwrites its working buffer next iteration.
                 frame_bgr = None
                 if display_frame is not None:
-                    frame_bgr = np.ascontiguousarray(display_frame.copy())
+                    preview = np.ascontiguousarray(display_frame.copy())
+                    HairTracker.draw(preview, hair_track)
+                    frame_bgr = preview
 
                 snap = TrackerSnapshot(
                     t=time.time(),
@@ -930,10 +905,10 @@ class LivePoserTracker:
                     fps=float(self._track_fps),
                     faces=len(alive),
                     reason=reason,
-                    pts28=None if pts28 is None else pts28.copy(),
+                    pts28=None if face_track.pts28 is None else face_track.pts28.copy(),
                     frame_shape=tuple(int(x) for x in display_shape),
-                    skeleton_method=str(skel_method or "none"),
-                    body_lost=bool(body_lost),
+                    skeleton_method=str(body_track.method or "none"),
+                    body_lost=bool(body_track.lost),
                     coord_space=COORD_NORM_CROP if kps_norm is not None else "",
                     crop=crop if kps_norm is not None else None,
                     image_size=LIVE_IMAGE_SIZE,
@@ -943,6 +918,10 @@ class LivePoserTracker:
                     capture_health="ok",
                     read_fail_streak=0,
                     capture_session=int(self._capture_session),
+                    hair_segments_px=hair_segments_px,
+                    hair_segments_norm=hair_segments_norm,
+                    hair_method=str(hair_track.method or "none"),
+                    hair_lost=bool(hair_track.lost),
                 )
                 with self._lock:
                     self._latest = snap
@@ -960,22 +939,9 @@ class LivePoserTracker:
             except Exception:
                 pass
             self._tracker = None
-            try:
-                if getattr(self, "_iris_tracker", None) is not None and hasattr(
-                    self._iris_tracker, "close"
-                ):
-                    self._iris_tracker.close()
-            except Exception:
-                pass
-            self._iris_tracker = None
-            try:
-                if getattr(self, "_skel_tracker", None) is not None and hasattr(
-                    self._skel_tracker, "close"
-                ):
-                    self._skel_tracker.close()
-            except Exception:
-                pass
-            self._skel_tracker = None
+            self._iris.close()
+            self._body.close()
+            self._hair.close()
             try:
                 if capture is not None:
                     capture.release()

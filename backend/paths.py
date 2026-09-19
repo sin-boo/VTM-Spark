@@ -28,7 +28,7 @@ def package_root() -> Path:
         meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
         for candidate in (exe_dir, exe_dir / "_internal", meipass):
             if (
-                (candidate / "data").is_dir()
+                (candidate / "models").is_dir()
                 or (candidate / "ui" / "dist").is_dir()
                 or (candidate / "vendor" / "torch_train").is_dir()
             ):
@@ -85,9 +85,8 @@ def ensure_under_models(path: Path | str) -> Path:
 
 
 def data_dir() -> Path:
-    d = package_root() / "data"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """App JSON / refs / lock — kept under ``models/`` so the repo stays 4 folders."""
+    return models_root()
 
 
 def models_root() -> Path:
@@ -95,6 +94,28 @@ def models_root() -> Path:
     root = package_root() / "models"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def torch_compile_cache_dir() -> Path:
+    """Persistent torch.compile / Triton kernels (survives app restarts)."""
+    d = models_root() / "cache" / "torch_inductor"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def triton_cache_dir() -> Path:
+    d = models_root() / "cache" / "triton"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def configure_torch_compile_cache() -> None:
+    """Point inductor / Triton at models/cache before ``import torch`` when possible."""
+    inductor = str(torch_compile_cache_dir())
+    triton = str(triton_cache_dir())
+    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", inductor)
+    os.environ.setdefault("TRITON_CACHE_DIR", triton)
+    os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
 
 
 def models_dir() -> Path:
@@ -126,13 +147,27 @@ def refs_dir() -> Path:
     return d
 
 
+def characters_dir() -> Path:
+    """User character packs (``.vtm``) — portable encoded references."""
+    d = models_root() / "characters"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def blendshapes_dir() -> Path:
+    """Track Lab plan shapes copied for each character (``.json`` sidecars)."""
+    d = models_root() / "blendshapes"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def trackers_dir() -> Path:
     """Small tracker weights shipped with the app / downloaded on setup."""
     preferred = models_root() / "trackers"
     preferred.mkdir(parents=True, exist_ok=True)
     if any(preferred.iterdir()):
         return preferred
-    legacy = data_dir() / "trackers"
+    legacy = package_root() / "data" / "trackers"
     if legacy.is_dir() and any(legacy.iterdir()):
         return legacy
     return preferred
@@ -201,7 +236,7 @@ def openseeface_dir() -> Path:
 
 
 def default_ref_candidates() -> list[Path]:
-    """Reference stills under data/refs only (user uploads / shipped defaults)."""
+    """Reference stills under models/refs only (user uploads / shipped defaults)."""
     return [
         refs_dir() / "default.png",
         refs_dir() / "train_char_1.png",

@@ -1,0 +1,18 @@
+{
+  "name": "hair_seg",
+  "version": "14",
+  "file": "weights/hair/hair_seg.pt",
+  "trained_at": "2026-08-16T05:17:43.480895+00:00",
+  "labels": 94,
+  "train_images": 160,
+  "val_images": 14,
+  "best_epoch": 1,
+  "box_map50": 0.995,
+  "seg_map50": 0.995,
+  "classes": [
+    "hair_middle",
+    "hair_left",
+    "hair_right"
+  ],
+  "notes": "YOLOv8-seg hair parts; COCO-pretrained fine-tune; furry images are negatives; sources copy-only"
+}

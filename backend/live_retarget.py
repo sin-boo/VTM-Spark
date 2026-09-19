@@ -26,7 +26,9 @@ from .pose_controller import (
     L_SHOULDER,
     LEFT_BROW,
     LEFT_IRIS,
+    LipRoles,
     MOUTH,
+    MOUTH_CORNERS,
     NECK,
     NOSE,
     NUM_KEYPOINTS,
@@ -36,9 +38,11 @@ from .pose_controller import (
     R_SHOULDER,
     RIGHT_BROW,
     RIGHT_IRIS,
+    enforce_head_body_attachment,
     face_center,
     face_height,
     face_width,
+    lip_roles,
 )
 
 KEYPOINT_DIM = 4
@@ -51,6 +55,13 @@ HEAD_YAW_MAX_DEG = 28.0
 HEAD_PITCH_MAX_DEG = 18.0
 HEAD_SCALE_MIN = 0.94
 HEAD_SCALE_MAX = 1.06
+# RelativePose nx/ny is ±1 at half-frame. Used only when landmark COM is quiet.
+HEAD_TX_NORM_GAIN = 0.75
+HEAD_TY_NORM_GAIN = 0.65
+# Visible nod: pitch rotates around the neck, so midline points must actually
+# travel in Y. The 2.5D warp alone only foreshortens |x| and is invisible on
+# the nose/chin.
+PITCH_NOD = 0.28  # × character face height at 90°
 
 # Expression / gaze response limits.
 BLINK_MIN = 0.0
@@ -73,105 +84,12 @@ PITCH_WARP = 0.32
 YAW_FORESHORTEN = 0.42  # how much X collapses at 90° yaw (0.55→0.13 old → stronger)
 PITCH_FORESHORTEN = 0.38
 YAW_FEATURE_SHIFT = 0.30
-MOUTH_CONTOUR = (20, 21, 22, 26, 27, 25, 24, 23)
-
-# Mouth-region box: authored placement from the reference, expression from live.
-# Soft pad around the authored mouth AABB; travel clamps use the padded box.
-MOUTH_BOX_PAD_X = 0.04  # × face height
-MOUTH_BOX_PAD_Y_UP = 0.03
-MOUTH_BOX_PAD_Y_DOWN = 0.14
-# Snap to a closed slit when live mouth is near the calibrated neutral origin.
-# Max center-relative point error / mouth width below this → neutral snap.
-MOUTH_NEUTRAL_SNAP = 0.16
-# Absolute gap/width fallback for a truly shut mouth (no origin available).
-MOUTH_CLOSED_SNAP = 0.12
-# How far past origin open/lift before neutral snap releases.
-MOUTH_NEUTRAL_OPEN_SLACK = 0.04
-MOUTH_NEUTRAL_LIFT_SLACK = 0.07
-# Upper/lower lip pairs that collapse together on a closed snap.
-MOUTH_LIP_PAIRS = ((20, 24), (21, 25), (22, 27))
-# Height of the subtle neutral smile curve as a fraction of mouth width.
-MOUTH_NEUTRAL_SMILE_CURVE = 0.035
-
-
-def _mouth_shape_error(live: np.ndarray, origin: np.ndarray) -> float | None:
-    """Scale-invariant mouth-shape distance between live and origin (≈0 at rest)."""
-    live = np.asarray(live, dtype=np.float32)
-    origin = np.asarray(origin, dtype=np.float32)
-    if live.shape[0] < 28 or origin.shape[0] < 28:
-        return None
-    if not all(float(live[i, 3]) >= 0.5 and float(origin[i, 3]) >= 0.5 for i in MOUTH):
-        return None
-    live_c = np.mean(live[list(MOUTH), :2], axis=0)
-    origin_c = np.mean(origin[list(MOUTH), :2], axis=0)
-    width = abs(float(origin[26, 0] - origin[23, 0]))
-    if width < 1e-5:
-        width = abs(float(live[26, 0] - live[23, 0]))
-    if width < 1e-5:
-        return None
-    errs = []
-    for i in MOUTH:
-        d = (live[i, :2] - live_c) - (origin[i, :2] - origin_c)
-        errs.append(float(np.hypot(float(d[0]), float(d[1]))))
-    # Max (not mean) so a single opening lip cannot hide under other stillness.
-    return float(np.max(errs) / width)
-
-
-def _mouth_absolutely_shut(live: np.ndarray) -> bool:
-    """True when live lips are shut (tiny gap), ignoring calibrated origin.
-
-    A pressed smile can also shrink the gap; raised corners (positive lift in
-    the mouth basis) are rejected so hard smiles stay expressive/purple.
-    Resting closed mouths often have slightly negative lift (corners a bit
-    below the upper mid) and must still count as shut.
-    """
-    if not all(float(live[i, 3]) >= 0.5 for i in (21, 23, 25, 26)):
-        return False
-    gap = abs(float(live[25, 1] - live[21, 1]))
-    width = abs(float(live[26, 0] - live[23, 0]))
-    if width <= 1e-6 or (gap / width) >= MOUTH_CLOSED_SNAP:
-        return False
-    metrics = _mouth_local_metrics(live)
-    if metrics is not None:
-        _gap, lift_l, lift_r, _w = metrics
-        # Corners lifted above the upper mid → smile, not neutral shut.
-        if lift_l > 0.055 or lift_r > 0.055:
-            return False
-    return True
-
-
-def is_mouth_closed_snap(
-    live: np.ndarray,
-    origin: np.ndarray | None = None,
-) -> bool:
-    """True when the mouth should snap to a closed neutral slit.
-
-    Near-origin stillness snaps first. A hard smile/frown vs origin stays
-    purple. Truly shut lips still snap via absolute gap even when origin was
-    locked slightly open (so generate does not keep an open reference mouth).
-    """
-    live = np.asarray(live, dtype=np.float32)
-    if live.ndim != 2 or live.shape[0] < 28:
-        return False
-
-    if origin is not None:
-        live_m = _mouth_local_metrics(live)
-        origin_m = _mouth_local_metrics(origin)
-        # Opening past the calibrated rest is never a neutral snap.
-        if live_m is not None and origin_m is not None:
-            if live_m[0] > origin_m[0] + MOUTH_NEUTRAL_OPEN_SLACK:
-                return False
-            # Clear smile / frown vs origin — keep purple, don't snap.
-            if (
-                abs(live_m[1] - origin_m[1]) > MOUTH_NEUTRAL_LIFT_SLACK
-                or abs(live_m[2] - origin_m[2]) > MOUTH_NEUTRAL_LIFT_SLACK
-            ):
-                return False
-        err = _mouth_shape_error(live, origin)
-        if err is not None and err < MOUTH_NEUTRAL_SNAP:
-            return True
-
-    return _mouth_absolutely_shut(live)
+# Thin closed slit as a fraction of mouth width.
+MOUTH_CLOSED_SLIT = 0.012
+# How far a full open may drop the lower lip, as a fraction of mouth width.
+MOUTH_OPEN_MAX = 0.42
+# Slot 21 parked on the nose tip — ignore that mid and use 20/22 instead.
+MOUTH_ON_NOSE = 0.06
 
 
 def _as37(kps: np.ndarray) -> np.ndarray:
@@ -189,7 +107,113 @@ def _mean_xy(k: np.ndarray, idxs: tuple[int, ...]) -> np.ndarray | None:
     pts = [k[i, :2] for i in idxs if _vis(k, i)]
     if not pts:
         return None
-    return np.mean(np.stack(pts, axis=0), axis=0).astype(np.float32)
+    return np.mean(np.stack(pts), axis=0).astype(np.float32)
+
+
+# Mouth must stay below nose tip 15 (Y down). Live UV + head warp can park 21
+# on the nose or invert 21/25; sanitize topology is off on the live path.
+MOUTH_ON_NOSE_EPS = 1e-4
+MOUTH_OFF_NOSE = 0.015  # × character face height, only for points on the nose
+# Extra opening past the authored 21–25 gap. Inner-lower OSF 64 (slot 25)
+# otherwise walks toward the chin and never comes back.
+MOUTH_LOWER_GAP_PAD = 0.16  # × face height
+
+
+def clamp_mouth_anatomy(
+    out: np.ndarray,
+    face_h: float | None = None,
+    *,
+    ref: np.ndarray | None = None,
+    limit_mouth: bool = True,
+) -> np.ndarray:
+    """Last anatomy net: off the nose, upper-mid on its lip line, lower lip below it.
+
+    Works on the character's *visual* lip rows (``lip_roles``), so a rest pose
+    with 25 authored above 21 is respected instead of "corrected". Only slots
+    whose rest pose is below the nose are pulled off it. Live sanitize leaves
+    topology off, so this is what the overlay / DiT actually see.
+    """
+    k = _as37(out)
+    fh = max(float(face_h if face_h is not None else face_height(k)), 1e-3)
+    rest = _as37(ref) if ref is not None else None
+    roles = lip_roles(rest)
+    um, lm = roles.upper_mid, roles.lower_mid
+
+    if _vis(k, 15):
+        nose_y = float(k[15, 1])
+        for i in MOUTH:
+            if not _vis(k, i):
+                continue
+            rest_below = True
+            if rest is not None and _vis(rest, i) and _vis(rest, 15):
+                rest_below = float(rest[i, 1]) > float(rest[15, 1]) + 0.01 * fh
+            if rest_below and float(k[i, 1]) <= nose_y + MOUTH_ON_NOSE_EPS:
+                k[i, 1] = nose_y + MOUTH_OFF_NOSE * fh
+
+    # Lower mid popped above the upper mid: restore a thin slit. Using the
+    # authored rest gap here made a slightly open rest impossible to close.
+    if _vis(k, um) and _vis(k, lm) and float(k[lm, 1]) < float(k[um, 1]):
+        mw = _mouth_width(k) or (0.22 * fh)
+        k[lm, 1] = float(k[um, 1]) + max(MOUTH_CLOSED_SLIT * mw, 0.004 * fh)
+
+    _flatten_upper_mid_to_chord(k, roles.upper)
+    if limit_mouth:
+        _limit_lower_mid_drop(k, fh, roles, rest=rest)
+    elif _vis(k, lm) and _vis(k, 2):
+        k[lm, 1] = min(float(k[lm, 1]), float(k[2, 1]) - 0.01 * fh)
+    return k
+
+
+def _project_onto_segment(
+    point: np.ndarray, start: np.ndarray, end: np.ndarray
+) -> np.ndarray:
+    chord = end.astype(np.float64) - start.astype(np.float64)
+    denom = float(np.dot(chord, chord))
+    if denom < 1e-12:
+        return start.astype(np.float64).copy()
+    rel = point.astype(np.float64) - start.astype(np.float64)
+    t = float(np.clip(np.dot(rel, chord) / denom, 0.0, 1.0))
+    return start.astype(np.float64) + t * chord
+
+
+def _flatten_upper_mid_to_chord(k: np.ndarray, upper: tuple[int, int, int]) -> None:
+    """If the visual upper-mid peaks toward the nose, snap it onto that lip line."""
+    left_i, mid_i, right_i = upper
+    if not all(_vis(k, i) for i in upper):
+        return
+    mid = k[mid_i, :2].astype(np.float64)
+    proj = _project_onto_segment(mid, k[left_i, :2], k[right_i, :2])
+    # Image Y down: above the chord is toward the nose.
+    if float(mid[1]) < float(proj[1]) - 1e-6:
+        k[mid_i, :2] = proj
+
+
+def _limit_lower_mid_drop(
+    k: np.ndarray,
+    face_h: float,
+    roles: LipRoles,
+    *,
+    rest: np.ndarray | None = None,
+) -> None:
+    """Stop the visual lower-mid from walking toward the chin."""
+    um, lm = roles.upper_mid, roles.lower_mid
+    if not _vis(k, lm):
+        return
+    fh = max(float(face_h), 1e-3)
+    if _vis(k, 2):
+        k[lm, 1] = min(float(k[lm, 1]), float(k[2, 1]) - 0.01 * fh)
+    if _vis(k, um):
+        rest_gap = 0.05 * fh
+        if rest is not None and _vis(rest, um) and _vis(rest, lm):
+            rest_gap = max(float(rest[lm, 1] - rest[um, 1]), 0.0)
+        k[lm, 1] = min(
+            float(k[lm, 1]), float(k[um, 1]) + rest_gap + MOUTH_LOWER_GAP_PAD * fh
+        )
+    a, b = roles.lower[0], roles.lower[2]
+    if _vis(k, a) and _vis(k, b):
+        chord_y = 0.5 * (float(k[a, 1]) + float(k[b, 1]))
+        mw = _mouth_width(k) or (0.22 * fh)
+        k[lm, 1] = min(float(k[lm, 1]), chord_y + 0.45 * mw)
 
 
 def _eye_width(k: np.ndarray, idxs: tuple[int, ...]) -> float | None:
@@ -234,6 +258,7 @@ def _mouth_gap(k: np.ndarray) -> float | None:
     return float(k[25, 1] - k[21, 1])
 
 
+
 def _mouth_width(k: np.ndarray) -> float | None:
     if not (_vis(k, 23) and _vis(k, 26)):
         return None
@@ -241,7 +266,7 @@ def _mouth_width(k: np.ndarray) -> float | None:
 
 
 def _mouth_local_metrics(k: np.ndarray) -> tuple[float, float, float, float] | None:
-    """Return width-normalized gap and corner lifts in the mouth's own basis."""
+    """Width-normalized gap and corner lifts in the mouth's own basis."""
     needed = (21, 23, 25, 26)
     if not all(_vis(k, i) for i in needed):
         return None
@@ -256,6 +281,13 @@ def _mouth_local_metrics(k: np.ndarray) -> tuple[float, float, float, float] | N
     if axis_y[1] < 0.0:
         axis_y *= -1.0
     upper = k[21, :2].astype(np.float64)
+    if _vis(k, 15) and float(
+        np.hypot(float(k[21, 0] - k[15, 0]), float(k[21, 1] - k[15, 1]))
+    ) < MOUTH_ON_NOSE:
+        if _vis(k, 20) and _vis(k, 22):
+            upper = 0.5 * (
+                k[20, :2].astype(np.float64) + k[22, :2].astype(np.float64)
+            )
     lower = k[25, :2].astype(np.float64)
     gap = max(0.0, float(np.dot(lower - upper, axis_y)) / width)
     lift_l = float(np.dot(upper - left, axis_y)) / width
@@ -263,288 +295,45 @@ def _mouth_local_metrics(k: np.ndarray) -> tuple[float, float, float, float] | N
     return gap, lift_l, lift_r, width
 
 
-def _stable_face_anchor(k: np.ndarray) -> np.ndarray | None:
-    """Mouth-free face anchor so jaw open does not shift the mouth box.
-
-    Prefers iris midpoints, then eye lids, blended with the nose tip. Never uses
-    mouth points or the whole-face COM (both drift when the jaw drops).
-    """
-    iris_pts = [
-        k[i, :2].astype(np.float64)
-        for i in (RIGHT_IRIS, LEFT_IRIS)
-        if _vis(k, i)
-    ]
-    if len(iris_pts) == 2:
-        eye_mid = 0.5 * (iris_pts[0] + iris_pts[1])
-    else:
-        el = _mean_xy(k, L_EYE)
-        er = _mean_xy(k, R_EYE)
-        if el is None or er is None:
-            return None
-        eye_mid = 0.5 * (el.astype(np.float64) + er.astype(np.float64))
-    if _vis(k, 15):
-        return (0.65 * eye_mid + 0.35 * k[15, :2].astype(np.float64)).astype(
-            np.float64
-        )
-    return eye_mid.astype(np.float64)
-
-
-def _derotate_about_anchor(
-    xy: np.ndarray,
-    anchor: np.ndarray,
-    roll: float,
-) -> np.ndarray:
-    """Translate to anchor, undo eye-line roll → upright face-local XY."""
-    p = xy.astype(np.float64) - anchor.astype(np.float64)
-    ca = float(np.cos(-roll))
-    sa = float(np.sin(-roll))
-    return np.array(
-        [ca * float(p[0]) - sa * float(p[1]), sa * float(p[0]) + ca * float(p[1])],
-        dtype=np.float64,
-    )
-
-
-@dataclass
-class MouthRegion:
-    """Character mouth box locked to a stable face anchor.
-
-    Built once from the reference mouth layout. Live tracking only supplies
-    expression deltas inside this box; head motion moves the box via the anchor.
-    """
-
-    # Stable eyes/iris/nose anchor in face-center-local coords (no mouth).
-    anchor_local: np.ndarray  # (2,)
-    # Box center relative to that anchor (face-local).
-    center_from_anchor: np.ndarray  # (2,)
-    # Authored mouth half-size (unpadded) and padded clamp box.
-    rest_half_w: float
-    rest_half_h: float
-    half_w: float
-    half_h: float
-    # Authored resting contour as UV in rest_half units (typically ~[-1, 1]).
-    rest_uv: dict[int, tuple[float, float]]
-
-
-def _build_mouth_region(
+def _apply_mouth_expression(
+    local_face: np.ndarray,
     ref: np.ndarray,
+    rig: "ReferenceRig",
+    controls: "SemanticControls",
     *,
-    face_center_xy: np.ndarray,
-    face_height: float,
-) -> MouthRegion | None:
-    """Read reference mouth once → local box anchored to stable face landmarks."""
-    if not all(_vis(ref, i) for i in MOUTH):
-        return None
-    anchor = _stable_face_anchor(ref)
-    if anchor is None:
-        return None
-    fh = max(float(face_height), 1e-3)
-    fc = face_center_xy.astype(np.float64)
-
-    # Same coordinate frame as local_face (face-center / screen). Live expression
-    # is derotated into this upright box so head roll is applied once by the warp.
-    local: dict[int, np.ndarray] = {}
-    for i in MOUTH:
-        local[i] = ref[i, :2].astype(np.float64) - anchor
-
-    xs = np.array([float(local[i][0]) for i in MOUTH], dtype=np.float64)
-    ys = np.array([float(local[i][1]) for i in MOUTH], dtype=np.float64)
-    # Authored mouth center — where the mouth lives on this face.
-    center = np.array([float(np.mean(xs)), float(np.mean(ys))], dtype=np.float64)
-
-    rest_half_w = max(0.5 * (float(np.max(xs)) - float(np.min(xs))), 1e-4)
-    rest_half_h = max(0.5 * (float(np.max(ys)) - float(np.min(ys))), 1e-4)
-    half_w = rest_half_w + MOUTH_BOX_PAD_X * fh
-    y_pad = max(MOUTH_BOX_PAD_Y_UP, MOUTH_BOX_PAD_Y_DOWN) * fh
-    half_h = rest_half_h + y_pad
-
-    rest_uv: dict[int, tuple[float, float]] = {}
-    for i in MOUTH:
-        u = float((local[i][0] - center[0]) / rest_half_w)
-        v = float((local[i][1] - center[1]) / rest_half_h)
-        rest_uv[i] = (u, v)
-
-    return MouthRegion(
-        anchor_local=(anchor - fc).astype(np.float32),
-        center_from_anchor=center.astype(np.float32),
-        rest_half_w=float(rest_half_w),
-        rest_half_h=float(rest_half_h),
-        half_w=float(half_w),
-        half_h=float(half_h),
-        rest_uv=rest_uv,
-    )
-
-
-def _mouth_contour_about_center(
-    k: np.ndarray,
-    *,
-    scale_to_char: float,
-) -> tuple[dict[int, np.ndarray], np.ndarray] | None:
-    """Derotated mouth points in character units, plus their mean center."""
-    if not all(_vis(k, i) for i in MOUTH):
-        return None
-    anchor = _stable_face_anchor(k)
-    if anchor is None:
-        return None
-    roll = _eye_line_angle(k) or 0.0
-    s = float(scale_to_char)
-    local: dict[int, np.ndarray] = {}
-    for i in MOUTH:
-        p = _derotate_about_anchor(k[i, :2], anchor, roll) * s
-        if not (np.isfinite(p[0]) and np.isfinite(p[1])):
-            return None
-        local[i] = p
-    center = np.mean(np.stack([local[i] for i in MOUTH], axis=0), axis=0)
-    return local, center
-
-
-def _snap_neutral_mouth_uv(
-    mouth_uv: dict[int, np.ndarray],
-    region: MouthRegion,
-) -> dict[int, np.ndarray]:
-    """Close the current mouth into a slight smile without moving its object.
-
-    The slit is built in the authored mouth's own axis, then recentered. This
-    changes only its local contour: box position, scale, and head pose remain
-    controlled by the reference rig and the authoritative head transform.
-    """
-    hw = max(float(region.half_w), 1e-4)
-    hh = max(float(region.half_h), 1e-4)
-    points = {
-        i: np.array(
-            [float(mouth_uv[i][0]) * hw, float(mouth_uv[i][1]) * hh],
-            dtype=np.float64,
-        )
-        for i in MOUTH
+    limit_mouth: bool,
+) -> None:
+    """Deform the authored mouth with open / smile / width. Upper lip stays put."""
+    mw = max(float(rig.mouth_width), 1e-4)
+    drop = float(controls.mouth_gap_delta) * mw
+    if limit_mouth:
+        drop = _clip(drop, -0.85 * float(rig.mouth_gap), MOUTH_OPEN_MAX * mw)
+    else:
+        drop = _clip(drop, -float(rig.mouth_gap), 0.75 * mw)
+    smile_y = -float(controls.mouth_smile) * mw
+    widen = float(controls.mouth_form) * (0.09 if limit_mouth else 0.14) * (0.5 * mw)
+    asym = float(controls.mouth_asym) * 0.04 * mw
+    roles = lip_roles(ref)
+    weights = {
+        roles.lower[0]: 0.85,
+        roles.lower_mid: 1.0,
+        roles.lower[2]: 0.85,
     }
-    original_center = np.mean(np.stack([points[i] for i in MOUTH]), axis=0)
-
-    # Keep the authored/current mouth orientation; do not import the training
-    # example's face lean. Corners define the local mouth axis.
-    axis_x = points[26] - points[23]
-    width = float(np.linalg.norm(axis_x))
-    if width < 1e-5:
-        return {i: mouth_uv[i].copy() for i in MOUTH}
-    axis_x /= width
-    axis_y = np.array([-axis_x[1], axis_x[0]], dtype=np.float64)
-    if axis_y[1] < 0.0:
-        axis_y *= -1.0
-
-    # Collapse each upper/lower pair to one centerline point. Pair averaging
-    # preserves the contour's center before the smile curve is applied.
-    slit_points: dict[int, np.ndarray] = {
-        23: points[23].copy(),
-        26: points[26].copy(),
-    }
-    for upper, lower in MOUTH_LIP_PAIRS:
-        midpoint = 0.5 * (points[upper] + points[lower])
-        slit_points[upper] = midpoint.copy()
-        slit_points[lower] = midpoint.copy()
-
-    axis_center = 0.5 * (points[23] + points[26])
-    half_width = max(0.5 * width, 1e-5)
-    curve_height = MOUTH_NEUTRAL_SMILE_CURVE * width
-    for i in MOUTH:
-        rel = slit_points[i] - axis_center
-        along = float(np.dot(rel, axis_x))
-        x_norm = float(np.clip(along / half_width, -1.0, 1.0))
-        # Image/local Y is down: a positive center and raised corners form a smile.
-        normal = curve_height * (1.0 - 2.0 * x_norm * x_norm)
-        slit_points[i] = axis_center + along * axis_x + normal * axis_y
-
-    # Curving the slit can alter its arithmetic center. Put it exactly back so
-    # entering the blue state cannot make the mouth jump to another location.
-    snapped_center = np.mean(np.stack([slit_points[i] for i in MOUTH]), axis=0)
-    correction = original_center - snapped_center
-    return {
-        i: np.array(
-            [
-                float((slit_points[i][0] + correction[0]) / hw),
-                float((slit_points[i][1] + correction[1]) / hh),
-            ],
-            dtype=np.float64,
-        )
-        for i in MOUTH
-    }
-
-
-def _mouth_box_expression_uv(
-    live: np.ndarray,
-    origin: np.ndarray,
-    region: MouthRegion,
-    *,
-    scale_to_char: float,
-    limit_mouth: bool = True,
-) -> dict[int, np.ndarray] | None:
-    """Character-rest mouth + live expression delta, as UV in the mouth box.
-
-    Placement stays on the authored box. Size stays on the authored mouth.
-    Only open/smile/shape deltas from the calibrated origin are applied, scaled
-    so human mouth proportions map into the character mouth — not raw human size.
-    """
-    live_pack = _mouth_contour_about_center(live, scale_to_char=scale_to_char)
-    origin_pack = _mouth_contour_about_center(origin, scale_to_char=scale_to_char)
-    if live_pack is None or origin_pack is None:
-        return None
-    live_pts, live_c = live_pack
-    origin_pts, origin_c = origin_pack
-
-    # Fit human resting mouth width → character authored width (uniform scale).
-    origin_half_w = max(
-        abs(float(origin_pts[i][0] - origin_c[0])) for i in MOUTH
-    )
-    fit = float(region.rest_half_w) / max(origin_half_w, 1e-4)
-
-    hw = max(float(region.half_w), 1e-4)
-    hh = max(float(region.half_h), 1e-4)
-    rh_w = max(float(region.rest_half_w), 1e-4)
-    rh_h = max(float(region.rest_half_h), 1e-4)
-
-    # Soft UV caps against the padded box.
-    uv_cap = 1.05 if limit_mouth else 1.45
-
-    def _soft_uv(v: float, cap: float) -> float:
-        if abs(v) <= cap:
-            return v
-        return float(np.sign(v) * (cap + (abs(v) - cap) * 0.25))
-
-    raw_delta_uv: dict[int, np.ndarray] = {}
-    rest_box_uv: dict[int, np.ndarray] = {}
-    for i in MOUTH:
-        rest_u, rest_v = region.rest_uv.get(i, (0.0, 0.0))
-        rest_off = np.array([rest_u * rh_w, rest_v * rh_h], dtype=np.float64)
-        rest_box_uv[i] = np.array(
-            [float(rest_off[0] / hw), float(rest_off[1] / hh)], dtype=np.float64
-        )
-        live_off = (live_pts[i] - live_c) * fit
-        origin_off = (origin_pts[i] - origin_c) * fit
-        delta = live_off - origin_off
-        raw_delta_uv[i] = np.array(
-            [float(delta[0] / hw), float(delta[1] / hh)], dtype=np.float64
-        )
-
-    # Smooth only the live delta so the authored rest contour stays sharp.
-    smoothed_delta: dict[int, np.ndarray] = {}
-    for pos, i in enumerate(MOUTH_CONTOUR):
-        prev_i = MOUTH_CONTOUR[(pos - 1) % len(MOUTH_CONTOUR)]
-        next_i = MOUTH_CONTOUR[(pos + 1) % len(MOUTH_CONTOUR)]
-        smoothed_delta[i] = (
-            0.80 * raw_delta_uv[i]
-            + 0.10 * raw_delta_uv[prev_i]
-            + 0.10 * raw_delta_uv[next_i]
-        ).astype(np.float64)
-
-    out_uv: dict[int, np.ndarray] = {}
-    for i in MOUTH:
-        u = float(rest_box_uv[i][0] + smoothed_delta[i][0])
-        v = float(rest_box_uv[i][1] + smoothed_delta[i][1])
-        out_uv[i] = np.array([_soft_uv(u, uv_cap), _soft_uv(v, uv_cap)], dtype=np.float64)
-
-    # Near-neutral / near-closed live mouth → snap to a closed slit.
-    if is_mouth_closed_snap(live, origin):
-        out_uv = _snap_neutral_mouth_uv(out_uv, region)
-
-    return out_uv
-
+    for i, w in weights.items():
+        if _vis(ref, i):
+            local_face[i, 1] = float(local_face[i, 1] + drop * w)
+    if _vis(ref, 23):
+        local_face[23, 1] = float(local_face[23, 1] + drop * 0.40 + smile_y + asym)
+        local_face[23, 0] = float(local_face[23, 0] - widen)
+    if _vis(ref, 26):
+        local_face[26, 1] = float(local_face[26, 1] + drop * 0.40 + smile_y - asym)
+        local_face[26, 0] = float(local_face[26, 0] + widen)
+    cx = 0.5 * (float(local_face[23, 0]) + float(local_face[26, 0]))
+    for i in (*roles.upper, *roles.lower):
+        if i in MOUTH_CORNERS or not _vis(ref, i):
+            continue
+        side = 1.0 if float(local_face[i, 0]) >= cx else -1.0
+        local_face[i, 0] = float(local_face[i, 0] + side * widen * 0.45)
 
 
 def _angle(origin: np.ndarray, tip: np.ndarray) -> float:
@@ -567,6 +356,13 @@ def _wrap_pi(a: float) -> float:
 
 def _clip(v: float, lo: float, hi: float) -> float:
     return float(np.clip(v, lo, hi))
+
+
+def _cap(v: float, limit: float, active: bool) -> float:
+    if not active:
+        return float(v)
+    lim = abs(float(limit))
+    return _clip(float(v), -lim, lim)
 
 
 def _smoothstep(edge0: float, edge1: float, value: float) -> float:
@@ -601,7 +397,6 @@ class ReferenceRig:
     brow_r_y: float
     mouth_gap: float
     mouth_width: float
-    mouth_region: MouthRegion | None
     # Body rest: absolute ref positions for length, vectors from neck.
     neck: np.ndarray
     bone_len: dict[int, float]  # slot -> length from parent
@@ -641,7 +436,6 @@ def build_reference_rig(ref_keypoints: np.ndarray) -> ReferenceRig:
     mw = _mouth_width(ref)
     mouth_gap = float(mg) if mg is not None else 0.02 * fh
     mouth_width = float(mw) if mw is not None else 0.25 * fw
-    mouth_region = _build_mouth_region(ref, face_center_xy=fc, face_height=fh)
 
     neck = ref[NECK, :2].copy() if _vis(ref, NECK) else fc + np.array([0.0, 0.35 * fh], dtype=np.float32)
 
@@ -679,7 +473,6 @@ def build_reference_rig(ref_keypoints: np.ndarray) -> ReferenceRig:
         brow_r_y=brow_r_y,
         mouth_gap=max(mouth_gap, 1e-4),
         mouth_width=max(mouth_width, 1e-4),
-        mouth_region=mouth_region,
         neck=neck.astype(np.float32),
         bone_len=bone_len,
         bone_angle=bone_angle,
@@ -701,13 +494,12 @@ class SemanticControls:
     blink_r: float = 1.0
     brow_l: float = 0.0  # × fh, negative = raise (y-up screen is +down)
     brow_r: float = 0.0
-    mouth_open: float = 0.0  # normalized 0=closed, 1=full authored open
-    mouth_smile: float = 0.0  # unused for reconstruct (box UV); kept for debug
+    mouth_open: float = 0.0  # normalized 0=closed, 1=wide open (pose keys)
+    mouth_smile: float = 0.0
     mouth_form: float = 0.0
     mouth_asym: float = 0.0
-    mouth_snapped: bool = False  # near-closed snap active
-    # Live lip expression as UV inside the character mouth box (not raw transplant).
-    mouth_uv: dict[int, tuple[float, float]] | None = None
+    mouth_gap_delta: float = 0.0  # live-origin gap / width
+    mouth_snapped: bool = False
     gaze_l: tuple[float, float] = (0.0, 0.0)  # normalized [-1,1] in eye
     gaze_r: tuple[float, float] = (0.0, 0.0)
     # Body angle deltas (radians) from origin rest, keyed by child slot.
@@ -803,11 +595,14 @@ def extract_controls(
     limit_brows: bool = True,
     limit_eyes: bool = True,
     limit_mouth: bool = True,
+    motion: dict[str, float] | None = None,
 ) -> SemanticControls:
     live = _as37(live_keypoints)
     origin = _as37(origin_keypoints)
     fh = rig.face_height
     g = float(gain)
+    # Motion multiplier: semantic deltas are (live - origin) * g.
+    # 1.0 = full webcam motion vs Center; 0.5 = half; overlay hide does not change g.
 
     # --- Head translation (face COM) in character fh units ---
     c_live = face_center(live)
@@ -819,17 +614,32 @@ def extract_controls(
         float(np.linalg.norm(rig.eye_r_center - rig.eye_l_center)), 1e-3
     )
     scale_to_char = ref_rigid_span / live_rigid_span
-    if head_tx_norm is not None:
-        head_tx = g * 0.40 * float(head_tx_norm)
-    else:
-        head_tx = g * scale_to_char * float(c_live[0] - c_origin[0]) / fh
-    if head_ty_norm is not None:
-        head_ty = g * 0.35 * float(head_ty_norm)
-    else:
-        head_ty = g * scale_to_char * float(c_live[1] - c_origin[1]) / fh
-    if limit_face:
-        head_tx = _clip(head_tx, -HEAD_TX_MAX, HEAD_TX_MAX)
-        head_ty = _clip(head_ty, -HEAD_TY_MAX, HEAD_TY_MAX)
+    landmark_tx = scale_to_char * float(c_live[0] - c_origin[0]) / fh
+    landmark_ty = scale_to_char * float(c_live[1] - c_origin[1]) / fh
+
+    def _pick_translation(landmark: float, calibrated_norm: float | None, gain: float) -> float:
+        """Prefer same-space landmark COM; fall back to RelativePose nx/ny.
+
+        Replacing landmark delta with a tiny nx (old 0.40× path) froze the
+        overlay while the webcam face was clearly moving.
+        """
+        if calibrated_norm is None:
+            return g * landmark
+        calibrated = gain * float(calibrated_norm)
+        if abs(landmark) >= abs(calibrated):
+            return g * landmark
+        return g * calibrated
+
+    caps = motion or {}
+    yaw_lim = float(caps.get("yaw", HEAD_YAW_MAX_DEG))
+    roll_lim = float(caps.get("roll", HEAD_ROLL_MAX_DEG))
+    pitch_up = float(caps.get("pitch_up", HEAD_PITCH_MAX_DEG))
+    pitch_down = float(caps.get("pitch_down", HEAD_PITCH_MAX_DEG))
+
+    head_tx = _pick_translation(landmark_tx, head_tx_norm, HEAD_TX_NORM_GAIN)
+    head_ty = _pick_translation(landmark_ty, head_ty_norm, HEAD_TY_NORM_GAIN)
+    head_tx = _cap(head_tx, HEAD_TX_MAX, limit_face)
+    head_ty = _cap(head_ty, HEAD_TY_MAX, limit_face)
 
     # --- Roll from eye line (landmark fallback when RelativePose missing) ---
     a_live = _eye_line_angle(live)
@@ -840,8 +650,7 @@ def extract_controls(
         roll = np.degrees(_wrap_pi(a_live - a_origin)) * g
     else:
         roll = 0.0
-    if limit_face:
-        roll = _clip(roll, -HEAD_ROLL_MAX_DEG, HEAD_ROLL_MAX_DEG)
+    roll = _cap(roll, roll_lim, limit_face)
 
     # --- Yaw / pitch: prefer calibrated RelativePose, else landmark geometry ---
     # Camera mesh shows raw landmark rotation even when CenterCalibration has
@@ -884,11 +693,11 @@ def extract_controls(
     # Even with optional tight limiters disabled, keep turns in the range the
     # 2D rig can represent cleanly. A physical 90° turn maps to a strong 45°
     # character turn instead of folding the mesh.
-    yaw = _clip(yaw, -45.0, 45.0)
-    pitch = _clip(pitch, -30.0, 30.0)
+    yaw = _cap(yaw, yaw_lim, limit_face)
     if limit_face:
-        yaw = _clip(yaw, -HEAD_YAW_MAX_DEG, HEAD_YAW_MAX_DEG)
-        pitch = _clip(pitch, -HEAD_PITCH_MAX_DEG, HEAD_PITCH_MAX_DEG)
+        pitch = _clip(pitch, -pitch_up, pitch_down)
+    yaw = _clip(yaw, -min(45.0, max(yaw_lim, 1e-6)), min(45.0, max(yaw_lim, 1e-6)))
+    pitch = _clip(pitch, -min(30.0, max(pitch_up, 1e-6)), min(30.0, max(pitch_down, 1e-6)))
 
     # --- Forward/back as calibrated face-size scale ---
     # Eye-to-eye span shrinks under yaw (perspective). Undo that so a turn is
@@ -911,8 +720,6 @@ def extract_controls(
         head_scale = 1.0 + (head_scale - 1.0) * expand_keep
     else:
         head_scale = 1.0 + (head_scale - 1.0) * shrink_keep
-    if limit_face:
-        head_scale = _clip(head_scale, HEAD_SCALE_MIN, HEAD_SCALE_MAX)
 
     # --- Blink ---
     def _blink(eye: tuple[int, ...]) -> float:
@@ -940,25 +747,25 @@ def extract_controls(
         d_live = float(b_l[1] - e_l[1])
         d_origin = float(b_o[1] - e_o[1])
         delta = g * scale_to_char * (d_live - d_origin) / fh
-        if limit_brows:
-            delta = _clip(delta, -BROW_RAISE_MAX, BROW_RAISE_MAX)
-        return delta
+        return _cap(delta, BROW_RAISE_MAX, limit_brows)
 
     brow_l = _brow(LEFT_BROW, L_EYE)
     brow_r = _brow(RIGHT_BROW, R_EYE)
 
-    # --- Mouth: live expression UV inside the character mouth box ---
+    # --- Mouth: 4 scalars on the authored contour (open / smile / width / asym) ---
     mouth_live = _mouth_local_metrics(live)
     mouth_origin = _mouth_local_metrics(origin)
     mouth_open = 0.0
     mouth_form = 0.0
     mouth_asym = 0.0
+    mouth_gap_delta = 0.0
     smile = 0.0
     if mouth_live is not None and mouth_origin is not None:
         open_live, lift_l_live, lift_r_live, width_live = mouth_live
         open_origin, lift_l_origin, lift_r_origin, width_origin = mouth_origin
         closed_floor = _clip(open_origin, 0.04, 0.12)
         mouth_open = _smoothstep(closed_floor, closed_floor + 0.42, open_live)
+        mouth_gap_delta = (open_live - open_origin) * g
         width_delta = width_live / max(width_origin, 1e-4) - 1.0
         mouth_form = float(np.tanh(width_delta / 0.18))
         asym_live = lift_l_live - lift_r_live
@@ -967,22 +774,9 @@ def extract_controls(
         live_lift = 0.5 * (lift_l_live + lift_r_live)
         origin_lift = 0.5 * (lift_l_origin + lift_r_origin)
         smile = g * (live_lift - origin_lift)
-        if limit_mouth:
-            smile = _clip(smile, -MOUTH_SMILE_MAX, MOUTH_SMILE_MAX)
-
-    mouth_uv = None
-    if rig.mouth_region is not None:
-        mouth_expr = _mouth_box_expression_uv(
-            live,
-            origin,
-            rig.mouth_region,
-            scale_to_char=scale_to_char * g,
-            limit_mouth=limit_mouth,
-        )
-        if mouth_expr is not None:
-            mouth_uv = {
-                i: (float(p[0]), float(p[1])) for i, p in mouth_expr.items()
-            }
+        smile = _cap(smile, MOUTH_SMILE_MAX, limit_mouth)
+        mouth_open = _clip(mouth_open, 0.0, 1.0)
+        mouth_form = _clip(mouth_form, -1.0, 1.0)
 
     raw_gaze: dict[int, tuple[float, float]] = {}
     for iris, eye in IRIS_EYE_PAIRS:
@@ -992,9 +786,8 @@ def extract_controls(
         g_origin = _normalized_gaze(origin, iris, eye)
         gx = g_live[0] - g_origin[0]
         gy = g_live[1] - g_origin[1]
-        if limit_eyes:
-            gx = _clip(gx, -GAZE_MAX, GAZE_MAX)
-            gy = _clip(gy, -GAZE_MAX, GAZE_MAX)
+        gx = _cap(gx, GAZE_MAX, limit_eyes)
+        gy = _cap(gy, GAZE_MAX, limit_eyes)
         raw_gaze[iris] = (gx, gy)
 
     # Human eyes normally move conjugately. Fuse their shared motion and keep
@@ -1055,15 +848,15 @@ def extract_controls(
         a_o = _angle(origin[par, :2], origin[child, :2])
         d = _wrap_pi(a_l - a_o)
         cap = angle_caps.get(child, np.radians(30.0))
-        # Small shoulder/chest angle changes are commonly detector movement
-        # caused by a head turn. Remove that jitter and damp tracked-body motion
-        # before applying it to the much smaller character rig.
-        deadzone = np.radians(2.0 if child in (R_ELBOW, L_ELBOW) else 3.0)
+        # Ignore sub-degree tracker jitter only. A 3° deadzone plus 0.65 damp
+        # ate desk-webcam arm/shoulder motion and left the overlay frozen.
+        deadzone = np.radians(0.35)
         if abs(d) <= deadzone:
             d = 0.0
         else:
             d = np.sign(d) * (abs(d) - deadzone)
-        body_d[child] = _clip(d * g * 0.65, -cap, cap)
+        body_d[child] = _clip(d * g, -cap, cap)
+        body_d[child] = _clip(body_d[child], -np.radians(90.0), np.radians(90.0))
 
     return SemanticControls(
         head_tx=head_tx,
@@ -1080,8 +873,8 @@ def extract_controls(
         mouth_smile=smile,
         mouth_form=mouth_form,
         mouth_asym=mouth_asym,
-        mouth_snapped=is_mouth_closed_snap(live, origin),
-        mouth_uv=mouth_uv,
+        mouth_gap_delta=mouth_gap_delta,
+        mouth_snapped=False,
         gaze_l=gaze_l,
         gaze_r=gaze_r,
         body_d_angle=body_d,
@@ -1168,6 +961,7 @@ def reconstruct_pose(
     ref = _as37(ref_keypoints)
     out = ref.copy()
     fh = rig.face_height
+    warp_mix = 1.0
 
     # --- Expressions in the reference-local face frame ---
     local_face = rig.local_face.copy()
@@ -1177,29 +971,16 @@ def reconstruct_pose(
             if _vis(ref, i):
                 local_face[i, 1] = float(local_face[i, 1] + delta * fh)
 
-    if (
-        controls.mouth_uv is not None
-        and rig.mouth_region is not None
-        and all(_vis(ref, i) for i in MOUTH)
-    ):
-        # Location: character mouth box locked to the ref stable anchor.
-        # Expression: live UV only moves points inside that box.
-        region = rig.mouth_region
-        box_origin = (
-            region.anchor_local.astype(np.float64)
-            + region.center_from_anchor.astype(np.float64)
-        )
-        hw = float(region.half_w)
-        hh = float(region.half_h)
-        for i in MOUTH:
-            u, v = controls.mouth_uv.get(i, region.rest_uv.get(i, (0.0, 0.0)))
-            local_face[i] = (
-                box_origin + np.array([u * hw, v * hh], dtype=np.float64)
-            ).astype(np.float32)
+    _apply_mouth_expression(
+        local_face, ref, rig, controls, limit_mouth=limit_mouth
+    )
 
     # --- One authoritative head transform ---
+    # Pitch nod is applied here (after in-place warp offset removal) so a
+    # 15–20° look-down actually moves the chin instead of only foreshortening.
+    pitch_nod = float(np.sin(np.radians(controls.head_pitch_deg))) * PITCH_NOD * fh
     new_center = rig.face_center + np.array(
-        [controls.head_tx * fh, controls.head_ty * fh], dtype=np.float32
+        [controls.head_tx * fh, controls.head_ty * fh + pitch_nod], dtype=np.float32
     )
     yaw_sin = float(np.sin(np.radians(controls.head_yaw_deg)))
 
@@ -1229,6 +1010,15 @@ def reconstruct_pose(
             roll_deg=controls.head_roll_deg,
             scale=controls.head_scale,
         )
+        if warp_mix < 0.999:
+            rest = _apply_head_warp(
+                local,
+                yaw_deg=0.0,
+                pitch_deg=0.0,
+                roll_deg=controls.head_roll_deg,
+                scale=1.0,
+            )
+            warped = (rest * (1.0 - warp_mix) + warped * warp_mix).astype(np.float32)
         warped[0] -= yaw_sin * YAW_FEATURE_SHIFT * fh * _yaw_depth(i)
         baseline = _apply_head_warp(
             local,
@@ -1274,7 +1064,16 @@ def reconstruct_pose(
             roll_deg=controls.head_roll_deg,
             scale=controls.head_scale,
         )
-        warped[0] -= yaw_sin * YAW_FEATURE_SHIFT * fh * 0.34
+        if warp_mix < 0.999:
+            rest = _apply_head_warp(
+                local.astype(np.float32),
+                yaw_deg=0.0,
+                pitch_deg=0.0,
+                roll_deg=controls.head_roll_deg,
+                scale=1.0,
+            )
+            warped = (rest * (1.0 - warp_mix) + warped * warp_mix).astype(np.float32)
+        warped[0] -= yaw_sin * YAW_FEATURE_SHIFT * fh * 0.34 * warp_mix
         base = new_center + warped - head_warp_offset
         out[iris, 0] = float(base[0])
         out[iris, 1] = float(base[1])
@@ -1324,6 +1123,10 @@ def reconstruct_pose(
         out[iris, 0] = float(pupil[0])
         out[iris, 1] = float(pupil[1])
 
+    # Last net after the head warp: keep the mouth off the nose and inside
+    # the authored lip rows. Live sanitize leaves topology off.
+    out = clamp_mouth_anatomy(out, fh, ref=ref, limit_mouth=limit_mouth)
+
     # --- Body: held / angle-based reconstruction with ref bone lengths ---
     kind = body_method_kind(body_method)
     if body_lost or kind == "held":
@@ -1332,12 +1135,16 @@ def reconstruct_pose(
             for i in range(7):
                 if float(pb[i, 3]) >= 0.5:
                     out[30 + i] = pb[i]
+        enforce_head_body_attachment(out, ref)
         return out
 
-    # Neck follows face lightly (character units).
+    # Neck follows face (0.35 / 0.25 mix).
     if _vis(ref, NECK):
-        out[NECK, 0] = float(rig.neck[0] + controls.head_tx * fh * 0.35)
-        out[NECK, 1] = float(rig.neck[1] + controls.head_ty * fh * 0.25)
+        follow = 0.35
+        out[NECK, 0] = float(rig.neck[0] + controls.head_tx * fh * follow)
+        out[NECK, 1] = float(
+            rig.neck[1] + controls.head_ty * fh * follow * (0.25 / 0.35)
+        )
         out[NECK, 2] = max(float(out[NECK, 2]), 0.85)
         out[NECK, 3] = 1.0
 
@@ -1372,6 +1179,7 @@ def reconstruct_pose(
             out[BODY_NOSE, 0] = float(body_nose[0])
             out[BODY_NOSE, 1] = float(body_nose[1])
 
+    enforce_head_body_attachment(out, ref)
     return out
 
 
@@ -1395,6 +1203,9 @@ def apply_constrained_retarget(
     limit_nose: bool = True,
     limit_mouth: bool = True,
     reference_rig: ReferenceRig | None = None,
+    prev_controls: SemanticControls | None = None,
+    controls_out: list | None = None,
+    motion: dict[str, float] | None = None,
 ) -> np.ndarray:
     """End-to-end constrained retarget (pre-sanitize).
 
@@ -1416,7 +1227,10 @@ def apply_constrained_retarget(
         limit_brows=limit_brows,
         limit_eyes=limit_eyes,
         limit_mouth=limit_mouth,
+        motion=motion,
     )
+    if controls_out is not None:
+        controls_out.append(controls)
     return reconstruct_pose(
         ref_keypoints,
         rig,
@@ -1475,26 +1289,6 @@ def enforce_proportion_invariants(
             for i in eye:
                 if _vis(o, i):
                     o[i, 0] = float(c[0] + (float(o[i, 0]) - float(c[0])) * fix)
-
-    # Mouth width.
-    mw_ref = _mouth_width(r)
-    mw_out = _mouth_width(o)
-    if (
-        sanitize_face
-        and limit_mouth
-        and mw_ref is not None
-        and mw_out is not None
-        and mw_out > 1e-5
-        and _vis(o, 21)
-    ):
-        ratio = mw_out / mw_ref
-        if abs(ratio - 1.0) > tol_face:
-            target = _clip(ratio, 1.0 - tol_face, 1.0 + tol_face)
-            fix = target / ratio
-            cx = float(o[21, 0])
-            for i in MOUTH:
-                if _vis(o, i):
-                    o[i, 0] = float(cx + (float(o[i, 0]) - cx) * fix)
 
     if not sanitize_body:
         return

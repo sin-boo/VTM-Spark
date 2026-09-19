@@ -5,15 +5,24 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pose_controller import (
+from backend.pose_controller import (
+    ATTACH_LEN_MAX,
     BODY_NOSE,
+    IRIS_L,
+    IRIS_R,
+    KEYPOINT_REFS,
     TRAVEL_BODY,
     TRAVEL_BODY_TRACKED,
+    block_model_slots,
     draw_keypoint_mesh,
+    enforce_head_body_attachment,
     face_height,
     normalized_to_pixels,
+    overlay_visible_slots,
     pixels_to_normalized,
+    ref_of,
     sanitize_pose,
+    slot_of,
 )
 
 
@@ -51,8 +60,8 @@ def _blank37() -> np.ndarray:
         )
     ):
         k[20 + i] = [x, y, 1, 1]
-    k[28] = [0.18, -0.16, 1, 1]
-    k[29] = [-0.18, -0.16, 1, 1]
+    k[28] = [-0.18, -0.16, 1, 1]  # IRIS.L in EYE.L
+    k[29] = [0.18, -0.16, 1, 1]  # IRIS.R in EYE.R
     # Body
     k[30] = [0.0, 0.05, 1, 1]
     k[31] = [0.0, 0.55, 1, 1]
@@ -90,16 +99,13 @@ def test_sanitize_body_nose_aligns_when_untracked() -> None:
     ) <= float(out[31, 1])
 
 
-def test_sanitize_body_nose_keeps_tracked() -> None:
+def test_sanitize_body_nose_stays_attached_when_tracked() -> None:
     ref = _blank37()
     driven = ref.copy()
     driven[BODY_NOSE, 0] = 0.12
     driven[BODY_NOSE, 1] = 0.10
     out = sanitize_pose(driven, ref, body_tracked=True)
-    # Must not snap exactly onto face nose 15 when tracked.
-    assert abs(float(out[BODY_NOSE, 0]) - float(out[15, 0])) > 1e-4 or abs(
-        float(out[BODY_NOSE, 1]) - float(out[15, 1])
-    ) > 1e-4
+    np.testing.assert_allclose(out[BODY_NOSE, :2], out[15, :2], atol=2e-4)
 
 
 def test_sanitize_tracked_allows_wider_body_travel() -> None:
@@ -189,6 +195,28 @@ def test_draw_skeleton_only_without_face_iris() -> None:
     assert not np.array_equal(np.asarray(face_out), np.asarray(out))
 
 
+def test_overlay_skips_blocked_nose_slots() -> None:
+    ids = overlay_visible_slots({"show_mesh": True, "show_skeleton": True, "show_nose": True})
+    assert BODY_NOSE not in ids
+    assert 15 not in ids
+    assert 14 in ids
+    assert 16 in ids
+    assert 31 in ids
+
+
+def test_block_model_slots_zeros_nose_tips() -> None:
+    k = _blank37()
+    assert float(k[15, 3]) >= 0.5
+    assert float(k[30, 3]) >= 0.5
+    out = block_model_slots(k)
+    for idx in (15, 30):
+        assert float(out[idx, 3]) < 0.5
+        assert abs(float(out[idx, 0])) < 1e-8
+        assert abs(float(out[idx, 1])) < 1e-8
+    np.testing.assert_allclose(out[14, :2], k[14, :2], atol=1e-8)
+    np.testing.assert_allclose(out[31, :2], k[31, :2], atol=1e-8)
+
+
 def test_draw_skeleton_lost_uses_red() -> None:
     """Held/lost body overlay should tint red vs active green."""
     k = _blank37()
@@ -222,7 +250,7 @@ def test_draw_skeleton_lost_uses_red() -> None:
 
 def test_draw_mouth_snapped_uses_blue() -> None:
     """Near-closed snap turns mouth overlay from purple to blue."""
-    from pose_controller import MOUTH, MOUTH_COLOR, MOUTH_SNAPPED_COLOR
+    from backend.pose_controller import MOUTH, MOUTH_COLOR, MOUTH_SNAPPED_COLOR
 
     k = _blank37()
     # Visible closed mouth slit in norm_crop space.
@@ -292,3 +320,92 @@ def test_full_mesh_differs_from_body_only() -> None:
         show_skeleton=True,
     )
     assert not np.array_equal(np.asarray(full), np.asarray(body))
+
+
+def test_draw_hair_overlay_tints_polygon() -> None:
+    from backend.pose_controller import draw_hair_overlay
+
+    img = Image.new("RGB", (64, 64), color=(10, 10, 10))
+    segs = [
+        {
+            "class": "hair_middle",
+            "polygon": [[-0.5, -0.5], [0.5, -0.5], [0.0, 0.2]],
+        }
+    ]
+    out = draw_hair_overlay(img, segs, lost=False)
+    assert out.size == img.size
+    assert not np.array_equal(np.asarray(out), np.asarray(img))
+    pix = [
+        {
+            "class": "hair_left",
+            "polygon": [[4.0, 4.0], [40.0, 4.0], [20.0, 40.0]],
+        }
+    ]
+    out_px = draw_hair_overlay(img, pix, pixel_space=True)
+    assert not np.array_equal(np.asarray(out_px), np.asarray(img))
+    blank = draw_hair_overlay(img, None)
+    assert np.array_equal(np.asarray(blank), np.asarray(img))
+
+
+def test_draw_hair_overlay_has_no_shell_outline() -> None:
+    import inspect
+
+    from backend.pose_controller import draw_hair_overlay
+
+    src = inspect.getsource(draw_hair_overlay)
+    assert "outline=" not in src
+
+
+def _chin_neck(k: np.ndarray) -> float:
+    return float(np.linalg.norm(k[31, :2] - k[2, :2]))
+
+
+def test_attachment_identity_on_reference() -> None:
+    ref = _blank37()
+    out = ref.copy()
+    enforce_head_body_attachment(out, ref)
+    np.testing.assert_allclose(out[31, :2], ref[31, :2], atol=1e-5)
+    np.testing.assert_allclose(out[30, :2], out[15, :2], atol=1e-5)
+
+
+def test_attachment_pulls_neck_when_face_flies_up() -> None:
+    ref = _blank37()
+    rest = _chin_neck(ref)
+    out = ref.copy()
+    # Slide the whole face up; leave the skeleton behind.
+    for i in list(range(28)) + [28, 29]:
+        out[i, 1] -= 0.55
+    enforce_head_body_attachment(out, ref)
+    assert _chin_neck(out) <= rest * ATTACH_LEN_MAX + 1e-4
+    assert float(out[31, 1]) >= float(out[2, 1]) - 1e-4
+    np.testing.assert_allclose(out[30, :2], out[15, :2], atol=2e-4)
+    # Shoulders ride with the neck so the torso stays one piece.
+    sh_off = (ref[32, :2] - ref[31, :2])
+    np.testing.assert_allclose(out[32, :2] - out[31, :2], sh_off, atol=2e-4)
+
+
+def test_attachment_allows_modest_scale_but_clamps_a_tear() -> None:
+    ref = _blank37()
+    rest = _chin_neck(ref)
+    mild = ref.copy()
+    mild[31, 1] = float(ref[2, 1]) + rest * 1.15
+    enforce_head_body_attachment(mild, ref)
+    assert abs(_chin_neck(mild) - rest * 1.15) < 0.02
+
+    torn = ref.copy()
+    torn[31, 1] = float(ref[2, 1]) + rest * 3.0
+    enforce_head_body_attachment(torn, ref)
+    assert _chin_neck(torn) <= rest * ATTACH_LEN_MAX + 1e-4
+
+
+def test_harness_refs_match_person_left_iris() -> None:
+    assert len(KEYPOINT_REFS) == 37
+    assert ref_of(IRIS_L) == "IRIS.L"
+    assert ref_of(IRIS_R) == "IRIS.R"
+    assert slot_of("IRIS.L") == 28
+    assert slot_of("right_iris") == 28
+    assert slot_of("iris_l") == 28
+    assert slot_of("EYE.L.IN") == 11
+    assert slot_of("nose") == 15
+    assert slot_of("BODY.NOSE") == 30
+    assert slot_of(None) == -1

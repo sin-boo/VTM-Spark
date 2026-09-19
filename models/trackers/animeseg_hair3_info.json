@@ -1,0 +1,20 @@
+{
+  "name": "animeseg_hair3",
+  "file": "weights/hair/animeseg_hair3.pt",
+  "trained_at": "2026-08-16T15:52:44.792018+00:00",
+  "labels": 124,
+  "train_tiles": 210,
+  "val_images": 18,
+  "epoch": 8,
+  "best_epoch": 8,
+  "val_hair_iou": 0.87825,
+  "train_loss": 0.12232,
+  "image_size": 768,
+  "batch": 2,
+  "classes": [
+    "hair_middle",
+    "hair_left",
+    "hair_right"
+  ],
+  "notes": "AnimeSeg Mask2Former fine-tune; dataset cached on GPU; 4-class semantic (bg + L/M/R hair)"
+}

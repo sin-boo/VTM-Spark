@@ -8,10 +8,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import data_dir, display_path, models_dir, package_root
+from .paths import display_path, models_dir, models_root, package_root
 
 _lock = threading.RLock()
 _state: dict[str, Any] = {
@@ -28,6 +29,10 @@ _state: dict[str, Any] = {
 
 # Minimum size to treat an existing file as a real checkpoint (not a stub).
 _MIN_CKPT_BYTES = 1_000_000
+NEW_MODEL_DAYS = 30
+_CATALOG_TTL_S = 10 * 60
+_catalog_lock = threading.Lock()
+_catalog_cache: tuple[float, list[dict[str, Any]]] | None = None
 
 # When True, print ASCII progress to stderr (Smart Build / CLI). Off inside the live app UI.
 _console_progress = False
@@ -160,7 +165,13 @@ def _copy_with_progress(src: Path, dest: Path, *, label: str) -> None:
 
 
 def model_sources_path() -> Path:
-    return data_dir() / "model_sources.json"
+    preferred = models_root() / "model_sources.json"
+    if preferred.is_file():
+        return preferred
+    legacy = package_root() / "data" / "model_sources.json"
+    if legacy.is_file():
+        return legacy
+    return preferred
 
 
 def load_model_sources() -> dict[str, Any]:
@@ -276,7 +287,7 @@ def _notify_runtime() -> None:
         pass
 
 
-def start_model_download() -> dict[str, Any]:
+def start_model_download(names: list[str] | None = None) -> dict[str, Any]:
     sources = load_model_sources()
     if not sources.get("enabled"):
         _set_state(
@@ -293,7 +304,7 @@ def start_model_download() -> dict[str, Any]:
 
     thread = threading.Thread(
         target=_run_download,
-        args=(sources,),
+        args=(sources, names),
         name="vtm-model-download",
         daemon=True,
     )
@@ -373,10 +384,219 @@ def missing_asset_jobs(sources: dict[str, Any] | None = None) -> list[dict[str, 
     return [j for j in _asset_jobs(sources) if not _asset_present(j)]
 
 
-def ensure_default_model(*, blocking: bool = False) -> dict[str, Any]:
-    """Ensure configured HF assets exist locally; download any that are missing."""
+def _is_dit_weight_name(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(".pt") or lower.endswith(".pth") or lower.endswith(".ckpt")
+
+
+def hub_checkpoint_names() -> set[str]:
+    """Filenames that came from Hugging Face (catalog), not custom local drops."""
+    from .ui_session import load_ui_session
+
+    names: set[str] = set()
+    for raw in load_ui_session().get("hub_files") or []:
+        name = Path(str(raw)).name
+        if _is_dit_weight_name(name):
+            names.add(name)
     sources = load_model_sources()
-    missing = missing_asset_jobs(sources) if sources.get("enabled") else []
+    for job in _asset_jobs(sources):
+        dest = str(job.get("dest") or "")
+        if dest.replace("\\", "/").startswith("models/dit/"):
+            name = Path(dest).name
+            if _is_dit_weight_name(name):
+                names.add(name)
+    for raw in sources.get("files") or []:
+        name = Path(str(raw)).name
+        if _is_dit_weight_name(name):
+            names.add(name)
+    return names
+
+
+def _local_dit_names() -> set[str]:
+    names: set[str] = set()
+    dit = models_dir()
+    if not dit.is_dir():
+        return names
+    try:
+        entries = list(dit.iterdir())
+    except OSError:
+        return names
+    nested: list[Path] = []
+    for path in entries:
+        if path.is_dir() and not path.name.startswith("."):
+            nested.append(path)
+            continue
+        if path.is_file() and _is_dit_weight_name(path.name):
+            names.add(path.name)
+    for child in nested:
+        try:
+            kids = list(child.iterdir())
+        except OSError:
+            continue
+        for path in kids:
+            if path.is_file() and _is_dit_weight_name(path.name):
+                names.add(path.name)
+    return names
+
+
+def _hub_dit_listing(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """Hub DiT filenames plus last-commit time when Hugging Face provides it."""
+    repo = str(sources.get("hf_repo") or "").strip()
+    if not repo:
+        return []
+    revision = str(sources.get("hf_revision") or "main")
+    try:
+        from huggingface_hub import HfApi
+
+        tree = list(HfApi().list_repo_tree(repo, revision=revision, recursive=True))
+    except Exception as exc:
+        print(f"Hub catalog ping skipped ({exc})")
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in tree:
+        rel = str(getattr(entry, "path", "") or "").replace("\\", "/").strip()
+        if not rel:
+            continue
+        parts = Path(rel).parts
+        name = Path(rel).name
+        if not _is_dit_weight_name(name):
+            continue
+        if len(parts) > 2:
+            continue
+        if len(parts) == 2 and parts[0] not in {"dit", "models"}:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        published = None
+        last = getattr(entry, "last_commit", None)
+        date = getattr(last, "date", None) if last is not None else None
+        if date is not None:
+            try:
+                published = date if getattr(date, "tzinfo", None) else date.replace(tzinfo=timezone.utc)
+            except Exception:
+                published = None
+        rows.append({"name": name, "hf": rel, "dest": f"models/dit/{name}", "published": published})
+    return rows
+
+
+def hub_catalog_offers(
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+    listing: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Missing hub DiT weights. ``is_new`` is true for 30 days after publish."""
+    sources = load_model_sources()
+    if not sources.get("enabled"):
+        return []
+    stamp = now or datetime.now(timezone.utc)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    global _catalog_cache
+    if listing is None:
+        with _catalog_lock:
+            cached = _catalog_cache
+            if not force and cached and (time.time() - cached[0]) < _CATALOG_TTL_S:
+                listing = cached[1]
+            else:
+                listing = _hub_dit_listing(sources)
+                _catalog_cache = (time.time(), listing)
+    owned = _local_dit_names()
+    cutoff = stamp - timedelta(days=NEW_MODEL_DAYS)
+    offers: list[dict[str, Any]] = []
+    for row in listing or []:
+        name = str(row.get("name") or "")
+        if not name or name in owned:
+            continue
+        published = row.get("published")
+        is_new = bool(published and published >= cutoff)
+        offers.append(
+            {
+                "name": name,
+                "label": Path(name).stem,
+                "path": str(row.get("dest") or f"models/dit/{name}"),
+                "is_new": is_new,
+                "published": published.isoformat() if hasattr(published, "isoformat") else "",
+                "badge": "New" if is_new else "Available",
+            }
+        )
+    offers.sort(key=lambda item: (not item["is_new"], str(item["label"]).lower()))
+    return offers
+
+
+def _hf_dit_jobs(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """Ping the Hub repo for new DiT weights; never overwrite files already on disk."""
+    repo = str(sources.get("hf_repo") or "").strip()
+    if not repo:
+        return []
+    revision = str(sources.get("hf_revision") or "main")
+    names: list[str] = []
+    jobs: list[dict[str, Any]] = []
+    seen_dest: set[str] = set()
+    try:
+        from huggingface_hub import list_repo_files
+
+        files = list_repo_files(repo, revision=revision)
+    except Exception as exc:
+        print(f"Hub catalog ping skipped ({exc})")
+        files = []
+
+    for rel in files:
+        rel_s = str(rel).replace("\\", "/").strip()
+        if not rel_s or rel_s.endswith("/"):
+            continue
+        parts = Path(rel_s).parts
+        name = Path(rel_s).name
+        if not _is_dit_weight_name(name):
+            continue
+        if len(parts) > 2:
+            continue
+        if len(parts) == 2 and parts[0] not in {"dit", "models"}:
+            continue
+        names.append(name)
+        dest = f"models/dit/{name}"
+        if dest in seen_dest:
+            continue
+        seen_dest.add(dest)
+        jobs.append(
+            {
+                "kind": "hf",
+                "hf": rel_s,
+                "dest": dest,
+                "min_bytes": _MIN_CKPT_BYTES,
+            }
+        )
+
+    if names:
+        from .ui_session import save_ui_session
+
+        save_ui_session(hub_files=sorted(set(names)))
+    return jobs
+
+
+def _merged_download_jobs(sources: dict[str, Any]) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for job in list(_asset_jobs(sources)) + _hf_dit_jobs(sources):
+        dest = str(job.get("dest") or "")
+        if not dest or dest in seen:
+            continue
+        seen.add(dest)
+        jobs.append(job)
+    return jobs
+
+
+def ensure_default_model(*, blocking: bool = False) -> dict[str, Any]:
+    """Ensure configured HF assets exist locally; download any that are missing.
+
+    Existing files are never deleted or overwritten. Hub is pinged for *new*
+    DiT checkpoints only.
+    """
+    sources = load_model_sources()
+    jobs = _merged_download_jobs(sources) if sources.get("enabled") else []
+    missing = [j for j in jobs if not _asset_present(j)]
 
     if not missing:
         # Prefer checklist pass when available.
@@ -453,10 +673,13 @@ def wait_for_download(*, timeout: float = 3600.0) -> dict[str, Any]:
     return download_status()
 
 
-def _run_download(sources: dict[str, Any]) -> None:
+def _run_download(sources: dict[str, Any], names: list[str] | None = None) -> None:
     try:
         hf_repo = str(sources.get("hf_repo") or "").strip()
-        jobs = _asset_jobs(sources)
+        jobs = _merged_download_jobs(sources)
+        if names:
+            want = {Path(str(n)).name for n in names if str(n).strip()}
+            jobs = [job for job in jobs if Path(str(job.get("dest") or "")).name in want]
         if not jobs:
             raise RuntimeError("model_sources.json has no files to download")
         if any(j["kind"] == "hf" for j in jobs) and not hf_repo:
@@ -653,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dry_run_download()
 
     print(f"DiT directory: {models_dir()}")
-    print("Progress bars below mean the download is still running (not frozen).")
+    print("Existing files are kept. Hub ping downloads only new missing checkpoints.")
     st = ensure_default_model(blocking=True)
     status = st.get("status")
     if status == "done" or has_local_checkpoints():

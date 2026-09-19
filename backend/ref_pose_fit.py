@@ -563,8 +563,8 @@ def detect_face37_pixels(
     failures on anime stills (manual Calibrate button).
 
     When ``test_mode`` is True: schema-mapped detector output only — no
-    mouth/nose geometric repair, no eye refine, no flip-TTA. Used by
-    ``test_pose.py`` / ``test.bat``. Native HRNet indices are always converted
+    mouth/nose geometric repair, no eye refine, no flip-TTA. Native HRNet
+    indices are always converted
     to KEYPOINT_SCHEMA before return.
     """
     import cv2

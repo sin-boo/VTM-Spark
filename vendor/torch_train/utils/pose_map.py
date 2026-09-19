@@ -2,9 +2,11 @@
 
 Channels (see utils.keypoints.POSE_CHANNEL_GROUPS):
   0 face_outline, 1 eyebrow, 2 eye, 3 iris, 4 nose, 5 mouth,
-  6 skeleton (bones as lines), 7 joints (body joint gaussians).
+  6 skeleton (bones as lines), 7 joints (body joint gaussians),
+  8 hair_middle, 9 hair_left, 10 hair_right.
 
 Input keypoints are expected in normalized [-1, 1] crop space.
+Optional ``hair_maps`` are (B, 3, h, w) in [0, 1] and get resized onto channels 8–10.
 Output is (B, NUM_POSE_CHANNELS, H, W) float32 in [0, 1].
 """
 
@@ -15,6 +17,7 @@ import torch.nn.functional as F
 
 from utils.keypoints import (
     BODY_BONE_INDICES,
+    HAIR_POSE_CHANNEL_SLICE,
     KEYPOINT_DIM,
     NUM_KEYPOINTS,
     NUM_POSE_CHANNELS,
@@ -110,6 +113,7 @@ def rasterize_pose_maps(
     sigma: float = 1.5,
     bone_thickness: float = 1.0,
     clamp: bool = True,
+    hair_maps: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Rasterize a batch of keypoints to pose maps.
 
@@ -119,6 +123,7 @@ def rasterize_pose_maps(
         sigma: gaussian std in pixels for point splats.
         bone_thickness: soft-line thickness for skeleton channel.
         clamp: if True, clamp output to [0, 1].
+        hair_maps: optional (B, 3, h, w) hair part masks in [0, 1].
 
     Returns:
         (B, NUM_POSE_CHANNELS, height, width) float tensor.
@@ -144,6 +149,8 @@ def rasterize_pose_maps(
         if group == "skeleton":
             _draw_bones(out[:, ch], xs, ys, visible, thickness=bone_thickness)
             continue
+        if group.startswith("hair_"):
+            continue
         idxs = group_indices(group)
         if not idxs:
             continue
@@ -155,6 +162,14 @@ def rasterize_pose_maps(
             weights.index_select(1, idx_t),
             sigma=sigma,
         )
+
+    if hair_maps is not None:
+        hair = hair_maps.to(device=device, dtype=dtype)
+        if hair.ndim != 4 or hair.shape[0] != bsz or hair.shape[1] != 3:
+            raise ValueError(f"Expected hair_maps (B, 3, h, w), got {tuple(hair.shape)}")
+        if hair.shape[-2:] != (height, width):
+            hair = F.interpolate(hair, size=(height, width), mode="bilinear", align_corners=False)
+        out[:, HAIR_POSE_CHANNEL_SLICE] = hair.clamp(0.0, 1.0)
 
     if clamp:
         out = out.clamp(0.0, 1.0)

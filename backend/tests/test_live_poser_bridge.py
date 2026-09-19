@@ -2,18 +2,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-LIVE = ROOT / "tools" / "live-poser"
-if str(LIVE) not in sys.path:
-    sys.path.insert(0, str(LIVE))
-
-from iris_tracker import CustomIrisTracker  # noqa: E402
-from skeleton import SkeletonHold, resolve_body7, synth_upper_body  # noqa: E402
+from iris_tracker import CustomIrisTracker
+from skeleton import SkeletonHold, resolve_body7, synth_upper_body
 
 
 def _fake_pts28() -> np.ndarray:
@@ -108,3 +100,34 @@ def test_synth_upper_body_nose_near_face() -> None:
     # Slot 0 of body7 is body nose — should be near face nose tip pts[15].
     assert abs(float(body[0, 0]) - float(pts[15, 0])) < 5.0
     assert abs(float(body[0, 1]) - float(pts[15, 1])) < 5.0
+
+
+def test_osf_mouth_map_overrides_slot_25() -> None:
+    from label_schema import DEFAULT_MOUTH_OSF, normalize_mouth_osf_map, osf_to_label28
+
+    mapped = normalize_mouth_osf_map({"25": 55, "99": 1})
+    assert mapped[25] == 55
+    assert mapped[21] == DEFAULT_MOUTH_OSF[21]
+    lms = np.zeros((66, 3), dtype=np.float32)
+    for i in range(66):
+        # OSF stores (y, x, conf).
+        lms[i] = [float(i), float(100 + i), 1.0]
+    pts, _ = osf_to_label28(lms, mouth_osf={25: 55})
+    assert float(pts[25, 0]) == 155.0
+    assert float(pts[25, 1]) == 55.0
+    assert float(pts[21, 0]) == 160.0
+
+
+def test_osf_to_label28_does_not_collapse_small_mouth_gap() -> None:
+    from label_schema import osf_to_label28
+
+    lms = np.zeros((66, 3), dtype=np.float32)
+    for i in range(66):
+        lms[i] = [200.0, 300.0, 1.0]
+    # OSF is (y, x, conf). Inner upper mid 60 / lower mid 64 with a small gap.
+    lms[60] = [180.0, 300.0, 1.0]
+    lms[64] = [186.0, 300.0, 1.0]
+    lms[62] = [183.0, 260.0, 1.0]
+    lms[58] = [183.0, 340.0, 1.0]
+    pts, _ = osf_to_label28(lms)
+    assert abs(float(pts[25, 1]) - float(pts[21, 1])) == 6.0

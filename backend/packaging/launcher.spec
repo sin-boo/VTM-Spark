@@ -14,15 +14,15 @@ from pathlib import Path
 
 
 
-ROOT = Path(SPECPATH).resolve().parent  # packaging/ -> app root/
+ROOT = Path(SPECPATH).resolve().parents[1]  # backend/packaging -> install root
 
 
 
 a = Analysis(
 
-    [str(ROOT / "packaging" / "launcher.py")],
+    [str(ROOT / "backend" / "packaging" / "launcher.py")],
 
-    pathex=[str(ROOT / "packaging")],
+    pathex=[str(ROOT / "backend" / "packaging")],
 
     binaries=[],
 

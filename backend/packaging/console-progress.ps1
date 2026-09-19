@@ -1,5 +1,5 @@
 # Thin process helpers for Smart Build / packaging.
-# No custom ASCII bars — let pip/npm/vite show their own progress when possible.
+# No custom ASCII bars — let uv/npm/vite show their own progress when possible.
 # Dot-source from build.ps1 / start-menu.ps1.
 
 function Write-LongStepHint {
@@ -24,7 +24,7 @@ function Format-ProcessArgumentList {
 function Invoke-NativeWithHeartbeat {
   <#
   .SYNOPSIS
-    Run a native exe on the real console so pip/npm keep their own progress UI.
+    Run a native exe on the real console so uv/npm keep their own progress UI.
     Returns only the exit code (stdout must not enter the PowerShell pipeline).
   #>
   param(

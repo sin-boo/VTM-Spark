@@ -1,17 +1,106 @@
 """Adapt project KEYPOINT_SCHEMA poses to the legacy HRNet model layout.
 
-The current DiT checkpoint was trained on historical train_crop labels whose
-28 face rows still used the anime-HRNet native ordering.  Tracking and
-retargeting use the corrected project schema, so conversion belongs only at
-the model-conditioning boundary.
+Tracking and retargeting always use the corrected project schema. Conversion
+belongs only at the DiT conditioning boundary, and only when the loaded
+checkpoint was trained on historical anime-HRNet face ordering.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 
 NUM_KEYPOINTS = 37
 KEYPOINT_DIM = 4
+
+LAYOUT_SCHEMA = "schema"
+LAYOUT_HRNET_NATIVE = "hrnet_native"
+DEFAULT_KEYPOINT_LAYOUT = LAYOUT_HRNET_NATIVE
+
+_SCHEMA_ALIASES = frozenset(
+    {"schema", "label28", "keypoint_schema", "full_stack"}
+)
+_NATIVE_ALIASES = frozenset({"hrnet_native", "hrnet", "native", "legacy"})
+_LAYOUT_KEYS = ("keypoint_layout", "model_keypoint_layout", "label_layout")
+
+
+def normalize_keypoint_layout(value: str | None) -> str | None:
+    token = str(value or "").strip().lower()
+    if token in _SCHEMA_ALIASES:
+        return LAYOUT_SCHEMA
+    if token in _NATIVE_ALIASES:
+        return LAYOUT_HRNET_NATIVE
+    return None
+
+
+def _name_slot_is_nose(name: Any) -> bool:
+    token = str(name or "").strip().lower()
+    if not token:
+        return False
+    return token == "nose" or token.endswith("_nose")
+
+
+def keypoint_layout_from_config(cfg: Mapping[str, Any] | None) -> str:
+    """Resolve DiT keypoint layout from a checkpoint ``config`` dict.
+
+    Explicit ``keypoint_layout`` (and aliases) win. Otherwise a
+    ``keypoint_names[14]`` that looks like a nose means KEYPOINT_SCHEMA.
+    Historical checkpoints have neither, so they stay ``hrnet_native``.
+    """
+    if not cfg:
+        return DEFAULT_KEYPOINT_LAYOUT
+    for key in _LAYOUT_KEYS:
+        resolved = normalize_keypoint_layout(cfg.get(key) if hasattr(cfg, "get") else None)
+        if resolved is not None:
+            return resolved
+    names = None
+    if hasattr(cfg, "get"):
+        names = cfg.get("keypoint_names") or cfg.get("KEYPOINT_NAMES")
+    if names is not None:
+        try:
+            slot = names[14]
+        except (IndexError, KeyError, TypeError):
+            slot = None
+        if _name_slot_is_nose(slot):
+            return LAYOUT_SCHEMA
+    return DEFAULT_KEYPOINT_LAYOUT
+
+
+def keypoints_for_model(keypoints: np.ndarray, layout: str) -> np.ndarray:
+    """Map KEYPOINT_SCHEMA rows to the layout a checkpoint expects."""
+    resolved = normalize_keypoint_layout(layout)
+    if resolved is None:
+        raise ValueError(f"Unknown model keypoint layout: {layout!r}")
+    source = np.asarray(keypoints, dtype=np.float32)
+    if source.shape != (NUM_KEYPOINTS, KEYPOINT_DIM):
+        raise ValueError(
+            f"Expected ({NUM_KEYPOINTS}, {KEYPOINT_DIM}), got {source.shape}"
+        )
+    if resolved == LAYOUT_SCHEMA:
+        return source.copy()
+    return schema37_to_hrnet_native37(source)
+
+
+def stamp_checkpoint_keypoint_layout(path: Path | str, layout: str) -> str:
+    """Write ``config.keypoint_layout`` into an existing checkpoint (no retrain)."""
+    resolved = normalize_keypoint_layout(layout)
+    if resolved is None:
+        raise ValueError(f"Unknown model keypoint layout: {layout!r}")
+    ckpt_path = Path(path)
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    import torch
+
+    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise TypeError(f"Expected a dict checkpoint, got {type(ckpt).__name__}")
+    cfg = dict(ckpt.get("config") or {})
+    cfg["keypoint_layout"] = resolved
+    ckpt["config"] = cfg
+    torch.save(ckpt, str(ckpt_path))
+    return resolved
 
 
 def _visible(kps: np.ndarray, index: int) -> bool:

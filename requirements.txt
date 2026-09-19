@@ -1,5 +1,4 @@
-# Torch is installed separately from the CUDA index (cu128) by packaging/build.ps1.
-
+# Torch is installed separately from the CUDA index (cu128) by backend/packaging/build.ps1.
 # Do NOT add torch here — a bare "torch" pin overwrites the CUDA wheel with CPU.
 
 numpy
@@ -9,6 +8,8 @@ pillow
 tqdm
 
 transformers==4.57.1
+
+scipy
 
 diffusers==0.35.1
 
@@ -50,6 +51,6 @@ psutil
 pyvirtualcam
 
 # torch.compile on Windows (official triton has no Win wheels).
-# packaging/build.ps1 also installs this explicitly after requirements.
+# backend/packaging/build.ps1 also installs this explicitly after requirements.
 triton-windows>=3.6,<3.7; platform_system=="Windows"
 

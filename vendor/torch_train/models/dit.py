@@ -46,7 +46,7 @@ class DualStreamDiTConfig:
     # Keypoint conditioning: pose-map concat + ref identity tokens in second stream.
     use_keypoint_conditioning: bool = False
     num_keypoints: int = 37
-    num_pose_channels: int = 8
+    num_pose_channels: int = 11
     drop_pose_prob: float = 0.1
     # If True with keypoint mode, ref is cross-attn tokens (not channel-concat).
     use_ref_tokens: bool = True
@@ -1179,7 +1179,7 @@ def build_dit_model(config, latent_size: int, text_embed_dim: int, text_num_toke
     use_keypoint = bool(config.get("use_keypoint_conditioning", False))
     num_params = int(config.get("num_params", text_num_tokens if use_numeric else 16))
     num_keypoints = int(config.get("num_keypoints", 37))
-    num_pose_channels = int(config.get("num_pose_channels", 8))
+    num_pose_channels = int(config.get("num_pose_channels", 11))
     cfg = DualStreamDiTConfig(
         input_size=latent_size,
         image_resolution=config.image_size,

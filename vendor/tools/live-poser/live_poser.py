@@ -1,7 +1,8 @@
 """Live Poser — OpenSeeFace face tracking → KEYPOINT_SCHEMA bridge.
 
-Pipeline: OpenSeeFace (live) → Label28 face + iris → (37,4) training schema.
-Iris from custom iris_pose.pt and/or OpenSeeFace gaze, merged into slots 28/29.
+Pipeline: OpenSeeFace (live) → Label28 face + iris + hair parts → (37,4)
+training schema. Hair polygons (middle/left/right) ride alongside keypoints
+as pose-map channels 8–10 for the 1.5 DiT.
 
   python live_poser.py              # UI
   python live_poser.py --cli -c 6   # headless OpenCV window
@@ -62,6 +63,7 @@ from bridge import (
 from cameras import (
     CameraCapture,
     CameraInfo,
+    _is_camera_name,
     ensure_com,
     ensure_osf_on_path,
     list_cameras,
@@ -75,6 +77,13 @@ from iris_tracker import (
     merge_iris,
     osf_gaze_to_iris,
     resolve_iris_weights,
+)
+from hair_tracker import (
+    HairHold,
+    create_hair_tracker,
+    draw_hair_segments,
+    flip_hair_pixels,
+    resolve_hair_weights,
 )
 from label_schema import draw_label28, flip_label28_x, osf_to_label28
 from skeleton import (
@@ -222,11 +231,14 @@ def annotate(
     left_iris=None,
     body7: np.ndarray | None = None,
     body_lost: bool = False,
+    hair_segments=None,
+    hair_lost: bool = False,
 ):
     if pts28 is not None:
         draw_label28(frame, pts28, show_ids=True, eye_lower=eye_lower)
     draw_iris(frame, right_iris, left_iris)
     draw_skeleton(frame, body7, lost=body_lost)
+    draw_hair_segments(frame, hair_segments, lost=hair_lost)
     if calib is not None:
         draw_coordinate_scope(frame, calib, rel, now=now)
     draw_hud(
@@ -339,18 +351,22 @@ def pick_default_camera(cameras: list[CameraInfo]) -> int:
     """Prefer a camera likely to show a real face feed."""
     if not cameras:
         return 0
-    # Warudo placeholders are often solid color when unused.
     skip = ('warudo',)
     prefer_order = ('droidcam', 'obs', 'webcam', 'usb', 'hd ', 'integrated', 'nizima', 'camera')
+    candidates = [
+        (i, c)
+        for i, c in enumerate(cameras)
+        if _is_camera_name(c.name) and not any(s in c.name.lower() for s in skip)
+    ]
+    if not candidates:
+        candidates = [(i, c) for i, c in enumerate(cameras) if _is_camera_name(c.name)]
+    if not candidates:
+        return 0
     for key in prefer_order:
-        for i, c in enumerate(cameras):
-            lower = c.name.lower()
-            if key in lower and not any(s in lower for s in skip):
+        for i, c in candidates:
+            if key in c.name.lower():
                 return i
-    for i, c in enumerate(cameras):
-        if not any(s in c.name.lower() for s in skip):
-            return i
-    return 0
+    return candidates[0][0]
 
 
 
@@ -389,8 +405,10 @@ class LivePoserUI:
         self._mirror_prev = bool(self.args.mirror)
         self._iris_tracker: CustomIrisTracker | None = None
         self._skel_tracker: SkeletonLiteTracker | None = None
+        self._hair_tracker: HairSegTracker | None = None
         self._smoother = MotionSmoother()
         self._skel_hold = SkeletonHold()
+        self._hair_hold = HairHold()
 
         ensure_com()
         self.root = tk.Tk()
@@ -453,6 +471,8 @@ class LivePoserUI:
         ttk.Checkbutton(model_row, text='Iris (custom)', variable=self.iris_var).pack(side='left', padx=4)
         self.skel_var = tk.BooleanVar(value=not getattr(self.args, 'no_skeleton', False))
         ttk.Checkbutton(model_row, text='Skeleton', variable=self.skel_var).pack(side='left', padx=4)
+        self.hair_var = tk.BooleanVar(value=not getattr(self.args, 'no_hair', False))
+        ttk.Checkbutton(model_row, text='Hair', variable=self.hair_var).pack(side='left', padx=4)
 
         ttk.Label(top, text='Sense').grid(row=3, column=0, sticky='w')
         sense_row = ttk.Frame(top)
@@ -489,7 +509,7 @@ class LivePoserUI:
 
         note = ttk.Label(
             self.root,
-            text='OSF face + MediaPipe body → KEYPOINT_SCHEMA  ·  Sensitivity↑ = stricter thr  ·  Smoothing = EMA',
+            text='OSF face + MediaPipe body + hair parts → KEYPOINT_SCHEMA  ·  Sensitivity↑ = stricter thr  ·  Smoothing = EMA',
             foreground='#555',
         )
         note.pack(anchor='w', padx=8)
@@ -624,6 +644,7 @@ class LivePoserUI:
         self._bridge_text = ''
         self._smoother.reset()
         self._skel_hold.reset()
+        self._hair_hold.reset()
         self.calib.clear()
         self.pose_var.set('coord: tracking… look straight at camera, then Center')
         self.start_btn.configure(text='Stop')
@@ -652,6 +673,7 @@ class LivePoserUI:
         # Mirror changes display-space coords — clear center so it isn't flipped/wrong.
         self._smoother.reset()
         self._skel_hold.reset()
+        self._hair_hold.reset()
         if self.calib.ready:
             self.calib.clear()
             self.pose_var.set('coord: mirror toggled — press Center again')
@@ -775,6 +797,30 @@ class LivePoserUI:
                         ),
                     )
 
+            self._hair_tracker = None
+            if bool(self.hair_var.get()):
+                hair_w = resolve_hair_weights(getattr(self.args, 'hair_weights', None))
+                if hair_w is None:
+                    self.root.after(
+                        0,
+                        lambda: self.status_var.set('Hair weights not found — hair off'),
+                    )
+                else:
+                    try:
+                        self._hair_tracker = create_hair_tracker(hair_w, device='cpu')
+                        method = self._hair_tracker.method
+                        self.root.after(
+                            0,
+                            lambda w=str(hair_w.name), m=method: self.status_var.set(
+                                f'Hair model: {w} ({m})'
+                            ),
+                        )
+                    except Exception as exc:
+                        self.root.after(
+                            0,
+                            lambda e=str(exc): self.status_var.set(f'Hair load failed: {e}'),
+                        )
+
             capture = CameraCapture(
                 cam.index,
                 width=width,
@@ -866,6 +912,9 @@ class LivePoserUI:
                 body7 = None
                 skel_method = 'none'
                 body_lost = False
+                hair_segments = None
+                hair_method = 'none'
+                hair_lost = False
                 bridge = None
 
                 # Body tracker can run even if face drops — hold last pose in red.
@@ -913,6 +962,20 @@ class LivePoserUI:
                         raw_body, raw_method
                     )
 
+                raw_hair = None
+                raw_hair_method = 'none'
+                if bool(self.hair_var.get()) and self._hair_tracker is not None:
+                    try:
+                        raw_hair = self._hair_tracker.detect(frame)
+                        raw_hair_method = self._hair_tracker.method
+                    except Exception:
+                        raw_hair = None
+                        raw_hair_method = 'none'
+                if bool(self.hair_var.get()):
+                    hair_segments, hair_lost, hair_method = self._hair_hold.update(
+                        raw_hair, raw_hair_method, now=time.time()
+                    )
+
                 pts28, eye_lower, right_iris, left_iris, body7 = self._smoother.apply(
                     pts28=pts28,
                     eye_lower=eye_lower,
@@ -934,6 +997,8 @@ class LivePoserUI:
                         )
                     if body7 is not None:
                         body7 = flip_body7_x(body7, display.shape[1])
+                    if hair_segments:
+                        hair_segments = flip_hair_pixels(hair_segments, display.shape[1])
 
                 if alive and pts28 is not None:
                     rel = self.calib.remap(pts28, display.shape)
@@ -961,6 +1026,8 @@ class LivePoserUI:
                         mirrored=mirror,
                         iris_method=iris_method,
                         skeleton_method=skel_method,
+                        hair_method=hair_method,
+                        hair_segments=hair_segments,
                         pose=pose_dict,
                         meta={
                             'fps': self._fps,
@@ -997,6 +1064,8 @@ class LivePoserUI:
                             body7=body7,
                             mirrored=mirror,
                             skeleton_method=skel_method,
+                            hair_method=hair_method,
+                            hair_segments=hair_segments,
                             meta={
                                 'fps': self._fps,
                                 'body_lost': True,
@@ -1046,6 +1115,8 @@ class LivePoserUI:
                     left_iris=left_iris,
                     body7=body7,
                     body_lost=body_lost,
+                    hair_segments=hair_segments,
+                    hair_lost=hair_lost,
                 )
                 self._status_faces = len(alive)
                 with self._lock:
@@ -1064,6 +1135,7 @@ class LivePoserUI:
             self.capture = None
             self.tracker = None
             self._iris_tracker = None
+            self._hair_tracker = None
             if self._skel_tracker is not None:
                 try:
                     self._skel_tracker.close()
@@ -1194,6 +1266,13 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='(compat) Prefer YOLO .pt backend',
     )
+    p.add_argument('--no-hair', action='store_true', help='Disable hair_seg.pt tracker')
+    p.add_argument(
+        '--hair-weights',
+        type=Path,
+        default=None,
+        help='Path to hair_seg.pt (default: models/trackers/hair_seg.pt)',
+    )
     p.add_argument('--mirror', action='store_true')
     p.add_argument('--osf-dir', type=Path, default=None)
     p.add_argument('--model-dir', type=Path, default=None)
@@ -1253,6 +1332,19 @@ def run_cli(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f'Body tracker failed ({exc}) — synth fallback')
 
+    hair_tracker = None
+    hair_hold = HairHold()
+    if not getattr(args, 'no_hair', False):
+        hair_w = resolve_hair_weights(getattr(args, 'hair_weights', None))
+        if hair_w is not None:
+            try:
+                hair_tracker = create_hair_tracker(hair_w, device='cpu')
+                print(f'Hair model: {hair_w} ({hair_tracker.method})')
+            except Exception as exc:
+                print(f'Hair load failed ({exc}) — hair off')
+        else:
+            print('animeseg_hair3.pt not found — hair off')
+
     mirror = args.mirror
     paused = False
     fps = 0.0
@@ -1292,6 +1384,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 body7 = None
                 skel_method = 'none'
                 body_lost = False
+                hair_segments = None
+                hair_method = 'none'
+                hair_lost = False
                 if alive:
                     face = alive[0]
                     pts28, eye_lower = osf_to_label28(face.lms)
@@ -1319,6 +1414,16 @@ def run_cli(args: argparse.Namespace) -> int:
                         body7, body_lost, skel_method = skel_hold.update(
                             raw_body, raw_method
                         )
+                    if hair_tracker is not None:
+                        try:
+                            raw_hair = hair_tracker.detect(frame)
+                            hair_segments, hair_lost, hair_method = hair_hold.update(
+                                raw_hair, hair_tracker.method, now=time.time()
+                            )
+                        except Exception:
+                            hair_segments, hair_lost, hair_method = hair_hold.update(
+                                None, 'none', now=time.time()
+                            )
                     display = cv2.flip(frame, 1) if mirror else frame
                     if mirror:
                         pts28, eye_lower = flip_label28_x(pts28, display.shape[1], eye_lower)
@@ -1327,6 +1432,8 @@ def run_cli(args: argparse.Namespace) -> int:
                         )
                         if body7 is not None:
                             body7 = flip_body7_x(body7, display.shape[1])
+                        if hair_segments:
+                            hair_segments = flip_hair_pixels(hair_segments, display.shape[1])
                     last_pts28 = pts28.copy()
                     rel = calib.remap(pts28, display.shape)
                     if (
@@ -1353,6 +1460,8 @@ def run_cli(args: argparse.Namespace) -> int:
                         mirrored=mirror,
                         iris_method=iris_method,
                         skeleton_method=skel_method,
+                        hair_method=hair_method,
+                        hair_segments=hair_segments,
                         pose=calib.to_dict(rel),
                         meta={'fps': fps, 'body_lost': body_lost},
                     )
@@ -1389,6 +1498,14 @@ def run_cli(args: argparse.Namespace) -> int:
                             except Exception:
                                 pass
                     last_pts28 = None
+                    if hair_tracker is not None:
+                        hair_segments, hair_lost, hair_method = hair_hold.update(
+                            None, 'none', now=time.time()
+                        )
+                        if hair_segments and mirror:
+                            hair_segments = flip_hair_pixels(
+                                hair_segments, display.shape[1]
+                            )
                 annotate(
                     display,
                     pts28,
@@ -1405,6 +1522,8 @@ def run_cli(args: argparse.Namespace) -> int:
                     right_iris=right_iris,
                     left_iris=left_iris,
                     body7=body7,
+                    hair_segments=hair_segments,
+                    hair_lost=hair_lost,
                 )
                 frame = display
             else:

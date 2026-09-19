@@ -38,7 +38,7 @@ if str(_ROOT) not in sys.path:
 def _log_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "vtm_noble.log"
-    return _ROOT / "data" / "vtm_noble.log"
+    return _ROOT / "models" / "vtm_noble.log"
 
 
 def _file_log(msg: str) -> None:
@@ -110,11 +110,44 @@ def _pick_port(host: str, preferred: int, *, span: int = 1) -> int | None:
     return None
 
 
-def _wait_for_server(host: str, port: int, timeout: float = 180.0) -> bool:
+def _blocked_by_existing(host: str, port: int) -> str | None:
+    """Why this port cannot be claimed. None = free enough to try a bind."""
+    from backend.single_instance import health_url, probe_existing_api
+
+    if probe_existing_api(host, port):
+        url = health_url(host, port).rsplit("/api/", 1)[0]
+        return (
+            f"VTM Noble already running at {url}. "
+            "Close the other window, or menu [K] Kill leftovers."
+        )
+    if _port_in_use(host, port):
+        return (
+            f"Port {port} is in use by another program (often ui/_mock_boot.py). "
+            "Close that process, or menu [K] Kill leftovers, then retry."
+        )
+    return None
+
+
+def _wait_for_server(
+    host: str,
+    port: int,
+    timeout: float = 180.0,
+    thread: threading.Thread | None = None,
+) -> bool:
+    """True when THIS desk's /api/health is up. A TCP listener is not enough —
+
+    ui/_mock_boot.py occupies :8765 during Vite work and answers ``{}``, which
+    WebView2 then pretty-prints as a blank page.
+    """
+    from backend.single_instance import probe_existing_api
+
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if thread is not None and not thread.is_alive():
+            _file_log("ERROR: API thread exited before bind")
+            return False
         try:
-            if _port_open(host, port):
+            if probe_existing_api(host, port):
                 return True
         except Exception as exc:
             _file_log(f"port check error: {exc}")
@@ -124,21 +157,40 @@ def _wait_for_server(host: str, port: int, timeout: float = 180.0) -> bool:
 
 def _run_uvicorn(host: str, port: int, *, mount_ui: bool) -> None:
     try:
-        _file_log("importing uvicorn / backend.api…")
-        from backend.paths import ensure_import_paths, torch_train_dir
+        from backend.desk_splash import ensure_stdio
 
+        ensure_stdio()
+        _file_log("importing uvicorn / backend.api…")
+        from backend.paths import (
+            configure_torch_compile_cache,
+            ensure_import_paths,
+            torch_train_dir,
+        )
+
+        configure_torch_compile_cache()
         ensure_import_paths()
         _file_log(f"torch_train={torch_train_dir()}")
 
         import uvicorn
 
+        _file_log("imported uvicorn")
         from backend.api import app, configure_runtime, mount_frontend
 
+        _file_log("imported backend.api")
         configure_runtime()
+        _file_log("runtime configured")
         if mount_ui:
             mount_frontend()
+            _file_log("frontend mounted")
         _file_log(f"uvicorn binding {host}:{port}")
-        uvicorn.run(app, host=host, port=port, log_level="warning", reload=False)
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            reload=False,
+            use_colors=False,
+        )
     except Exception:
         _file_log("uvicorn crashed:\n" + traceback.format_exc())
 
@@ -150,6 +202,18 @@ def _shutdown_all(*, exit_code: int = 0) -> None:
     process forever — orphans were holding tens of GB of RAM after close.
     """
     def _cleanup() -> None:
+        try:
+            from backend.desk_splash import kill_orphan_webview2
+
+            kill_orphan_webview2()
+        except Exception:
+            pass
+        try:
+            from backend.lab_process import stop_owned_lab
+
+            stop_owned_lab()
+        except Exception:
+            pass
         try:
             from backend.api import shutdown_runtime
 
@@ -199,8 +263,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--width", type=int, default=1380)
     parser.add_argument("--height", type=int, default=920)
+    parser.add_argument("--splash-width", type=int, default=1000)
+    parser.add_argument("--splash-height", type=int, default=562)
     args = parser.parse_args(argv)
 
+    from backend.desk_splash import ensure_stdio
+
+    ensure_stdio()
     _file_log(f"starting ui={args.ui} frozen={getattr(sys, 'frozen', False)}")
 
     # Cap CPU thread oversubscription before torch/onnx import (helps RAM/CPU thrash).
@@ -213,80 +282,74 @@ def main(argv: list[str] | None = None) -> int:
     ):
         os.environ.setdefault(key, val)
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-    from backend.single_instance import (
-        acquire_single_instance,
-        health_url,
-        probe_existing_api,
-    )
+    if os.name == "nt":
+        os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 
     wait_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
-    if probe_existing_api(wait_host, args.port):
-        url = health_url(wait_host, args.port).rsplit("/api/", 1)[0]
-        _file_log(
-            f"ERROR: VTM Noble already running at {url} — refusing second instance "
-            f"(this was stacking multi-GB backends and freezing the PC). "
-            f"Close the other window, or menu [K] Kill leftovers."
-        )
-        if getattr(sys, "frozen", False) or args.ui == "webview":
-            try:
-                input("Already running. Press Enter to close…")
-            except Exception:
-                pass
-        return 2
-
-    if not acquire_single_instance():
-        _file_log(
-            "ERROR: another VTM Noble instance holds the single-instance lock. "
-            "Close it or run packaging\\kill-orphans.ps1 ([K] in start.bat)."
-        )
-        if getattr(sys, "frozen", False) or args.ui == "webview":
-            try:
-                input("Already running. Press Enter to close…")
-            except Exception:
-                pass
-        return 2
-
     mount_ui = args.ui == "webview"
     if args.ui == "dev":
         mount_ui = False
 
-    picked = _pick_port(args.host, args.port, span=max(1, int(args.port_span)))
-    if picked is None:
-        _file_log(
-            f"ERROR: port {args.port} busy and --port-span={args.port_span} has no free port. "
-            f"Refusing to start another backend (prevents RAM pile-up). "
-            f"Use menu [K] Kill leftovers, then retry."
-        )
-        if getattr(sys, "frozen", False) or args.ui == "webview":
-            try:
-                input("Port busy. Press Enter to close…")
-            except Exception:
-                pass
-        return 2
-    args.port = picked
-    _file_log(f"API will bind {args.host}:{args.port}")
+    def _claim_desk() -> str | None:
+        """Take the single-instance lock and bind port. None = ok."""
+        from backend.single_instance import acquire_single_instance
 
-    server = threading.Thread(
-        target=_run_uvicorn,
-        args=(args.host, args.port),
-        kwargs={"mount_ui": mount_ui},
-        daemon=True,
-        name="uvicorn",
-    )
-    server.start()
-
-    if not _wait_for_server(wait_host, args.port, timeout=180.0):
-        _file_log("ERROR: FastAPI failed to start within 180s")
-        if getattr(sys, "frozen", False):
-            input("Press Enter to close…")
-        _shutdown_all(exit_code=1)
-        return 1
-
-    base = f"http://{wait_host}:{args.port}"
-    _file_log(f"API ready at {base}/api/health")
+        blocked = _blocked_by_existing(wait_host, args.port)
+        if blocked:
+            _file_log("ERROR: " + blocked)
+            return blocked
+        if not acquire_single_instance():
+            msg = (
+                "Another VTM Noble instance holds the single-instance lock. "
+                "Close it or run backend\\packaging\\kill-orphans.ps1."
+            )
+            _file_log("ERROR: " + msg)
+            return msg
+        picked = _pick_port(args.host, args.port, span=max(1, int(args.port_span)))
+        if picked is None:
+            msg = (
+                f"Port {args.port} busy and --port-span={args.port_span} has no free port. "
+                "Use menu [K] Kill leftovers, then retry."
+            )
+            _file_log("ERROR: " + msg)
+            return msg
+        args.port = picked
+        _file_log(f"API will bind {args.host}:{args.port}")
+        return None
 
     if args.ui == "none":
+        blocked = _claim_desk()
+        if blocked:
+            if getattr(sys, "frozen", False):
+                try:
+                    input("Already running. Press Enter to close…")
+                except Exception:
+                    pass
+            return 2
+        server = threading.Thread(
+            target=_run_uvicorn,
+            args=(args.host, args.port),
+            kwargs={"mount_ui": mount_ui},
+            daemon=True,
+            name="uvicorn",
+        )
+
+        def _wait_api_none() -> str | None:
+            if not _wait_for_server(
+                wait_host, args.port, timeout=180.0, thread=server
+            ):
+                _file_log("ERROR: FastAPI failed to start")
+                return None
+            base = f"http://{wait_host}:{args.port}"
+            _file_log(f"API ready at {base}/api/health")
+            return base
+
+        server.start()
+        if _wait_api_none() is None:
+            if getattr(sys, "frozen", False):
+                input("Press Enter to close…")
+            _shutdown_all(exit_code=1)
+            return 1
         _file_log("API-only mode. Press Ctrl+C to stop.")
         try:
             while server.is_alive():
@@ -296,32 +359,105 @@ def main(argv: list[str] | None = None) -> int:
         _shutdown_all(exit_code=0)
         return 0
 
-    url = args.vite_url if args.ui == "dev" else base
     try:
         import webview
     except ImportError:
         _file_log(
-            "pywebview is not installed. Run: pip install pywebview\n"
-            f"Meanwhile open {url} in a browser, or use --ui=none"
+            "pywebview is not installed. Run install.bat.\n"
+            "Meanwhile use --ui=none and open the API in a browser."
         )
         _shutdown_all(exit_code=1)
         return 1
 
+    from backend.desk_splash import (
+        kill_orphan_webview2,
+        mute_webview_microphone,
+        patch_webview2_no_microphone,
+    )
+
+    mute_webview_microphone()
+    patch_webview2_no_microphone()
+    killed_wv = kill_orphan_webview2()
+    if killed_wv:
+        _file_log(f"cleared leftover WebView2 pids={killed_wv}")
+
+    blocked = _claim_desk()
+    if blocked:
+        _file_log(blocked)
+        if getattr(sys, "frozen", False):
+            try:
+                input("Already running. Press Enter to close…")
+            except Exception:
+                pass
+        return 2
+
     try:
-        _file_log(f"opening webview -> {url}")
-        window = webview.create_window(
-            "VTM Noble",
-            url=url,
-            width=args.width,
-            height=args.height,
-            min_size=(1000, 720),
+        from backend.paths import ensure_import_paths
+
+        _file_log("preloading FastAPI/torch before webview")
+        ensure_import_paths()
+        import uvicorn  # noqa: F401
+        from backend.api import configure_runtime, mount_frontend
+
+        configure_runtime()
+        if mount_ui:
+            mount_frontend()
+        _file_log("preload ready")
+    except Exception:
+        _file_log("preload failed:\n" + traceback.format_exc())
+        if getattr(sys, "frozen", False):
+            try:
+                input("Failed to load the desk. Press Enter to close…")
+            except Exception:
+                pass
+        return 1
+
+    try:
+        from backend.desk_splash import (
+            WindowBridge,
+            create_splash_window,
+            desk_min_size,
+            early_splash_html,
+            keep_caption_hidden,
+            open_desk,
+            work_area_size,
+            write_early_splash,
         )
+
+        splash_w = max(720, int(args.splash_width))
+        splash_h = max(420, int(args.splash_height))
+        min_w, min_h = desk_min_size()
+        work_w, work_h = work_area_size()
+        splash_w = min(splash_w, work_w)
+        splash_h = min(splash_h, work_h)
+        desk_w = min(work_w, max(min_w, int(args.width)))
+        desk_h = min(work_h, max(min_h, int(args.height)))
+        api_origin = f"http://{wait_host}:{args.port}"
+        splash_path = write_early_splash(api_origin=api_origin)
+        _file_log("opening webview splash")
+        bridge = WindowBridge()
+        if splash_path is not None:
+            window = create_splash_window(
+                webview,
+                url=splash_path.as_uri(),
+                width=splash_w,
+                height=splash_h,
+                js_api=bridge,
+            )
+        else:
+            window = create_splash_window(
+                webview,
+                html=early_splash_html(api_origin=api_origin),
+                width=splash_w,
+                height=splash_h,
+                js_api=bridge,
+            )
+        bridge.bind(window)
 
         def _on_window_closed() -> None:
             _file_log("webview closed — forcing process exit")
             _shutdown_all(exit_code=0)
 
-        # Ensure close always kills the process even if start() never returns.
         try:
             window.events.closed += _on_window_closed
         except Exception:
@@ -330,7 +466,72 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
 
-        webview.start()
+        server = threading.Thread(
+            target=_run_uvicorn,
+            args=(args.host, args.port),
+            kwargs={"mount_ui": mount_ui},
+            daemon=True,
+            name="uvicorn",
+        )
+
+        def _wait_api() -> str | None:
+            if not _wait_for_server(
+                wait_host, args.port, timeout=180.0, thread=server
+            ):
+                _file_log("ERROR: FastAPI failed to start")
+                return None
+            base = f"http://{wait_host}:{args.port}"
+            _file_log(f"API ready at {base}/api/health")
+            return base
+
+        def _after_gui() -> None:
+            # Show first, then return to the WinForms pump. Caption/WebView2
+            # COM from this callback (before the loop runs) leaves a hidden
+            # HWND — taskbar flicker, then the desk never appears.
+            try:
+                window.show()
+            except Exception:
+                pass
+            _file_log("splash shown")
+
+            def _chrome() -> None:
+                time.sleep(0.08)
+                keep_caption_hidden(window, resizable=False)
+
+            threading.Thread(target=_chrome, name="vtm-chrome", daemon=True).start()
+            server.start()
+
+            def _handoff() -> None:
+                base = _wait_api()
+                if base is None:
+                    try:
+                        window.load_html(
+                            early_splash_html(error="Desk API failed to start")
+                        )
+                    except Exception:
+                        pass
+                    return
+                url = args.vite_url if args.ui == "dev" else base
+                _file_log(f"API ready — splash stays until boot finishes, then {url}")
+                from backend.stream import get_runtime
+
+                for _ in range(9000):
+                    try:
+                        if get_runtime().boot_snapshot().get("ready"):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                else:
+                    _file_log("boot wait timed out — loading desk anyway")
+                _file_log(f"splash handing off -> {url}")
+                open_desk(window, url, desk_w, desk_h)
+
+            threading.Thread(
+                target=_handoff, name="vtm-splash-handoff", daemon=True
+            ).start()
+
+        webview.start(_after_gui)
     except Exception:
         _file_log("webview crashed:\n" + traceback.format_exc())
         _shutdown_all(exit_code=1)

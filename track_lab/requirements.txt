@@ -1,0 +1,10 @@
+# Lab packages live in the main app venv (.venv-build). Listed here so the lab stays explicit.
+
+numpy
+opencv-python
+onnxruntime
+pillow
+fastapi
+uvicorn
+python-multipart
+mediapipe

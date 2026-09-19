@@ -131,10 +131,13 @@ def _list_dshow_cameras(osf: Path | None = None) -> list[CameraInfo]:
         cameras: list[CameraInfo] = []
         for i, cam in enumerate(info):
             idx = int(cam.get('index', cam.get('id', i)))
+            name = str(cam.get('name') or f'Camera {idx}')
+            if not _is_camera_name(name):
+                continue
             cameras.append(
                 CameraInfo(
                     index=idx,
-                    name=str(cam.get('name') or f'Camera {idx}'),
+                    name=name,
                     backend='dshow',
                     raw=cam,
                 )
@@ -147,6 +150,38 @@ def _list_dshow_cameras(osf: Path | None = None) -> list[CameraInfo]:
             pass
 
 
+_AUDIO_DEVICE = ('microphone', 'stereo mix', 'wave in', 'what u hear', 'speaks')
+
+
+def _is_camera_name(name: str) -> bool:
+    n = name.lower()
+    if any(key in n for key in ('camera', 'webcam', 'droidcam', 'obs', 'virtual', 'capture')):
+        return True
+    return not any(key in n for key in _AUDIO_DEVICE)
+
+
+def _no_mic_params() -> list[int]:
+    """Do not let OpenCV take the Windows microphone with the webcam."""
+    params: list[int] = []
+    video = getattr(cv2, 'CAP_PROP_VIDEO_STREAM', None)
+    if video is not None:
+        params.extend([int(video), 0])
+    stream = getattr(cv2, 'CAP_PROP_AUDIO_STREAM', None)
+    if stream is not None:
+        params.extend([int(stream), -1])
+    return params
+
+
+def _open_cv_index(index: int, backend: int) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture()
+    params = _no_mic_params()
+    if params:
+        cap.open(int(index), int(backend), params)
+    else:
+        cap.open(int(index), int(backend))
+    return cap
+
+
 def _list_opencv_cameras(max_probe: int = 12) -> list[CameraInfo]:
     ensure_com()
     cameras: list[CameraInfo] = []
@@ -154,9 +189,9 @@ def _list_opencv_cameras(max_probe: int = 12) -> list[CameraInfo]:
         cap = None
         try:
             if os.name == 'nt':
-                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                cap = _open_cv_index(i, cv2.CAP_DSHOW)
             else:
-                cap = cv2.VideoCapture(i)
+                cap = _open_cv_index(i, cv2.CAP_ANY)
             if cap is None or not cap.isOpened():
                 continue
             ok, frame = cap.read()
@@ -450,10 +485,10 @@ class CameraCapture:
         # After an aggressive DirectShow probe, DroidCam needs a beat to reopen.
         time.sleep(0.35)
 
-        # MSMF often works when CAP_DSHOW can't open by index (common with DroidCam).
+        # DSHOW first so CAP_PROP_AUDIO_STREAM is more likely honored; MSMF still gets params.
         backends = []
         if os.name == 'nt':
-            backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY]
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
         else:
             backends = [cv2.CAP_ANY]
 
@@ -461,7 +496,7 @@ class CameraCapture:
         for be in backends:
             cap = None
             try:
-                cap = cv2.VideoCapture(camera_index, be)
+                cap = _open_cv_index(camera_index, be)
                 if not cap.isOpened():
                     if cap is not None:
                         cap.release()

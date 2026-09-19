@@ -1,29 +1,74 @@
+export type BootStageState = 'idle' | 'run' | 'wait' | 'done' | 'error' | 'skip'
+
+export type BootStage = {
+  state: BootStageState
+  progress: number
+  label: string
+}
+
+export type BootStatus = {
+  ready: boolean
+  running: boolean
+  error: string
+  awaiting?: string
+  suggested?: string
+  progress?: number
+  progress_label?: string
+  stages: {
+    model: BootStage
+    character: BootStage
+    lab: BootStage
+  }
+}
+
 export type AppStatus = {
   state: string
   message: string
   checkpoint: string
+  keypoint_layout?: string
   device: string
   error: string
   model_ready: boolean
   ref_ready: boolean
   streaming: boolean
+  paused?: boolean
   tracking: boolean
+  track_busy?: boolean
   busy: boolean
+  models_on_gpu?: boolean
   fast_warming: boolean
   steps: number
+  pose_cfg: number
+  id_cfg: number
+  frame_blend: number
+  inbetweens?: number
+  interpolate?: boolean
+  hold_last?: boolean
   track_fps: number
   drive_pose: boolean
   show_mesh: boolean
+  show_hair: boolean
+  show_outline?: boolean
+  show_brows?: boolean
+  show_eyes?: boolean
+  show_nose?: boolean
+  show_mouth?: boolean
+  show_iris_overlay?: boolean
+  show_skeleton?: boolean
   mirror: boolean
   use_iris: boolean
   use_body: boolean
   fast_mode: boolean
+  compile_model: boolean
   batch2: boolean
   auto_sync_track: boolean
   gen_fps: number
+  show_fps?: number
   timing: string
   reference_name: string
   reference_path: string
+  character_id?: string
+  character_name?: string
   camera_index: number
   track_message: string
   body_label: string
@@ -36,10 +81,216 @@ export type AppStatus = {
   virtual_cam: boolean
   virtual_cam_device: string
   virtual_cam_error: string
+  pose_frozen?: boolean
+  pose_key_count?: number
+  travel_box?: TravelBox
+  boot?: BootStatus
 }
 
-export type Checkpoint = { label: string; path: string }
+export type TravelBox = {
+  enabled: boolean
+  side: boolean
+  rotate: boolean
+  look_up: boolean
+  look_down: boolean
+  body: boolean
+  body_rotate: boolean
+  eyes: boolean
+  left: number
+  right: number
+  up: number
+  down: number
+  body_left: number
+  body_right: number
+  body_up: number
+  body_down: number
+  yaw: number
+  roll: number
+  pitch_up: number
+  pitch_down: number
+  body_yaw: number
+  body_roll: number
+  eye_x: number
+  eye_y: number
+  pad_px: number
+}
+
+export type Checkpoint = { label: string; path: string; source?: string }
+export type CatalogOffer = {
+  name: string
+  label: string
+  path: string
+  is_new: boolean
+  published?: string
+  badge: string
+}
+export type CharacterCard = {
+  id: string
+  name: string
+  path: string
+  preview_url: string
+  shapes_compatible?: boolean
+  has_shapes?: boolean
+  shapes_path?: string
+}
+
+export type CharacterLoadResult = {
+  ok: boolean
+  incompatible?: boolean
+  message?: string
+  character?: CharacterCard
+  frame?: FrameEvent
+  status?: AppStatus
+}
 export type CameraInfo = { index: number; name: string }
+export type MixWeights = {
+  A: number
+  I: number
+  U: number
+  E: number
+  O: number
+  smile: number
+  sad: number
+}
+
+export type IrisCamHit = {
+  side: string
+  x: number
+  y: number
+  score: number
+  visible: boolean
+  method: string
+}
+
+export type LabLook = { x: number; y: number }
+
+export type LabFeel = {
+  response: number
+  smoothing: number
+  mouth: number
+  use_visemes: number
+  show_face: number
+  show_skeleton: number
+  show_hair: number
+  show_ids: number
+  hair_pin: number
+  max_yaw: number
+  max_roll: number
+  max_pitch_up: number
+  max_pitch_down: number
+  max_look_x: number
+  max_look_y: number
+  gaze_gain: number
+  gaze_smooth: number
+}
+
+export type LabCalib = {
+  rest?: boolean
+  capturing?: string
+  progress?: number
+  error?: string
+  hint?: string
+}
+
+export type LabIfm = {
+  host?: string
+  port?: number
+  listening?: boolean
+  receiving?: boolean
+  fps?: number
+  peer?: string
+  hint?: string
+  local?: string[]
+  primary?: string
+}
+
+export type LabStatus = {
+  type?: string
+  online: boolean
+  ok?: boolean
+  live?: boolean
+  error?: string
+  feel?: LabFeel
+  weights?: MixWeights
+  points?: number[][]
+  skeleton?: { id: number; x: number; y: number; score?: number }[]
+  hair?: { class: string; polygon: number[][] }[]
+  source?: 'camera' | 'ifm'
+  camera_index?: number
+  cameras?: CameraInfo[]
+  calib?: LabCalib
+  ifm?: LabIfm
+  commands?: string[]
+  handshake?: boolean
+  loaded?: boolean
+  point_offsets?: { id: number; dx: number; dy: number }[]
+  shapes?: Record<string, number[][]>
+  presets?: { id: string; label: string; ready?: boolean }[]
+  active?: string
+  iris_method?: string
+  iris?: { id: number; x: number; y: number; score: number; visible?: boolean }[]
+  iris_cam?: IrisCamHit[]
+  look?: LabLook | null
+  head?: { pitch: number; yaw: number; roll: number }
+  blink?: { l?: number; r?: number }
+}
+
+export const ZERO_LAB_FEEL: LabFeel = {
+  response: 0.65,
+  smoothing: 0.48,
+  mouth: 0.5,
+  use_visemes: 1,
+  show_face: 1,
+  show_skeleton: 1,
+  show_hair: 1,
+  show_ids: 0,
+  hair_pin: 0.7,
+  max_yaw: 1,
+  max_roll: 1,
+  max_pitch_up: 1,
+  max_pitch_down: 1,
+  max_look_x: 1,
+  max_look_y: 1,
+  gaze_gain: 1,
+  gaze_smooth: 0.28,
+}
+
+export const ZERO_WEIGHTS: MixWeights = {
+  A: 0,
+  I: 0,
+  U: 0,
+  E: 0,
+  O: 0,
+  smile: 0,
+  sad: 0,
+}
+
+export function labBannerError(lab: LabStatus | null | undefined): string {
+  const err = String(lab?.error || '').trim()
+  if (!err) return ''
+  if (!lab?.live && /track a face first so rest exists/i.test(err)) return ''
+  return err
+}
+
+export function labSourceOf(lab: LabStatus | null | undefined): 'camera' | 'ifm' {
+  return lab?.source === 'ifm' ? 'ifm' : 'camera'
+}
+
+export function mergeLabStatus(cur: LabStatus | null | undefined, next: LabStatus): LabStatus {
+  const server = next.source === 'ifm' ? 'ifm' : next.source === 'camera' ? 'camera' : undefined
+  const local = cur?.source === 'ifm' ? 'ifm' : cur?.source === 'camera' ? 'camera' : undefined
+  const source: 'camera' | 'ifm' = next.online
+    ? (server ?? local ?? 'camera')
+    : (local ?? server ?? 'camera')
+  return { ...cur, ...next, source }
+}
+
+export type LabCommandReply = {
+  ok?: boolean
+  error?: string
+  status?: LabStatus
+  online?: boolean
+}
 
 export type ModelsStatus = {
   dit_dir: string
@@ -76,34 +327,47 @@ export type WsEvent =
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    let detail = res.statusText
+    let detail: unknown = res.statusText
     try {
       const body = await res.json()
-      detail = body.detail || JSON.stringify(body)
+      detail = body.detail ?? body
     } catch {
       /* ignore */
     }
-    throw new Error(typeof detail === 'string' ? detail : String(detail))
+    if (typeof detail !== 'string') {
+      detail = Array.isArray(detail)
+        ? detail
+            .map((item) =>
+              item && typeof item === 'object' && 'msg' in item
+                ? String((item as { msg: string }).msg)
+                : JSON.stringify(item),
+            )
+            .join('; ')
+        : JSON.stringify(detail)
+    }
+    throw new Error(String(detail))
   }
   return res.json() as Promise<T>
 }
 
 export const api = {
   status: () => fetch('/api/status').then((r) => json<AppStatus>(r)),
+  boot: () => fetch('/api/boot').then((r) => json<BootStatus>(r)),
+  startBoot: () =>
+    fetch('/api/boot', { method: 'POST' }).then((r) => json<BootStatus>(r)),
   checkpoints: () => fetch('/api/checkpoints').then((r) => json<Checkpoint[]>(r)),
-  modelsStatus: () => fetch('/api/models/status').then((r) => json<ModelsStatus>(r)),
-  startModelDownload: () =>
-    fetch('/api/models/download', { method: 'POST' }).then((r) =>
-      json<ModelsStatus['download']>(r),
-    ),
-  modelDownloadStatus: () =>
-    fetch('/api/models/download/status').then((r) => json<ModelsStatus['download']>(r)),
-  reloadModels: () =>
-    fetch('/api/models/reload', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   cameras: () =>
     fetch('/api/cameras').then((r) =>
       json<{ cameras: CameraInfo[]; preferred: number }>(r),
     ),
+  modelCatalog: () =>
+    fetch('/api/models/catalog').then((r) => json<{ offers: CatalogOffer[] }>(r)),
+  startModelDownload: (name?: string) =>
+    fetch('/api/models/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(name ? { name } : {}),
+    }).then((r) => json<ModelsStatus['download']>(r)),
   setCheckpoint: (path: string) =>
     fetch('/api/checkpoint', {
       method: 'POST',
@@ -112,7 +376,7 @@ export const api = {
     }).then((r) => json<AppStatus>(r)),
   browseCheckpoint: () =>
     fetch('/api/checkpoint/browse', { method: 'POST' }).then((r) =>
-      json<{ cancelled: boolean; status: AppStatus }>(r),
+      json<{ cancelled: boolean; path?: string | null; status: AppStatus }>(r),
     ),
   settings: (body: Partial<AppStatus>) =>
     fetch('/api/settings', {
@@ -137,12 +401,55 @@ export const api = {
     fetch('/api/reference/default').then((r) =>
       json<{ path: string; exists: string }>(r),
     ),
+  characters: () =>
+    fetch('/api/characters').then((r) => json<{ characters: CharacterCard[] }>(r)),
+  createCharacter: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return fetch('/api/characters/create', { method: 'POST', body: fd }).then((r) =>
+      json<{
+        ok: boolean
+        character: CharacterCard
+        frame: FrameEvent
+        status: AppStatus
+      }>(r),
+    )
+  },
+  loadCharacter: (id: string, opts: { repair?: boolean } = {}) =>
+    fetch('/api/characters/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, repair: Boolean(opts.repair) }),
+    }).then((r) => json<CharacterLoadResult>(r)),
+  removeCharacter: (id: string) =>
+    fetch('/api/characters/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then((r) =>
+      json<{
+        ok: boolean
+        status: AppStatus
+        characters: CharacterCard[]
+      }>(r),
+    ),
+  renameCharacter: (id: string, name: string) =>
+    fetch('/api/characters/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name }),
+    }).then((r) =>
+      json<{
+        ok: boolean
+        character: CharacterCard
+        status: AppStatus
+        characters: CharacterCard[]
+      }>(r),
+    ),
   startTracking: () =>
     fetch('/api/tracking/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   stopTracking: () =>
     fetch('/api/tracking/stop', { method: 'POST' }).then((r) => json<AppStatus>(r)),
-  calibrate: () =>
-    fetch('/api/tracking/calibrate', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   recenter: () =>
     fetch('/api/tracking/recenter', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   generate: () =>
@@ -151,6 +458,10 @@ export const api = {
     fetch('/api/stream/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   stopStream: () =>
     fetch('/api/stream/stop', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  pauseStream: () =>
+    fetch('/api/stream/pause', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  resumeStream: () =>
+    fetch('/api/stream/resume', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   startVirtualCam: () =>
     fetch('/api/virtual-cam/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   stopVirtualCam: () =>
@@ -169,6 +480,23 @@ export const api = {
     }),
   meshRelease: () => fetch('/api/mesh/release', { method: 'POST' }),
   meshReset: () => fetch('/api/mesh/reset', { method: 'POST' }),
+  freezePose: () =>
+    fetch('/api/pose/freeze', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  unfreezePose: () =>
+    fetch('/api/pose/unfreeze', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  labStatus: () => fetch('/api/lab/status').then((r) => json<LabStatus>(r)),
+  labConnect: () =>
+    fetch('/api/lab/connect', { method: 'POST' }).then((r) => json<LabStatus>(r)),
+  labCommand: (op: string, body: Record<string, unknown> = {}) =>
+    fetch('/api/lab/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op, body }),
+    }).then((r) => json<LabCommandReply>(r)),
+  reloadBackend: () =>
+    fetch('/api/reload', { method: 'POST' }).then((r) =>
+      json<{ ok: boolean; reloading?: boolean }>(r),
+    ),
 }
 
 export function openAppSocket(onEvent: (ev: WsEvent) => void): WebSocket {

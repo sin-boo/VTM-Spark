@@ -62,6 +62,8 @@ def _kill_tree(pid: int) -> None:
 
                 stderr=subprocess.DEVNULL,
 
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0,
+
             )
 
         except Exception:
@@ -120,7 +122,7 @@ def _package_root() -> Path:
     if getattr(sys, "frozen", False):
         here = Path(sys.executable).resolve().parent
     else:
-        here = Path(__file__).resolve().parent.parent
+        here = Path(__file__).resolve().parents[2]
 
     def _has_runtime(base: Path) -> bool:
         return (base / "runtime" / "Scripts" / "python.exe").is_file()
@@ -148,8 +150,8 @@ def main() -> int:
         print(f"Missing runtime Python:\n  {runtime_py}", flush=True)
 
         print(
-            "Run start.bat → [1] Smart Build, then double-click VTMNoble.exe "
-            "next to start.bat.",
+            "Run install.bat, then double-click VTMNoble.exe "
+            "next to run.exe.",
             flush=True,
         )
 
@@ -190,7 +192,7 @@ def main() -> int:
             if resp.status == 200 and b"ok" in body:
                 print(
                     "VTM Noble is already running on port 8765.\n"
-                    "Close the other window, or run start.bat → [K] Kill leftovers.",
+                    "Close the other window, or close the other desk first.",
                     flush=True,
                 )
                 try:
@@ -207,9 +209,10 @@ def main() -> int:
 
     if os.name == "nt":
 
-        # New process group so Ctrl+C / taskkill /T can target the tree.
+        # Hide the runtime console; new process group so taskkill /T can target the tree.
 
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
 
 

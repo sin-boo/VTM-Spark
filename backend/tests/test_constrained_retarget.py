@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from engine import apply_live_deltas_to_ref, neutral_keypoints
-from live_retarget import (
+from backend.engine import apply_live_deltas_to_ref, neutral_keypoints
+from backend.live_retarget import (
     build_reference_rig,
     enforce_proportion_invariants,
     extract_controls,
 )
-from pose_controller import (
+from backend.pose_controller import (
     LEFT_BROW,
     L_EYE,
     MOUTH,
@@ -265,7 +265,7 @@ def test_iris_pairing_not_cross_eyed_at_rest() -> None:
 
 
 def test_sanitize_iris_clamped_to_matching_eye() -> None:
-    from pose_controller import sanitize_pose
+    from backend.pose_controller import sanitize_pose
 
     ref = neutral_keypoints()
     driven = ref.copy()
@@ -341,13 +341,152 @@ def test_full_mouth_open_deforms_entire_reference_contour() -> None:
     opened = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
     dy = opened[MOUTH, 1] - resting[MOUTH, 1]
 
-    assert np.all(np.abs(dy) > 0.008)
-    assert np.all(dy[:3] < -0.005)  # upper lip lifts with live
-    assert np.all(dy[[3, 6]] > 0.015)  # corners bend with the jaw
-    assert np.all(dy[[4, 5, 7]] > 0.0)  # lower contour drops
+    # Opening stays in the authored mouth: lower lip drops, upper stays put.
+    assert np.all(np.abs(dy[:3]) < 0.04)
+    assert np.all(dy[[3, 6]] > 0.008)  # corners
+    assert np.all(dy[[4, 5, 7]] > 0.02)  # lower contour
     gap_rest = float(resting[25, 1] - resting[21, 1])
     gap_open = float(opened[25, 1] - opened[21, 1])
-    assert gap_open > gap_rest + 0.06
+    assert gap_open > gap_rest + 0.015
+    # The whole mouth does not slide off the authored place.
+    rest_c = float(np.mean(resting[list(MOUTH), 1]))
+    open_c = float(np.mean(opened[list(MOUTH), 1]))
+    assert abs(open_c - rest_c) < 0.10
+
+
+def test_mouth_open_never_lifts_upper_lip_toward_nose() -> None:
+    """Jaw-only live drop opens the character mouth downward."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    for i, dy in {23: 0.10, 26: 0.10, 24: 0.26, 25: 0.30, 27: 0.26, 2: 0.25}.items():
+        live[i, 1] += dy
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_mouth": False,
+        "limit_nose": False,
+    }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
+    opened = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
+    for i in (20, 21, 22):
+        assert abs(float(opened[i, 1]) - float(rest[i, 1])) < 0.04
+    assert float(opened[25, 1]) > float(rest[25, 1]) + 0.04
+
+
+def test_wide_open_upper_mid_stays_on_lip_line() -> None:
+    """A lone live 21 spike toward the nose does not make a V on the character."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    for i, dy in {23: 0.10, 26: 0.10, 24: 0.26, 25: 0.30, 27: 0.26}.items():
+        live[i, 1] += dy
+    live[21, 1] -= 0.04
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_mouth": False,
+        "limit_nose": False,
+    }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
+    opened = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
+    chord_y = 0.5 * (float(opened[20, 1]) + float(opened[22, 1]))
+    assert float(opened[21, 1]) >= chord_y - 0.01
+    assert float(opened[25, 1]) > float(rest[25, 1]) + 0.04
+
+
+def test_clamp_mouth_anatomy_flattens_upper_mid_triangle() -> None:
+    from backend.live_retarget import clamp_mouth_anatomy
+    from backend.pose_controller import face_height
+
+    k = _expression_ref()
+    rest = k.copy()
+    k[21, 0] = float(k[15, 0])
+    k[21, 1] = float(k[15, 1]) + 0.01
+    out = clamp_mouth_anatomy(k.copy(), face_height(k), ref=rest)
+    chord_y = 0.5 * (float(out[20, 1]) + float(out[22, 1]))
+    assert float(out[21, 1]) >= chord_y - 1e-4
+    assert float(out[21, 1]) > float(out[15, 1])
+
+
+def test_upper_mid_on_nose_does_not_stretch_character_mouth() -> None:
+    """A live 21 parked on the nose is repaired, not transplanted."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    live[21, 0] = float(live[15, 0])
+    live[21, 1] = float(live[15, 1])
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_mouth": False,
+        "limit_nose": False,
+    }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
+    confused = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
+    assert float(confused[21, 1]) > float(confused[15, 1])
+    assert abs(float(confused[21, 1]) - float(rest[21, 1])) < 0.04
+
+
+def test_clamp_mouth_anatomy_pulls_upper_lip_off_nose() -> None:
+    from backend.live_retarget import clamp_mouth_anatomy
+    from backend.pose_controller import face_height
+
+    k = _expression_ref()
+    rest = k.copy()
+    k[21, 0] = float(k[15, 0])
+    k[21, 1] = float(k[15, 1])
+    k[20, 1] = float(k[15, 1])
+    k[22, 1] = float(k[15, 1])
+    k[25, 1] = float(k[15, 1]) - 0.02
+    out = clamp_mouth_anatomy(k.copy(), face_height(k), ref=rest)
+    assert float(out[21, 1]) > float(out[15, 1])
+    assert float(out[25, 1]) >= float(out[21, 1])
+    assert float(out[20, 1]) > float(out[15, 1])
+    assert float(out[22, 1]) > float(out[15, 1])
+
+
+def test_reconstruct_keeps_character_lip_order() -> None:
+    """Inverted / nose-confused live lips do not invert the character mouth."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    live[21, 1] = float(live[15, 1])
+    live[25, 1] = float(live[15, 1]) - 0.04
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_mouth": False,
+        "limit_nose": False,
+    }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
+    out = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
+    assert float(out[21, 1]) > float(out[15, 1])
+    assert float(out[25, 1]) >= float(out[21, 1])
+    assert abs(float(np.mean(out[list(MOUTH), 1])) - float(np.mean(rest[list(MOUTH), 1]))) < 0.06
+
+
+def test_mouth_repair_rejects_upper_mid_on_nose() -> None:
+    from face_landmark_repair import (
+        mouth_needs_repair,
+        repair_collapsed_face_landmarks,
+    )
+
+    k = _expression_ref()
+    k[21, 0] = float(k[15, 0])
+    k[21, 1] = float(k[15, 1])
+    assert mouth_needs_repair(k)
+    out = repair_collapsed_face_landmarks(k, log_prefix=None)
+    assert float(np.hypot(out[21, 0] - out[15, 0], out[21, 1] - out[15, 1])) > 0.04
+    assert float(out[21, 1]) > float(out[15, 1])
 
 
 def test_resting_expression_and_brow_motion_stay_stable() -> None:
@@ -361,8 +500,8 @@ def test_resting_expression_and_brow_motion_stay_stable() -> None:
     }
     resting = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
     np.testing.assert_allclose(resting[5:20, :2], ref[5:20, :2], atol=0.01)
-    # Live==origin → neutral snap collapses to a closed slit on the character.
-    assert abs(float(resting[25, 1] - resting[21, 1])) < 1e-4
+    # Live==origin keeps the authored mouth; no closed-slit snap.
+    np.testing.assert_allclose(resting[list(MOUTH), :2], ref[list(MOUTH), :2], atol=0.02)
     assert abs(_mouth_width(resting) - _mouth_width(ref)) < 0.04
 
     live = origin.copy()
@@ -373,58 +512,71 @@ def test_resting_expression_and_brow_motion_stay_stable() -> None:
     assert abs(_eye_width(raised, (11, 12, 13)) - _eye_width(resting, (11, 12, 13))) < 0.01
 
 
-def test_mouth_box_keeps_character_placement_when_human_midface_differs() -> None:
-    """Mouth location comes from the character box, not human midface length."""
+def test_human_sized_mouth_open_stays_in_character_box() -> None:
+    """A huge human jaw drop must not explode the authored anime mouth."""
     ref = _expression_ref()
-    origin = ref.copy()
+    origin = _expression_ref()
     live = origin.copy()
-    # Human mouth sits much lower relative to the eyes (long midface).
-    live[list(MOUTH), 1] += 0.12
+    # Webcam-scale open: lower lip walks toward the chin.
+    for i, dy in {23: 0.08, 24: 0.28, 25: 0.36, 26: 0.08, 27: 0.28, 2: 0.22}.items():
+        live[i, 1] += dy
     kwargs = {
         "body_method": "synthetic_from_face",
         "body_lost": False,
         "live_coord_space": "norm_crop",
         "origin_coord_space": "norm_crop",
     }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
+    opened = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
+    fh = face_height(ref)
+    rest_c = np.mean(rest[list(MOUTH), :2], axis=0)
+    open_c = np.mean(opened[list(MOUTH), :2], axis=0)
+    assert float(np.hypot(open_c[0] - rest_c[0], open_c[1] - rest_c[1])) < 0.10
+    assert float(opened[25, 1]) > float(rest[25, 1]) + 0.02
+    assert float(opened[25, 1] - opened[21, 1]) < 0.40 * fh
+    assert float(opened[21, 1]) > float(opened[15, 1])
+    assert abs(_mouth_width(opened) - _mouth_width(rest)) < 0.08
+
+
+def test_mouth_stays_in_authored_place_when_live_mouth_slides() -> None:
+    """A whole-mouth live slide does not drag the character mouth off its place."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    live[list(MOUTH), 1] += 0.12
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_mouth": False,
+    }
     resting = apply_live_deltas_to_ref(ref, origin, origin, **kwargs)
     shifted = apply_live_deltas_to_ref(ref, live, origin, **kwargs)
-
-    # Rigid mouth translate changes live center but not shape vs origin center
-    # after recentering — relative placement to the nose stays authored.
     rest_rel = float(np.mean(resting[list(MOUTH), 1]) - resting[15, 1])
     shift_rel = float(np.mean(shifted[list(MOUTH), 1]) - shifted[15, 1])
-    assert abs(shift_rel - rest_rel) < 0.01
-    assert float(np.mean(shifted[list(MOUTH), 1])) < float(shifted[2, 1])
+    assert abs(shift_rel - rest_rel) < 0.03
+    assert abs(_mouth_width(shifted) - _mouth_width(resting)) < 0.04
 
 
-def test_mouth_region_built_from_reference_anchors() -> None:
+def test_reference_rig_stores_mouth_size() -> None:
     ref = _expression_ref()
     rig = build_reference_rig(ref)
-    assert rig.mouth_region is not None
-    region = rig.mouth_region
-    assert region.half_w >= region.rest_half_w > 0.0
-    assert region.half_h >= region.rest_half_h > 0.0
-    # Box is locked to a mouth-free anchor near the eyes/nose, not face COM.
-    assert float(region.anchor_local[1]) < 0.0
-    # Authored mouth center sits below that anchor.
-    assert float(region.center_from_anchor[1]) > 0.0
-    assert set(region.rest_uv) == set(MOUTH)
+    assert rig.mouth_width > 0.05
+    assert rig.mouth_gap > 0.0
 
 
-def test_near_closed_mouth_snaps_to_closed_slit() -> None:
-    """Neutral / near-origin mouth snaps to a fully closed lip slit."""
-    from live_retarget import extract_controls, is_mouth_closed_snap
+def test_near_closed_mouth_does_not_snap() -> None:
+    """Near-origin mouth keeps live shape; no closed-slit snap."""
+    from backend.live_retarget import extract_controls
 
     ref = _expression_ref()
     origin = ref.copy()
-    # Typical resting gap that used to miss the old absolute threshold.
     for up, lo, gap in ((20, 24, 0.02), (21, 25, 0.025), (22, 27, 0.02)):
         origin[lo, 1] = float(origin[up, 1]) + gap
     live = origin.copy()
-    # Tiny tracker noise around neutral — still near origin.
     live[21, 1] += 0.002
     live[25, 1] += 0.003
-    assert is_mouth_closed_snap(live, origin)
     out = apply_live_deltas_to_ref(
         ref,
         live,
@@ -432,15 +584,20 @@ def test_near_closed_mouth_snaps_to_closed_slit() -> None:
         body_method="synthetic_from_face",
         body_lost=False,
     )
-    for up, lo in ((20, 24), (21, 25), (22, 27)):
-        assert abs(float(out[up, 1]) - float(out[lo, 1])) < 1e-4
-    assert float(out[25, 1] - out[21, 1]) < 1e-4
+    rest = apply_live_deltas_to_ref(
+        ref,
+        origin,
+        origin,
+        body_method="synthetic_from_face",
+        body_lost=False,
+    )
+    assert abs(float(out[25, 1] - out[21, 1]) - float(rest[25, 1] - rest[21, 1])) < 0.01
     ctrls = extract_controls(live, origin, build_reference_rig(ref))
-    assert ctrls.mouth_snapped is True
+    assert ctrls.mouth_snapped is False
 
 
-def test_neutral_smile_snap_preserves_mouth_object_transform() -> None:
-    """Blue snap changes local shape without importing position or face lean."""
+def test_rest_equals_live_keeps_authored_mouth() -> None:
+    """Live==origin leaves the reference mouth in place — no slit snap."""
     ref = _expression_ref()
     mouth_ids = list(MOUTH)
     center = np.mean(ref[mouth_ids, :2], axis=0)
@@ -454,48 +611,19 @@ def test_neutral_smile_snap_preserves_mouth_object_transform() -> None:
         (ref[mouth_ids, :2] - center) @ rotation.T + center + translation
     )
 
-    snapped = apply_live_deltas_to_ref(
+    out = apply_live_deltas_to_ref(
         ref,
         ref,
         ref,
         body_method="synthetic_from_face",
         body_lost=False,
     )
-
-    # The mouth object keeps its authored center and orientation.
     np.testing.assert_allclose(
-        np.mean(snapped[mouth_ids, :2], axis=0),
+        np.mean(out[mouth_ids, :2], axis=0),
         np.mean(ref[mouth_ids, :2], axis=0),
-        atol=1e-5,
+        atol=1e-4,
     )
-    axis_x = snapped[26, :2] - snapped[23, :2]
-    axis_x /= np.linalg.norm(axis_x)
-    assert abs(float(np.arctan2(axis_x[1], axis_x[0])) - angle) < 1e-5
-
-    axis_y = np.array([-axis_x[1], axis_x[0]], dtype=np.float32)
-    if axis_y[1] < 0.0:
-        axis_y *= -1.0
-    for upper, lower in ((20, 24), (21, 25), (22, 27)):
-        assert abs(float(np.dot(snapped[lower, :2] - snapped[upper, :2], axis_y))) < 1e-5
-    # Closed center sits slightly below the raised corners: a subtle smile.
-    lip_mid = 0.5 * (snapped[21, :2] + snapped[25, :2])
-    corner_mid = 0.5 * (snapped[23, :2] + snapped[26, :2])
-    assert float(np.dot(lip_mid - corner_mid, axis_y)) > 0.0
-
-
-def test_smile_away_from_origin_does_not_snap() -> None:
-    """A hard smile is not neutral — must not blue-snap just because gap shrank."""
-    from live_retarget import is_mouth_closed_snap
-
-    ref = _expression_ref()
-    origin = ref.copy()
-    for upper, lower in ((20, 24), (21, 25), (22, 27)):
-        origin[lower, 1] = origin[upper, 1] + 0.02
-    smiling = origin.copy()
-    smiling[23, 1] -= 0.05
-    smiling[26, 1] -= 0.05
-    smiling[25, 1] = smiling[21, 1] + 0.004  # tiny mid gap like a pressed smile
-    assert not is_mouth_closed_snap(smiling, origin)
+    np.testing.assert_allclose(out[mouth_ids, :2], ref[mouth_ids, :2], atol=0.02)
 
 
 def test_closed_live_mouth_closes_toward_reference() -> None:
@@ -529,14 +657,8 @@ def test_closed_live_mouth_closes_toward_reference() -> None:
     assert float(closed[25, 1] - closed[21, 1]) < 0.02
 
 
-def test_closed_after_open_origin_snaps_open_character_mouth() -> None:
-    """User closes after an open origin lock: character must fully shut.
-
-    Previously absolute shut rejected resting negative corner lift, so snap
-    never fired and an open reference mouth stayed open in generate.
-    """
-    from live_retarget import is_mouth_closed_snap
-
+def test_closed_after_open_origin_closes_character_mouth() -> None:
+    """Closing vs an open origin transfers as a close delta, with no snap."""
     ref = _expression_ref()
     for up, lo, gap in ((20, 24, 0.08), (21, 25, 0.11), (22, 27, 0.08)):
         ref[lo, 1] = float(ref[up, 1]) + gap
@@ -547,7 +669,14 @@ def test_closed_after_open_origin_snaps_open_character_mouth() -> None:
     for up, lo in ((20, 24), (21, 25), (22, 27)):
         live[lo, 1] = live[up, 1]
 
-    assert is_mouth_closed_snap(live, origin)
+    rest = apply_live_deltas_to_ref(
+        ref,
+        origin,
+        origin,
+        body_method="synthetic_from_face",
+        body_lost=False,
+        limit_mouth=False,
+    )
     out = apply_live_deltas_to_ref(
         ref,
         live,
@@ -556,9 +685,7 @@ def test_closed_after_open_origin_snaps_open_character_mouth() -> None:
         body_lost=False,
         limit_mouth=False,
     )
-    assert abs(float(out[25, 1] - out[21, 1])) < 1e-4
-    for up, lo in ((20, 24), (21, 25), (22, 27)):
-        assert abs(float(out[up, 1] - out[lo, 1])) < 1e-4
+    assert float(out[25, 1] - out[21, 1]) < float(rest[25, 1] - rest[21, 1]) - 0.02
 
 
 def test_frown_lowers_corners_smile_raises_them() -> None:
@@ -620,7 +747,7 @@ def test_mouth_open_axis_rotates_with_head() -> None:
         head_roll_deg=20.0,
     )
     jaw = out[25, :2] - out[21, :2]
-    assert float(jaw[1]) > 0.08
+    assert float(jaw[1]) > 0.04
     assert float(jaw[0]) < -0.02
 
 
@@ -645,6 +772,55 @@ def test_calibrated_head_translation_survives_safety_pass() -> None:
     )
     dx = float(np.mean(moved[:28, 0] - rest[:28, 0]))
     assert dx > 0.02
+
+
+def test_landmark_translation_wins_over_tiny_calibrated_nx() -> None:
+    """Webcam face COM must drive the overlay even if RelativePose nx is ~0.
+
+    Live logs showed face_c moving ~0.07 while tx stayed at -0.04 * 0.40,
+    so the character overlay sat on the reference.
+    """
+    ref = _expression_ref()
+    origin = ref.copy()
+    live = origin.copy()
+    live[:28, 0] -= 0.08
+    live[28:30, 0] -= 0.08
+    kwargs = {
+        "body_method": "synthetic_from_face",
+        "body_lost": False,
+        "live_coord_space": "norm_crop",
+        "origin_coord_space": "norm_crop",
+        "limit_face": False,
+    }
+    rest = apply_live_deltas_to_ref(ref, origin, origin, head_tx_norm=0.0, **kwargs)
+    moved = apply_live_deltas_to_ref(
+        ref, live, origin, head_tx_norm=-0.04, **kwargs
+    )
+    dx = float(np.mean(moved[:5, 0] - rest[:5, 0]))
+    assert dx < -0.02
+
+
+def test_pitch_nod_moves_chin() -> None:
+    """A 20° look-down has to travel the chin, not only foreshorten |x|."""
+    ref = _expression_ref()
+    origin = ref.copy()
+    rest = apply_live_deltas_to_ref(
+        ref,
+        origin,
+        origin,
+        body_method="synthetic_from_face",
+        body_lost=False,
+        head_pitch_deg=0.0,
+    )
+    nodded = apply_live_deltas_to_ref(
+        ref,
+        origin,
+        origin,
+        body_method="synthetic_from_face",
+        body_lost=False,
+        head_pitch_deg=20.0,
+    )
+    assert float(nodded[2, 1]) > float(rest[2, 1]) + 0.02
 
 
 def test_face_translation_does_not_slide_mouth_opposite() -> None:
@@ -943,6 +1119,22 @@ def test_feature_limiters_can_be_disabled() -> None:
     assert float(free_m[25, 1] - ref[25, 1]) > float(
         capped_m[25, 1] - ref[25, 1]
     )
+
+
+def test_motion_caps_limit_yaw() -> None:
+    ref = neutral_keypoints()
+    origin = ref.copy()
+    rig = build_reference_rig(ref)
+    free = extract_controls(origin, origin, rig, head_yaw_deg=40.0)
+    tight = extract_controls(
+        origin,
+        origin,
+        rig,
+        head_yaw_deg=40.0,
+        motion={"yaw": 8.0, "roll": 80.0, "pitch_up": 50.0, "pitch_down": 32.0},
+    )
+    assert abs(free.head_yaw_deg) > abs(tight.head_yaw_deg) + 10
+    assert abs(tight.head_yaw_deg) <= 8.0 + 1e-5
 
 
 def test_sanitize_per_region_travel_limits() -> None:

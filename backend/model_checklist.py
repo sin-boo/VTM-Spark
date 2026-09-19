@@ -84,6 +84,18 @@ CHECKLIST: tuple[ChecklistItem, ...] = (
         auto_download=True,
     ),
     ChecklistItem(
+        id="hair",
+        label="animeseg_hair3.pt",
+        purpose="Hair-part tracker (full-stack Mask2Former fine-tune)",
+        required=False,
+        candidates=(
+            "models/trackers/animeseg_hair3.pt",
+            "models/trackers/hair_seg.pt",
+            "vendor/tools/live-poser/models/hair_seg.pt",
+        ),
+        min_bytes=_MIN_BYTES,
+    ),
+    ChecklistItem(
         id="osf_landmarks",
         label="lm_model3_opt.onnx",
         purpose="OpenSeeFace face landmarks (default)",
@@ -135,6 +147,16 @@ def _find_item(item: ChecklistItem) -> tuple[Path | None, int]:
         path = _resolve_candidate(rel)
         if path.is_file() and path.stat().st_size >= item.min_bytes:
             return path, path.stat().st_size
+    if item.id == "dit":
+        dit = models_dir()
+        if dit.is_dir():
+            for path in sorted(dit.iterdir()):
+                if (
+                    path.is_file()
+                    and path.suffix.lower() in {".pt", ".pth", ".ckpt"}
+                    and path.stat().st_size >= item.min_bytes
+                ):
+                    return path, path.stat().st_size
     return None, 0
 
 

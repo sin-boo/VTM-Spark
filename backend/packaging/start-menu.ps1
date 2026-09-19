@@ -1,6 +1,15 @@
-﻿# VTM Noble start menu - Smart Build + Start. Kill orphans is automatic.
+﻿# VTM Noble — install.bat / run.exe
+param(
+  [ValidateSet("install", "run")]
+  [string]$Action = "run"
+)
+
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $PSScriptRoot
+# PS 7+ can treat taskkill's "process not found" (128) as a terminating error.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $Root
 
 $VenvPy = Join-Path $Root ".venv-build\Scripts\python.exe"
@@ -10,6 +19,7 @@ $BuildScript = Join-Path $PSScriptRoot "build.ps1"
 $Esc = [char]27
 
 . (Join-Path $PSScriptRoot "console-progress.ps1")
+. (Join-Path $PSScriptRoot "venv-home.ps1")
 
 function Enable-PrettyConsole {
   try {
@@ -116,15 +126,45 @@ function Get-ModelReady {
 }
 
 function Get-RunState {
+  [void](Repair-VtmVenvHome -VenvDir (Join-Path $Root ".venv-build") -PythonExe $VenvPy)
   [pscustomobject]@{
-    HasVenv  = [bool](Test-Path -LiteralPath $VenvPy)
+    HasVenv  = [bool](Test-VtmPythonExe $VenvPy)
     HasUi    = [bool](Test-Path -LiteralPath $UiIndex)
     HasModel = Get-ModelReady
   }
 }
 
 function Invoke-KillOrphans {
-  & $KillScript -Quiet
+  param([switch]$Fast)
+  if ($Fast) {
+    & $KillScript -Quiet -Fast
+  } else {
+    & $KillScript -Quiet
+  }
+}
+
+function Get-VtmConsoleHwnd {
+  if (-not ("Win32.SplashWnd" -as [type])) {
+    Add-Type -Namespace Win32 -Name SplashWnd -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+"@
+  }
+  return [Win32.SplashWnd]::GetConsoleWindow()
+}
+
+function Hide-VtmConsole {
+  param($Hwnd)
+  if ($Hwnd -ne [IntPtr]::Zero) {
+    [void][Win32.SplashWnd]::ShowWindow($Hwnd, 0)
+  }
+}
+
+function Show-VtmConsole {
+  param($Hwnd)
+  if ($Hwnd -ne [IntPtr]::Zero) {
+    [void][Win32.SplashWnd]::ShowWindow($Hwnd, 5)
+  }
 }
 
 function Invoke-EnsureModel {
@@ -132,21 +172,16 @@ function Invoke-EnsureModel {
 
   if (-not (Test-Path -LiteralPath $VenvPy)) {
     if ($Required) {
-      Write-Ansi "No .venv-build Python - run [1] Smart Build first." rose
+      Write-Ansi "No .venv-build Python - run install.bat first." rose
       return $false
     }
     return $false
   }
 
-  if (Get-ModelReady) {
-    Write-Ansi "==> DiT model ready:" cyan -NoNewline
-    Write-Ansi " models\dit\VTM-ELF.pt" mint
-  } else {
-    Write-Host ""
-    Write-Ansi "==> Downloading DiT model (Hugging Face -> models\dit\VTM-ELF.pt)" cyan
-    Write-Ansi "    sinBoo1/VTM-Elf-0.01 - first setup can take several minutes." slate
-    Write-Ansi "    Progress below means it is still working - not frozen." slate
-    Write-Host ""
+  Write-Host ""
+  Write-Ansi "==> Checking Hugging Face for new DiT checkpoints" cyan
+  Write-Ansi "    Existing local files are kept. Only missing Hub weights download." slate
+  Write-Host ""
 
     $prevPyPath = $env:PYTHONPATH
     $env:PYTHONPATH = $Root
@@ -169,14 +204,13 @@ function Invoke-EnsureModel {
     }
 
     if (($code -eq 0) -and (Get-ModelReady)) {
-      Write-Ansi "Model download finished." green
+      Write-Ansi "Model catalog sync finished." green
     } else {
       Write-Ansi "Model download failed or incomplete." rose
-      Write-Ansi "Place VTM-ELF.pt in models\dit or retry Smart Build / Start." slate
+      Write-Ansi "Place a .pt file in models\dit or retry Rebuild / Start." slate
       if ($Required) { return $false }
       return $false
     }
-  }
 
   # Full weight checklist (DiT + trackers + OpenSeeFace).
   Write-Host ""
@@ -209,63 +243,6 @@ function Invoke-EnsureModel {
   Write-Ansi "Checklist incomplete - some required models are missing." amber
   if ($Required) { return $false }
   return $false
-}
-
-function Show-Menu {
-  $state = Get-RunState
-  Clear-Host
-  Write-Host ""
-  Write-Ansi "  ================================================" cyan
-  Write-Ansi "         V T M   N O B L E" white
-  Write-Ansi "      smart build  ·  source start" slate
-  Write-Ansi "  ================================================" cyan
-  Write-Host ""
-  Write-Ansi "  Start runs python -m backend (webview + ui\dist)." slate
-  Write-Ansi "  Setup downloads VTM-ELF.pt into models\dit when missing." slate
-  Write-Ansi "  Leftovers are cleared automatically before each action." slate
-  Write-Host ""
-
-  Write-Ansi "  -- actions --------------------------------------" teal
-  Write-Ansi "  [1]  Smart Build" gold -NoNewline
-  Write-Ansi "   deps / UI + drop VTMNoble.exe here" slate
-  if ($state.HasVenv -and $state.HasUi) {
-    Write-Ansi "  [2]  Start" gold -NoNewline
-    Write-Ansi "       ensure model, then run app" slate
-  } else {
-    Write-Ansi "  [2]  Start" dim -NoNewline
-    Write-Ansi "       (need venv + ui\dist - use [1])" dim
-  }
-  Write-Ansi "  ------------------------------------------------" teal
-  Write-Host ""
-
-  if ($state.HasVenv) {
-    Write-Ansi "  venv    " slate -NoNewline
-    Write-Ansi "* ready" green -NoNewline
-    Write-Ansi "  .venv-build" mint
-  } else {
-    Write-Ansi "  venv    " slate -NoNewline
-    Write-Ansi "o missing" amber -NoNewline
-    Write-Ansi "  Smart Build installs deps" slate
-  }
-  if ($state.HasUi) {
-    Write-Ansi "  ui      " slate -NoNewline
-    Write-Ansi "* ready" green -NoNewline
-    Write-Ansi "  ui\dist" mint
-  } else {
-    Write-Ansi "  ui      " slate -NoNewline
-    Write-Ansi "o missing" amber -NoNewline
-    Write-Ansi "  Smart Build builds UI" slate
-  }
-  if ($state.HasModel) {
-    Write-Ansi "  model   " slate -NoNewline
-    Write-Ansi "* ready" green -NoNewline
-    Write-Ansi "  models\dit" mint
-  } else {
-    Write-Ansi "  model   " slate -NoNewline
-    Write-Ansi "o missing" amber -NoNewline
-    Write-Ansi "  downloads on Smart Build / Start" slate
-  }
-  Write-Host ""
 }
 
 function Invoke-EnsureVtmNobleCam {
@@ -354,21 +331,21 @@ function Invoke-SmartBuild {
   Invoke-KillOrphans
   $state = Get-RunState
   if ($state.HasVenv) {
-    Write-Ansi "==> Smart build (checks deps - installs anything missing, e.g. pyvirtualcam)" cyan
+    Write-Ansi "==> Rebuild (checks deps - installs anything missing, e.g. pyvirtualcam)" cyan
   } else {
-    Write-Ansi "==> Smart build (first install - creating venv and installing deps)" cyan
+    Write-Ansi "==> Rebuild (first install - creating venv and installing deps)" cyan
   }
-  Write-Ansi "    Long steps use each tool's own progress (pip/npm); copies print start/done." slate
+  Write-Ansi "    Long steps use each tool's own progress (uv/npm); copies print start/done." slate
   Write-Host ""
   $code = 0
   try {
-    # First install: do not pass -SkipDeps so pip/torch run immediately.
+    # First install: do not pass -SkipDeps so uv/torch run immediately.
     # Later builds: -SkipDeps, and build.ps1 still installs if imports/CUDA
     # (or new requirements like pyvirtualcam) are incomplete.
     if ($state.HasVenv) {
-      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps -SkipPackage
     } else {
-      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipPackage
     }
     $code = [int]$LASTEXITCODE
   } catch {
@@ -377,7 +354,7 @@ function Invoke-SmartBuild {
   }
   if ($code -ne 0) {
     Write-Host ""
-    Write-Ansi "Smart Build failed. Review the message above." rose
+    Write-Ansi "Rebuild failed. Review the message above." rose
     Write-Host ""
     Write-Ansi "Press Enter to return..." slate
     [void][Console]::ReadLine()
@@ -391,15 +368,93 @@ function Invoke-SmartBuild {
   [void](Invoke-EnsureVtmNobleCam)
 
   Write-Host ""
-  Write-Ansi "Smart Build finished." green
-  $rootExe = Join-Path $Root "VTMNoble.exe"
-  if (Test-Path -LiteralPath $rootExe) {
-    Write-Ansi "  Double-click " slate -NoNewline
-    Write-Ansi "VTMNoble.exe" mint -NoNewline
-    Write-Ansi " next to start.bat to launch the app." slate
-    Write-Ansi "  (You do not need to dig into dist\VTMNoble\.)" slate
-  } else {
-    Write-Ansi "  Or use menu [2] Start after models are ready." slate
+  Write-Ansi "Rebuild finished." green
+  Write-Ansi "  Double-click run.exe to open the desk." slate
+  Write-Host ""
+  Write-Ansi "Press Enter to return..." slate
+  [void][Console]::ReadLine()
+}
+
+function Test-UiStale {
+  if (-not (Test-Path -LiteralPath $UiIndex)) { return $true }
+  $distTime = (Get-Item -LiteralPath $UiIndex).LastWriteTimeUtc
+  $newestSrc = Get-ChildItem -Path (Join-Path $Root "ui\src"), (Join-Path $Root "ui\index.html"), (Join-Path $Root "ui\public") -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike "_*" } |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1
+  return ($null -ne $newestSrc -and $newestSrc.LastWriteTimeUtc -gt $distTime)
+}
+
+function Invoke-BuildDeskUi {
+  Write-Ansi "Building desk UI from current source…" cyan
+  $uiDir = Join-Path $Root "ui"
+  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Ansi "npm not found on PATH. Install Node.js or run install.bat." rose
+    return 1
+  }
+  $buildCode = 1
+  Push-Location $uiDir
+  try {
+    # Start-Process ExitCode. kill-orphans' taskkill (128) used to leak into
+    # the next native status and mark a good vite build as failed.
+    $buildCode = Invoke-ProcessWithHeartbeat `
+      -FilePath "cmd.exe" `
+      -ArgumentList @("/c", "npm", "run", "build") `
+      -Activity "vite build" `
+      -HeartbeatSeconds 10
+  } catch {
+    Write-Ansi "UI rebuild threw: $_" rose
+    $buildCode = 1
+  } finally {
+    Pop-Location
+  }
+  if ($buildCode -ne 0) {
+    Write-Ansi "UI rebuild exited $buildCode." rose
+  }
+  return [int]$buildCode
+}
+
+function Test-VtmDeskWindow {
+  $named = Get-Process -Name pythonw,python,VTMNoble -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Noble' }
+  if ($named) { return $true }
+  try {
+    if (-not ("Win32.FindVtm" -as [type])) {
+      Add-Type -Namespace Win32 -Name FindVtm -MemberDefinition @"
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
+"@
+    }
+    $hwnd = [Win32.FindVtm]::FindWindowW($null, "VTM Noble")
+    return ($hwnd -ne [IntPtr]::Zero)
+  } catch {
+    return $false
+  }
+}
+
+function Wait-VtmDeskWindow {
+  param($Proc, [int]$TimeoutSec = 40)
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if ($null -eq $Proc) { return $false }
+    try { $null = $Proc.Refresh() } catch {}
+    if ($Proc.HasExited) { return $false }
+    if (Test-VtmDeskWindow) { return $true }
+    Start-Sleep -Milliseconds 400
+  }
+  return $false
+}
+
+function Show-StartFailure {
+  param($ConsoleHwnd, [string]$Reason)
+  Show-VtmConsole $ConsoleHwnd
+  Write-Host ""
+  Write-Ansi $Reason rose
+  $log = Join-Path $Root "models\vtm_noble.log"
+  if (Test-Path -LiteralPath $log) {
+    Write-Host ""
+    Write-Ansi "Last log lines:" slate
+    Get-Content -LiteralPath $log -Tail 30
   }
   Write-Host ""
   Write-Ansi "Press Enter to return..." slate
@@ -410,78 +465,79 @@ function Invoke-StartApp {
   $state = Get-RunState
   if (-not $state.HasVenv) {
     Write-Host ""
-    Write-Ansi "No .venv-build Python. Run [1] Smart Build first." rose
-    Write-Host ""
-    Write-Ansi "Press Enter to return..." slate
-    [void][Console]::ReadLine()
-    return
-  }
-  if (-not $state.HasUi) {
-    Write-Host ""
-    Write-Ansi "UI dist missing. Run [1] Smart Build first." rose
+    Write-Ansi "No working .venv-build Python. Run install.bat first." rose
+    Write-Ansi "    A leftover venv whose conda/pythonw home was deleted also needs a rebuild." slate
     Write-Host ""
     Write-Ansi "Press Enter to return..." slate
     [void][Console]::ReadLine()
     return
   }
 
+  $consoleHwnd = Get-VtmConsoleHwnd
   Write-Host ""
-  Write-Ansi "==> Clearing leftovers..." amber
-  Invoke-KillOrphans
+  Write-Ansi "==> Starting operator desk…" cyan
+  Write-Ansi "    This window stays until the splash appears." slate
+  Invoke-KillOrphans -Fast
 
-  if (-not (Invoke-EnsureModel -Required)) {
-    Write-Host ""
-    Write-Ansi "Press Enter to return..." slate
-    [void][Console]::ReadLine()
-    return
-  }
+  $Pyw = Resolve-VtmDeskPython -VenvDir (Join-Path $Root ".venv-build") -PythonExe $VenvPy
 
-  Write-Ansi "==> Starting:" cyan -NoNewline
-  Write-Ansi " python -m backend" mint
-  Write-Ansi "    Close the app (or Ctrl+C) to return to the menu." slate
-  Write-Host ""
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
   $prevPyPath = $env:PYTHONPATH
   $env:PYTHONPATH = $Root
+  $proc = $null
+  $code = 0
   try {
-    & $VenvPy -m backend --ui webview
-    $code = $LASTEXITCODE
+    if (Test-UiStale) {
+      $buildCode = Invoke-BuildDeskUi
+      if ($buildCode -ne 0 -and -not (Test-Path -LiteralPath $UiIndex)) {
+        Write-Host ""
+        Write-Ansi "UI build failed and ui\dist is missing. Run install.bat." rose
+        Write-Host ""
+        Write-Ansi "Press Enter to return..." slate
+        [void][Console]::ReadLine()
+        return
+      }
+      if ($buildCode -ne 0) {
+        Write-Ansi "UI rebuild failed; launching last ui\dist." rose
+      }
+    }
+
+    $proc = Start-Process -FilePath $Pyw -ArgumentList "-m","backend","--ui","webview" -WorkingDirectory $Root -PassThru
+
+    if (-not (Wait-VtmDeskWindow $proc)) {
+      if ($null -ne $proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Invoke-KillOrphans -Fast
+      }
+      $why = "Desk window did not open."
+      if ($null -ne $proc -and $proc.HasExited) {
+        $why = "Desk process exited before the splash appeared."
+      }
+      Show-StartFailure $consoleHwnd $why
+      return
+    }
+    Hide-VtmConsole $consoleHwnd
+    exit 0
   } catch {
-    Write-Ansi "Failed to start: $_" rose
     $code = 1
+    Show-VtmConsole $consoleHwnd
+    Write-Ansi "Failed to start: $_" rose
   } finally {
-    $ErrorActionPreference = $prev
     if ($null -eq $prevPyPath) {
       Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
     } else {
       $env:PYTHONPATH = $prevPyPath
     }
   }
-  Write-Host ""
   if ($code -and $code -ne 0) {
-    Write-Ansi "Process exited with code $code" amber
-  } else {
-    Write-Ansi "App closed." green
+    Show-StartFailure $consoleHwnd "Process exited with code $code"
+    return
   }
-  Write-Host ""
-  Write-Ansi "Press Enter to return..." slate
-  [void][Console]::ReadLine()
 }
 
 Enable-PrettyConsole
 
-while ($true) {
-  Show-Menu
-  Write-Ansi "  Choose: " gold -NoNewline
-  $choice = (Read-Host).Trim()
-  switch -Regex ($choice) {
-    '^1$' { Invoke-SmartBuild }
-    '^2$' { Invoke-StartApp }
-    default {
-      Write-Host ""
-      Write-Ansi "Invalid choice." rose
-      Start-Sleep -Milliseconds 700
-    }
-  }
+if ($Action -eq "install") {
+  Invoke-SmartBuild
+} else {
+  Invoke-StartApp
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -9,41 +10,51 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
-import torch
 from PIL import Image
 
 from .paths import (
+    configure_torch_compile_cache,
+    data_dir,
     default_ref_path,
     ensure_import_paths,
     models_dir,
+    package_root,
     torch_train_dir,
 )
 
+configure_torch_compile_cache()
 ensure_import_paths()
+import torch
 
 TORCH_TRAIN_DIR = torch_train_dir()
 # Resolved dynamically via models_dir() so downloads into models/dit are picked up.
 STREAM_CKPT_NAME = "VTM-ELF.pt"
-# Default still — data/refs only (user upload / shipped default).
+# Default still — models/refs only (user upload / shipped default).
 DEFAULT_REF = default_ref_path()
 DEFAULT_REF_FALLBACK = default_ref_path()
 
-STREAM_DEFAULT_STEPS = 2
-STREAM_DEFAULT_POSE_CFG = 2.0
-STREAM_DEFAULT_ID_CFG = 1.5
+STREAM_DEFAULT_STEPS = 1
+# Designed 1–2 step joint pass: pose and the still in one forward (CFG 1.0).
+STREAM_DEFAULT_POSE_CFG = 1.0
+STREAM_DEFAULT_ID_CFG = 1.0
+STREAM_MIN_CFG = 0.0
+STREAM_MAX_CFG = 6.0
 # Fast mode: real speed levers (TF32 alone is a no-op — DiT runs bf16).
 STREAM_FAST_MAX_STEPS = 8
-STREAM_FAST_DISABLE_CFG = True  # single forward (~3x vs 3-way CFG)
-# Compile DiT on Fast warmup. On by default so first stream is fast; set
-# VTM_COMPILE_MODEL=0 to force eager (avoids inductor RAM spikes on weak hosts).
-STREAM_COMPILE_MODEL = os.environ.get("VTM_COMPILE_MODEL", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
+# This checkpoint is a 1–2 step model. 3-way pose/identity CFG splits the
+# still off the pose and melts the face, so Fast keeps the joint forward.
+STREAM_FAST_DISABLE_CFG = True
+# Compile DiT on Fast warmup. Off by default — Start splash only loads
+# weights + last character. Toggle Compile in the app, or set
+# VTM_COMPILE_MODEL=1 before launch.
+STREAM_COMPILE_MODEL = os.environ.get("VTM_COMPILE_MODEL", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
 }
 STREAM_COMPILE_MODE = os.environ.get("VTM_COMPILE_MODE", "default").strip() or "default"
 STREAM_COMPILE_MODE_LADDER = (STREAM_COMPILE_MODE, "default")
@@ -54,27 +65,152 @@ STREAM_FIXED_SEED = 42
 # Stream can denoise 1 or 2 poses per DiT call (better GPU occupancy).
 STREAM_BATCH_MAX = 2
 # How strongly each new frame blends over the previous display (1 = no smooth).
-# Lower = less Batch×2 flicker / sample pop, more ghosting.
+# Lower = less Batch×2 flicker / sample pop, more leftover hair after a turn.
 STREAM_TEMPORAL_EMA = 0.58
+# Extra pictures drawn between two DiT frames (0 = keys only).
+STREAM_INBETWEENS = 1
+STREAM_MAX_INBETWEENS = 3
+# Master switch for print / inbetween. Slider still picks the count.
+STREAM_INTERPOLATE = True
+STREAM_MIN_BLEND = 0.05
+STREAM_MAX_BLEND = 1.0
+# Start the next DiT sample from the last generated latent (img2img hold).
+STREAM_HOLD_LAST = True
+# Mix weight toward the last latent (0 = fresh noise, ~1 = barely move).
+# Stay low — 0.6 xeroxed the still into chrome after a few seconds.
+STREAM_HOLD_LAST_T = 0.28
+# Each hold also blends this much of the still latent so identity cannot drift.
+STREAM_HOLD_REF_PULL = 0.22
 IMAGE_SIZE = 768
 INFERENCE_TIMESTEP_SHIFT = 0.3
 NUM_KEYPOINTS = 37
 KEYPOINT_DIM = 4
-# Current checkpoint training labels use anime-HRNet's native face ordering.
-# Keep all runtime/overlay geometry in KEYPOINT_SCHEMA and adapt only at the
-# DiT conditioning boundary. Set to "schema" for a future corrected checkpoint.
-MODEL_KEYPOINT_LAYOUT = "hrnet_native"
+# Fallback before a checkpoint is loaded. Runtime/overlay stay KEYPOINT_SCHEMA;
+# only the DiT boundary remaps, and only when the checkpoint says so.
+DEFAULT_KEYPOINT_LAYOUT = "hrnet_native"
 
 
-def _keypoints_for_model(keypoints: np.ndarray) -> np.ndarray:
-    kps = _as_keypoints37(keypoints)
-    if MODEL_KEYPOINT_LAYOUT == "schema":
-        return kps.copy()
-    if MODEL_KEYPOINT_LAYOUT == "hrnet_native":
-        from .model_layout import schema37_to_hrnet_native37
+def _clip_cfg(value: float) -> float:
+    raw = float(value)
+    if raw < STREAM_MIN_CFG:
+        return STREAM_MIN_CFG
+    if raw > STREAM_MAX_CFG:
+        return STREAM_MAX_CFG
+    return raw
 
-        return schema37_to_hrnet_native37(kps)
-    raise ValueError(f"Unknown model keypoint layout: {MODEL_KEYPOINT_LAYOUT!r}")
+
+def _clip_blend(value: float) -> float:
+    raw = float(value)
+    if raw < STREAM_MIN_BLEND:
+        return STREAM_MIN_BLEND
+    if raw > STREAM_MAX_BLEND:
+        return STREAM_MAX_BLEND
+    return raw
+
+
+def _clip_inbetweens(value: object) -> int:
+    try:
+        raw = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return STREAM_INBETWEENS
+    if raw < 0:
+        return 0
+    if raw > STREAM_MAX_INBETWEENS:
+        return STREAM_MAX_INBETWEENS
+    return raw
+
+
+def interpolate_on(value: object) -> bool:
+    if value is None:
+        return STREAM_INTERPOLATE
+    return bool(value)
+
+
+def effective_inbetweens(enabled: object, count: object) -> int:
+    """How many mids to print. Off toggle always wins over the slider."""
+    if not interpolate_on(enabled):
+        return 0
+    return _clip_inbetweens(count)
+
+
+# Face travel in norm_crop. Below tight = full hold. Above loose = drop hold
+# so a turn does not keep the last (or rest) face stuck on the new pose.
+# Drift from rest uses the same curve — a slow lean is many tiny steps, and
+# holding through that melts the still into the smear the holdout saw.
+_HOLD_MOVE_TIGHT = 0.018
+_HOLD_MOVE_LOOSE = 0.090
+
+
+def face_pose_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Mean visible face-keypoint travel between two poses (norm_crop)."""
+    if a is None or b is None:
+        return 0.0
+    left = np.asarray(a, dtype=np.float32)
+    right = np.asarray(b, dtype=np.float32)
+    if left.ndim != 2 or right.ndim != 2:
+        return 0.0
+    if left.shape[0] < 28 or right.shape[0] < 28:
+        return 0.0
+    face_l = left[:28]
+    face_r = right[:28]
+    vis = np.minimum(face_l[:, 3], face_r[:, 3]) > 0.35
+    if not np.any(vis):
+        vis = np.ones((face_l.shape[0],), dtype=bool)
+    delta = face_l[vis, :2] - face_r[vis, :2]
+    return float(np.mean(np.linalg.norm(delta, axis=1)))
+
+
+def hold_ease(delta: float, *, tight: float = _HOLD_MOVE_TIGHT, loose: float = _HOLD_MOVE_LOOSE) -> float:
+    """1 = keep hold, 0 = drop it. Linear between ``tight`` and ``loose``."""
+    span = max(float(loose) - float(tight), 1e-6)
+    amount = (float(delta) - float(tight)) / span
+    return float(min(max(1.0 - amount, 0.0), 1.0))
+
+
+def hold_plan(move: float, drift: float) -> tuple[float, float]:
+    """``(start_t, pull)`` for the next hold.
+
+    Ease off on the larger of frame-to-frame travel and rest-drift so a slow
+    walk to one side cannot keep recycling the last latent.
+    """
+    ease = min(hold_ease(move), hold_ease(drift))
+    if ease <= 1e-4:
+        return 0.0, 0.0
+    return STREAM_HOLD_LAST_T * ease, STREAM_HOLD_REF_PULL * ease
+
+
+def anchor_hold_latent(
+    last: torch.Tensor,
+    ref: torch.Tensor | None,
+    pull: float = STREAM_HOLD_REF_PULL,
+) -> torch.Tensor:
+    """Blend the held latent toward the still so recursive hold cannot melt."""
+    amount = float(pull)
+    if ref is None or amount <= 0.0:
+        return last
+    amount = min(max(amount, 0.0), 1.0)
+    still = ref
+    if still.shape[-3:] != last.shape[-3:]:
+        return last
+    if still.shape[0] != last.shape[0]:
+        still = still[-1:]
+    still = still.to(device=last.device, dtype=last.dtype)
+    return (1.0 - amount) * last + amount * still
+
+
+def keypoints_for_model(keypoints: np.ndarray, layout: str) -> np.ndarray:
+    """Map KEYPOINT_SCHEMA rows to the layout a checkpoint expects."""
+    from .model_layout import keypoints_for_model as _convert
+
+    return _convert(_as_keypoints37(keypoints), layout)
+
+
+def _keypoints_for_model(
+    keypoints: np.ndarray,
+    layout: str = DEFAULT_KEYPOINT_LAYOUT,
+) -> np.ndarray:
+    """Module wrapper for tests / call sites that pass an explicit layout."""
+    return keypoints_for_model(keypoints, layout)
 
 
 def checkpoint_label(path: Path) -> str:
@@ -87,24 +223,164 @@ def checkpoint_label(path: Path) -> str:
     return name
 
 
-def list_stream_checkpoints() -> list[tuple[str, Path]]:
-    """List DiT checkpoints under models/dit."""
-    ckpt_dir = models_dir()
-    if not ckpt_dir.is_dir():
+_MIN_STREAM_CKPT_BYTES = 1_000_000
+_STREAM_CKPT_SUFFIXES = {".pt", ".pth", ".ckpt"}
+_EXTRA_CKPT_LOCK = threading.Lock()
+
+
+def _extra_checkpoint_state_path() -> Path:
+    return data_dir() / "extra_checkpoint_dirs.json"
+
+
+def _load_extra_checkpoint_state() -> dict:
+    path = _extra_checkpoint_state_path()
+    if not path.is_file():
+        return {"dirs": [], "last_dir": ""}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"dirs": [], "last_dir": ""}
+    if not isinstance(raw, dict):
+        return {"dirs": [], "last_dir": ""}
+    dirs = raw.get("dirs") or []
+    last_dir = str(raw.get("last_dir") or "")
+    return {
+        "dirs": [str(d) for d in dirs if str(d).strip()],
+        "last_dir": last_dir,
+    }
+
+
+def _save_extra_checkpoint_state(state: dict) -> None:
+    path = _extra_checkpoint_state_path()
+    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def checkpoint_browse_start_dir() -> Path:
+    """Folder the native picker should open in (last custom dir, else models/dit)."""
+    with _EXTRA_CKPT_LOCK:
+        last = str(_load_extra_checkpoint_state().get("last_dir") or "").strip()
+    if last:
+        folder = Path(last)
+        if folder.is_dir():
+            return folder
+    return models_dir()
+
+
+def remember_checkpoint_location(path: Path | str) -> None:
+    """Keep the parent folder of a picked checkpoint so sibling .pt files are listed."""
+    folder = Path(path).resolve().parent
+    if not folder.is_dir():
+        return
+    with _EXTRA_CKPT_LOCK:
+        state = _load_extra_checkpoint_state()
+        dirs: list[str] = []
+        seen: set[str] = set()
+        pending = list(state.get("dirs") or [])
+        pending.append(str(folder))
+        for raw in pending:
+            try:
+                resolved = Path(raw).resolve()
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen or not resolved.is_dir():
+                continue
+            if resolved == models_dir().resolve():
+                continue
+            seen.add(key)
+            dirs.append(key)
+        state["dirs"] = dirs
+        state["last_dir"] = str(folder)
+        try:
+            _save_extra_checkpoint_state(state)
+        except OSError:
+            pass
+
+
+def is_stream_checkpoint_file(path: Path | str) -> bool:
+    p = Path(path)
+    if not p.is_file() or p.name.startswith("."):
+        return False
+    suffix = p.suffix.lower()
+    name = p.name.lower()
+    if suffix not in _STREAM_CKPT_SUFFIXES and ".pt" not in name:
+        return False
+    try:
+        return p.stat().st_size >= _MIN_STREAM_CKPT_BYTES
+    except OSError:
+        return False
+
+
+def _iter_checkpoint_files(folder: Path) -> list[Path]:
+    """DiT weights in ``folder`` and one nested folder (hub unpack layouts)."""
+    if not folder.is_dir():
         return []
+    files: list[Path] = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return []
+    nested: list[Path] = []
+    for path in entries:
+        if path.is_dir() and not path.name.startswith("."):
+            nested.append(path)
+            continue
+        if is_stream_checkpoint_file(path):
+            files.append(path)
+    for child in nested:
+        try:
+            kids = list(child.iterdir())
+        except OSError:
+            continue
+        for path in kids:
+            if is_stream_checkpoint_file(path):
+                files.append(path)
+    return files
+
+
+def list_stream_checkpoints() -> list[tuple[str, Path]]:
+    """List DiT checkpoints under models/dit plus any user-picked folders."""
+    folders = [models_dir()]
+    with _EXTRA_CKPT_LOCK:
+        extra = _load_extra_checkpoint_state().get("dirs") or []
+    for raw in extra:
+        try:
+            folders.append(Path(raw).resolve())
+        except OSError:
+            continue
+
     items: list[tuple[str, Path]] = []
-    for path in sorted(ckpt_dir.iterdir(), key=lambda p: p.name.lower()):
-        if not path.is_file():
-            continue
-        if path.stat().st_size < 1_000_000:
-            continue
-        items.append((checkpoint_label(path), path))
-    # Newest step / name last → prefer highest step as default via default_stream_checkpoint.
+    seen: set[str] = set()
+    for folder in folders:
+        for path in _iter_checkpoint_files(folder):
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append((checkpoint_label(path), path))
     items.sort(key=lambda x: x[0].lower())
     return items
 
 
 def default_stream_checkpoint() -> Path:
+    from .ui_session import load_ui_session
+
+    last = str(load_ui_session().get("checkpoint") or "").strip()
+    if last:
+        try:
+            cand = Path(last)
+            if not cand.is_absolute():
+                cand = (package_root() / last).resolve()
+            else:
+                cand = cand.resolve()
+            if is_stream_checkpoint_file(cand):
+                return cand
+        except OSError:
+            pass
+
     items = list_stream_checkpoints()
     preferred = models_dir() / STREAM_CKPT_NAME
     if not items:
@@ -122,6 +398,62 @@ def default_reference_path() -> Path:
     if DEFAULT_REF_FALLBACK.is_file():
         return DEFAULT_REF_FALLBACK
     return DEFAULT_REF
+
+
+def sidecar_keypoints_npy_path(image_path: Path) -> Path:
+    """Canonical ``<stem>_keypoints.npy`` next to a reference image."""
+    path = Path(image_path)
+    return path.with_name(f"{path.stem}_keypoints.npy")
+
+
+def discard_sidecar_keypoints(image_path: Path) -> None:
+    """Drop overlay sidecars next to a still so Create cannot reuse an old mesh."""
+    path = Path(image_path)
+    for cand in (
+        sidecar_keypoints_npy_path(path),
+        path.with_suffix(".npy"),
+        path.with_name(f"{path.stem}_keypoints.json"),
+        path.with_suffix(".json"),
+    ):
+        try:
+            if cand.is_file() and cand.suffix.lower() in {".npy", ".json"}:
+                cand.unlink()
+        except OSError:
+            pass
+
+
+def save_sidecar_keypoints(image_path: Path, keypoints: np.ndarray) -> Path:
+    """Write overlay/rest keypoints beside the reference so the next load keeps them."""
+    dest = sidecar_keypoints_npy_path(image_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    np.save(dest, _as_keypoints37(keypoints))
+    return dest
+
+
+def apply_overlay_drag_to_rest(
+    rest: np.ndarray,
+    drag_base: np.ndarray,
+    edited: np.ndarray,
+    slots: Iterable[int],
+) -> np.ndarray:
+    """Bake a live overlay drag into the character rest pose.
+
+    Overlay at press is ``rest + live expression``. Subtracting the press
+    snapshot from the released overlay isolates the pointer motion so tracking
+    can resume on the new rest instead of freezing or snapping back.
+    """
+    out = _as_keypoints37(rest).copy()
+    base = _as_keypoints37(drag_base)
+    ed = _as_keypoints37(edited)
+    for raw in slots:
+        i = int(raw)
+        if i < 0 or i >= NUM_KEYPOINTS:
+            continue
+        out[i, 0] = float(out[i, 0] + (ed[i, 0] - base[i, 0]))
+        out[i, 1] = float(out[i, 1] + (ed[i, 1] - base[i, 1]))
+        out[i, 2] = max(float(out[i, 2]), float(ed[i, 2]), 0.85)
+        out[i, 3] = 1.0
+    return out
 
 
 def find_sidecar_keypoints(image_path: Path) -> Path | None:
@@ -490,12 +822,28 @@ def apply_live_deltas_to_ref(
     limit_nose: bool = True,
     limit_mouth: bool = True,
     reference_rig: object | None = None,
+    prev_controls: object | None = None,
+    controls_out: list | None = None,
+    motion: dict | None = None,
 ) -> np.ndarray:
     """Map webcam motion onto the character's ref keypoints (training space).
 
     Live and origin must already be in model ``norm_crop`` space (same contract
     as reference sidecars / ``encode_reference``). Mixing full-frame normalized
     coords with crop-space refs is rejected.
+
+    Modifiers / ``gain`` (the motion multiplier)
+    --------------------------------------------
+    Calibrate stores a live **origin** (the webcam pose at Center). Every later
+    frame is measured as a delta from that origin, then multiplied by ``gain``
+    and applied on top of the character's rest pose::
+
+        character = rest_pose + gain * (live_pose - origin)
+
+    ``gain = 1.0`` copies the webcam delta at full strength.
+    ``gain = 0.5`` is half as much motion (smaller nods, smaller smiles).
+    ``gain = 0.0`` would freeze at rest. Retracting the skeleton overlay does
+    not change ``gain`` or these deltas — it only hides the drawn bones.
 
     Uses constrained Live2D-style retarget: reference bone lengths / face layout
     stay locked; only semantic controls (head, blink, gaze, brows, mouth, body
@@ -504,7 +852,6 @@ def apply_live_deltas_to_ref(
 
     ``limit_face`` / ``limit_brows`` / ``limit_eyes`` / ``limit_nose`` /
     ``limit_mouth`` gate expression travel/semantic caps for those regions.
-    The live UI defaults them off; API defaults stay on for compatibility.
     """
     from .live_poser_client import body_method_kind, is_body_tracked
     from .live_retarget import apply_constrained_retarget
@@ -547,6 +894,9 @@ def apply_live_deltas_to_ref(
         limit_nose=limit_nose,
         limit_mouth=limit_mouth,
         reference_rig=reference_rig,
+        prev_controls=prev_controls,
+        controls_out=controls_out,
+        motion=motion,
     )
 
     # Log occasionally (every ~30 calls) so live drive doesn't flood the console.
@@ -729,6 +1079,26 @@ def _clear_cuda_errors() -> None:
         pass
 
 
+def _mod_to(mod: Any, device: torch.device) -> Any:
+    if mod is None:
+        return None
+    try:
+        return mod.to(device)
+    except Exception:
+        return mod
+
+
+def _ten_to(tensor: "torch.Tensor | None", device: torch.device) -> "torch.Tensor | None":
+    if tensor is None:
+        return None
+    try:
+        if tensor.device == device:
+            return tensor
+        return tensor.to(device)
+    except Exception:
+        return tensor
+
+
 class StreamEngine:
     """Keypoint-conditioned DiT: live (37,4) + cached reference latent/keypoints."""
 
@@ -740,6 +1110,7 @@ class StreamEngine:
         pose_cfg_scale: float = STREAM_DEFAULT_POSE_CFG,
         id_cfg_scale: float = STREAM_DEFAULT_ID_CFG,
         fast_mode: bool = False,
+        compile_model: bool | None = None,
     ) -> None:
         self.checkpoint = Path(checkpoint) if checkpoint else default_stream_checkpoint()
         if device == "cuda" and not torch.cuda.is_available():
@@ -751,6 +1122,9 @@ class StreamEngine:
         # Back-compat alias used by older UI bits.
         self.cfg_scale = float(pose_cfg_scale)
         self.fast_mode = bool(fast_mode)
+        self.compile_model = (
+            STREAM_COMPILE_MODEL if compile_model is None else bool(compile_model)
+        )
         self.stream_batch_size = 1
 
         self.model = None
@@ -759,6 +1133,7 @@ class StreamEngine:
         self._tiny_vae_id: str | None = None
         self._tiny_vae_failed = False
         self._cfg: dict = {}
+        self.keypoint_layout: str = DEFAULT_KEYPOINT_LAYOUT
         self._ref_path: Path | None = None
         self._ref_kps_path: Path | None = None
         self._ref_neutral_fallback: bool = False
@@ -768,8 +1143,12 @@ class StreamEngine:
         self._ref_face_latent: torch.Tensor | None = None
         self._ref_keypoints: np.ndarray | None = None
         self._ref_keypoints_model: np.ndarray | None = None
+        # Rest pose at apply/calibrate time — mesh reset restores this, not the
+        # last drag (which is already baked into ``_ref_keypoints``).
+        self._ref_keypoints_session_base: np.ndarray | None = None
         self._ref_rig = None
         self._ready = False
+        self._gpu_resident = False
         self._model_compiled = False
         self._compile_failed = False
         self._compile_mode_active: str | None = None
@@ -779,6 +1158,9 @@ class StreamEngine:
         self.last_decode_backend: str = "sd"
         self.last_target_keypoints: np.ndarray | None = None
         self.last_target_keypoints_batch: np.ndarray | None = None
+        self.hold_last = STREAM_HOLD_LAST
+        self._last_gen_latent: torch.Tensor | None = None
+        self._last_hold_kps: np.ndarray | None = None
         self._body_skel_method: str = "unknown"
         self._body_lost: bool = False
         self._last_driven_body: np.ndarray | None = None
@@ -793,11 +1175,18 @@ class StreamEngine:
         """1 = one pose/denoise; 2 = two poses in one DiT forward."""
         self.stream_batch_size = max(1, min(int(batch_size), STREAM_BATCH_MAX))
 
+    def set_hold_last(self, enabled: bool) -> None:
+        self.hold_last = bool(enabled)
+
+    def clear_last_gen_latent(self) -> None:
+        self._last_gen_latent = None
+        self._last_hold_kps = None
+
     @property
     def fast_status(self) -> str:
         if not self.fast_mode:
             return "off"
-        parts = [f"<={STREAM_FAST_MAX_STEPS} steps"]
+        parts = ["tf32"]
         if STREAM_FAST_DISABLE_CFG:
             parts.append("no-cfg")
         if self.device.type == "cuda":
@@ -817,7 +1206,7 @@ class StreamEngine:
     @property
     def compile_status(self) -> str:
         """Compact torch.compile state for UI: on | pending | fail | skip | off."""
-        if not self.fast_mode or not STREAM_COMPILE_MODEL:
+        if not self.fast_mode or not self.compile_model:
             return "off"
         if self.device.type != "cuda":
             return "skip"
@@ -843,7 +1232,11 @@ class StreamEngine:
         if st == "skip":
             return "torch.compile skipped (CUDA required)"
         if st == "off":
-            return "Fast off — compile idle"
+            if not self.compile_model:
+                return "torch.compile off"
+            if not self.fast_mode:
+                return "Fast off — compile idle"
+            return "torch.compile off"
         if not hasattr(torch, "compile"):
             return "torch.compile unavailable in this PyTorch build"
         if not _triton_available():
@@ -868,6 +1261,19 @@ class StreamEngine:
             self._compile_failed = False
             self._compile_verified = False
 
+    def set_compile_model(self, enabled: bool) -> None:
+        """Turn torch.compile on or off without restarting the app."""
+        want = bool(enabled)
+        if want == bool(self.compile_model):
+            return
+        self.compile_model = want
+        try:
+            self._restore_eager_model()
+        except Exception:
+            pass
+        self._compile_failed = False
+        self._compile_verified = False
+
     def verify_compile(self) -> bool:
         """One-shot runtime test that torch.compile is actually usable.
 
@@ -875,7 +1281,7 @@ class StreamEngine:
         Sets ``_compile_verified`` only when the compiled path succeeds.
         """
         self._compile_verified = False
-        if not self.fast_mode or not STREAM_COMPILE_MODEL:
+        if not self.fast_mode or not self.compile_model:
             return False
         if self.device.type != "cuda" or self.model is None:
             return False
@@ -976,7 +1382,7 @@ class StreamEngine:
 
     def _maybe_compile_model(self, mode: str | None = None) -> bool:
         """Compile DiT once for Fast path. Returns True if model is compiled."""
-        if not STREAM_COMPILE_MODEL:
+        if not self.compile_model:
             return False
         if self.device.type != "cuda" or self.model is None:
             return False
@@ -992,7 +1398,7 @@ class StreamEngine:
             self._compile_failed = True
             print(
                 "torch.compile skipped: triton not installed in this venv "
-                "(Fast still uses TinyVAE + no-cfg)."
+                "(Fast still uses TinyVAE)."
             )
             return False
 
@@ -1026,16 +1432,22 @@ class StreamEngine:
         _clear_cuda_errors()
         print(f"torch.compile runtime failed; falling back to eager: {reason}")
 
+    def set_guidance(self, pose_cfg: float | None = None, id_cfg: float | None = None) -> None:
+        if pose_cfg is not None:
+            self.pose_cfg_scale = _clip_cfg(pose_cfg)
+            self.cfg_scale = self.pose_cfg_scale
+        if id_cfg is not None:
+            self.id_cfg_scale = _clip_cfg(id_cfg)
+
     def _resolve_generate_settings(
         self, num_steps: int | None
     ) -> tuple[int, float, float]:
-        """Apply Fast mode step cap / CFG-off to generation settings."""
+        """Apply Fast TF32. Fast stays on the 1–2 step joint (no 3-way CFG)."""
         steps = int(num_steps if num_steps is not None else self.num_steps)
         pose_cfg = float(self.pose_cfg_scale)
         id_cfg = float(self.id_cfg_scale)
         if self.fast_mode:
             _enable_tf32()
-            steps = max(1, min(steps, STREAM_FAST_MAX_STEPS))
             if STREAM_FAST_DISABLE_CFG:
                 pose_cfg = 1.0
                 id_cfg = 1.0
@@ -1060,6 +1472,13 @@ class StreamEngine:
                 f"{self.checkpoint.name} is not keypoint-conditioned; "
                 "VTM Noble requires use_keypoint_conditioning=True"
             )
+        from .model_layout import keypoint_layout_from_config
+
+        self.keypoint_layout = keypoint_layout_from_config(cfg)
+        print(
+            f"[pose-diag] checkpoint keypoint layout: {self.keypoint_layout} "
+            f"({self.checkpoint.name})"
+        )
         self.image_size = int(cfg.get("image_resolution", IMAGE_SIZE))
 
         if self.vae is None:
@@ -1069,7 +1488,97 @@ class StreamEngine:
             print(f"SD-VAE ready (dtype={str(vae_dtype).replace('torch.', '')})")
 
         self._ready = True
+        self._gpu_resident = True
         print(f"Stream model ready ({checkpoint_label(self.checkpoint)} @ {self.image_size}).")
+
+    def _release_dit_weights(self) -> None:
+        """Drop compiled DiT + CUDA graphs so a different checkpoint can load."""
+        try:
+            self._restore_eager_model()
+        except Exception:
+            pass
+        self.model = None
+        self._eager_model = None
+        self._model_compiled = False
+        self.clear_last_gen_latent()
+        self._compile_mode_active = None
+        self._compile_verified = False
+        self._ready = False
+        self._gpu_resident = False
+        try:
+            import torch._dynamo as dynamo
+
+            dynamo.reset()
+        except Exception:
+            pass
+        gc.collect()
+        _clear_cuda_errors()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    def offload_to_cpu(self) -> bool:
+        """Move DiT / VAE / latents to RAM. Stop stream uses this to free VRAM.
+
+        Weights stay loaded (``_ready``) so the next Start does not re-read disk.
+        Compiled CUDA graphs cannot follow, so the next GPU pass re-wraps
+        torch.compile (inductor cache keeps that recapture short).
+        """
+        if self.device.type != "cuda":
+            return False
+        with self._cuda_lock:
+            if not self._gpu_resident:
+                return True
+            try:
+                self._restore_eager_model()
+            except Exception:
+                pass
+            cpu = torch.device("cpu")
+            self.model = _mod_to(self.model, cpu)
+            self._eager_model = self.model
+            self.vae = _mod_to(self.vae, cpu)
+            self.vae_tiny = _mod_to(self.vae_tiny, cpu)
+            self._ref_latent = _ten_to(self._ref_latent, cpu)
+            self._ref_face_latent = _ten_to(self._ref_face_latent, cpu)
+            self._last_gen_latent = _ten_to(self._last_gen_latent, cpu)
+            self._decode_stream = None
+            self._gpu_resident = False
+            self._model_compiled = False
+            self._compile_verified = False
+            gc.collect()
+            _clear_cuda_errors()
+            print("[engine] models offloaded to CPU")
+            return True
+
+    def ensure_gpu(self) -> None:
+        """Put weights back on ``self.device`` after ``offload_to_cpu``."""
+        if self.device.type != "cuda":
+            self._gpu_resident = bool(self.model is not None or self.vae is not None)
+            return
+        if self._gpu_resident:
+            return
+        if self.model is None and self.vae is None:
+            return
+        with self._cuda_lock:
+            if self._gpu_resident:
+                return
+            print("[engine] moving models back to GPU …")
+            self.model = _mod_to(self.model, self.device)
+            self._eager_model = self.model
+            self.vae = _mod_to(self.vae, self.device)
+            self.vae_tiny = _mod_to(self.vae_tiny, self.device)
+            self._ref_latent = _ten_to(self._ref_latent, self.device)
+            self._ref_face_latent = _ten_to(self._ref_face_latent, self.device)
+            self._last_gen_latent = _ten_to(self._last_gen_latent, self.device)
+            self._gpu_resident = True
+            self._model_compiled = False
+            self._compile_verified = False
 
     def set_checkpoint(self, path: Path | str) -> Path:
         """Swap DiT weights. Keeps VAE; re-encodes reference if present."""
@@ -1079,17 +1588,25 @@ class StreamEngine:
         with self._cuda_lock:
             if self.checkpoint == path and self._ready and self.model is not None:
                 return path
+            previous = self.checkpoint
             print(f"Switching model -> {path.name} ...")
-            self.checkpoint = path
-            self.model = None
-            self._eager_model = None
-            self._model_compiled = False
+            self._release_dit_weights()
             self._compile_failed = False
-            self._compile_mode_active = None
-            self._ready = False
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self.load()
+            self.checkpoint = path
+            try:
+                self.load()
+            except Exception as exc:
+                if previous != path and previous.is_file():
+                    print(f"Reload previous checkpoint after failed swap: {previous.name}")
+                    self.checkpoint = previous
+                    try:
+                        self.load()
+                    except Exception:
+                        raise exc
+                    raise RuntimeError(
+                        f"Could not load {path.name} ({exc}). Restored {previous.name}."
+                    ) from exc
+                raise
             if self._ref_path is not None and self._ref_keypoints is not None:
                 self._set_reference_locked(self._ref_path, self._ref_keypoints)
             return path
@@ -1205,6 +1722,8 @@ class StreamEngine:
                 from .live_retarget import build_reference_rig
 
                 self._ref_rig = build_reference_rig(kps)
+            if self._ref_keypoints_session_base is None:
+                self._ref_keypoints_session_base = kps.copy()
             self._ref_neutral_fallback = used_neutral
             self._ref_pose_source = pose_source
             self._ref_skip_crop = bool(skip_crop)
@@ -1228,9 +1747,9 @@ class StreamEngine:
             )
         use_face = bool(self._cfg.get("use_ref_face_tokens", True))
         face_size = int(self._cfg.get("ref_face_size", 32))
-        kps_model = _keypoints_for_model(kps)
+        kps_model = keypoints_for_model(kps, self.keypoint_layout)
         print(
-            f"[pose-diag] model keypoint layout: {MODEL_KEYPOINT_LAYOUT} "
+            f"[pose-diag] model keypoint layout: {self.keypoint_layout} "
             "(runtime mesh remains KEYPOINT_SCHEMA)"
         )
 
@@ -1257,10 +1776,12 @@ class StreamEngine:
 
         self._ref_latent = ref_latent
         self._ref_face_latent = ref_face
+        self.clear_last_gen_latent()
         # Keep the training-format labels we loaded (already normalized). Do not
         # replace them with encode_reference's tensor after a bad pixel remap.
         self._ref_keypoints = kps
         self._ref_keypoints_model = kps_model
+        self._ref_keypoints_session_base = kps.copy()
         from .live_retarget import build_reference_rig
 
         self._ref_rig = build_reference_rig(kps)
@@ -1275,6 +1796,116 @@ class StreamEngine:
             f"pose_source={pose_source})"
         )
         return path
+
+    def export_encoded_reference(self) -> dict[str, Any]:
+        """CPU copies of the current encoded reference (for ``.vtm`` write)."""
+        if self._ref_latent is None or self._ref_keypoints is None:
+            raise RuntimeError("No encoded reference to export")
+        face = None
+        if self._ref_face_latent is not None:
+            face = (
+                self._ref_face_latent.detach().float().cpu().numpy().astype(np.float16)
+            )
+        return {
+            "ref_latent": self._ref_latent.detach().float().cpu().numpy().astype(np.float16),
+            "ref_face_latent": face,
+            "keypoints": np.asarray(self._ref_keypoints, dtype=np.float32).copy(),
+            "image_size": int(self.image_size),
+            "skip_crop": bool(self._ref_skip_crop),
+        }
+
+    def load_encoded_reference(
+        self,
+        *,
+        keypoints: np.ndarray,
+        ref_latent: np.ndarray,
+        ref_face_latent: np.ndarray | None,
+        skip_crop: bool,
+        path: Path | str,
+        pose_source: str = "character_pack",
+    ) -> Path:
+        """Install a pre-encoded reference without running the VAE."""
+        if not self._ready:
+            with self._cuda_lock:
+                if not self._ready:
+                    self.load()
+        dest = Path(path)
+        kps = sanitize_normalized_keypoints(np.asarray(keypoints, dtype=np.float32))
+        kps_model = keypoints_for_model(kps, self.keypoint_layout)
+        latent = torch.from_numpy(np.asarray(ref_latent, dtype=np.float32))
+        if latent.ndim == 3:
+            latent = latent.unsqueeze(0)
+        face = None
+        if ref_face_latent is not None:
+            face = torch.from_numpy(np.asarray(ref_face_latent, dtype=np.float32))
+            if face.ndim == 3:
+                face = face.unsqueeze(0)
+        if self.model is not None:
+            dtype = next(self.model.parameters()).dtype
+            latent = latent.to(device=self.device, dtype=dtype)
+            if face is not None:
+                face = face.to(device=self.device, dtype=dtype)
+        else:
+            latent = latent.to(device=self.device)
+            if face is not None:
+                face = face.to(device=self.device)
+        self._ref_latent = latent
+        self._ref_face_latent = face
+        self.clear_last_gen_latent()
+        self._ref_keypoints = kps
+        self._ref_keypoints_model = kps_model
+        self._ref_keypoints_session_base = kps.copy()
+        from .live_retarget import build_reference_rig
+
+        self._ref_rig = build_reference_rig(kps)
+        self._ref_path = dest
+        self._ref_kps_path = None
+        self._ref_neutral_fallback = False
+        self._ref_pose_source = str(pose_source or "character_pack")
+        self._ref_skip_crop = bool(skip_crop)
+        self._last_driven_body = None
+        print(
+            f"Reference loaded from pack (skip_crop={bool(skip_crop)}, "
+            f"face_tokens={face is not None}, pose_source={self._ref_pose_source})"
+        )
+        return dest
+
+    def adopt_ref_keypoints(
+        self,
+        keypoints: np.ndarray,
+        *,
+        persist: bool = True,
+        pose_source: str = "manual",
+    ) -> Path | None:
+        """Replace the character rest pose without re-encoding the identity VAE.
+
+        Used after a mesh drag so the next live retarget starts from the edited
+        layout. Writes ``<ref_stem>_keypoints.npy`` when ``persist`` is set.
+        """
+        kps = _as_keypoints37(keypoints).copy()
+        self._ref_keypoints = kps
+        self._ref_keypoints_model = keypoints_for_model(kps, self.keypoint_layout)
+        from .live_retarget import build_reference_rig
+
+        self._ref_rig = build_reference_rig(kps)
+        saved: Path | None = None
+        if persist and self._ref_path is not None and self._ref_path.suffix.lower() != ".vtm":
+            saved = save_sidecar_keypoints(self._ref_path, kps)
+            self._ref_kps_path = saved
+            self._ref_pose_source = str(pose_source or "manual")
+            print(f"Saved mesh edits → {saved}")
+        return saved
+
+    def restore_session_ref_keypoints(self) -> np.ndarray:
+        """Undo manual mesh edits back to the rest pose from apply/calibrate."""
+        base = self._ref_keypoints_session_base
+        if base is None:
+            if self._ref_keypoints is None:
+                raise RuntimeError("No reference keypoints to restore")
+            return np.asarray(self._ref_keypoints, dtype=np.float32).copy()
+        self.adopt_ref_keypoints(base, persist=True, pose_source="reset")
+        assert self._ref_keypoints is not None
+        return np.asarray(self._ref_keypoints, dtype=np.float32).copy()
 
     def calibrate_reference(
         self,
@@ -1327,7 +1958,8 @@ class StreamEngine:
             self._ref_path = None
             self._set_reference_locked(ref_path, kps, skip_crop=bool(skip_crop))
             self._ref_pose_source = "calibrated"
-            self._ref_kps_path = None
+            saved = save_sidecar_keypoints(ref_path, kps)
+            self._ref_kps_path = saved
         gap = None
         if kps[21, 3] >= 0.5 and kps[25, 3] >= 0.5:
             gap = float(kps[25, 1] - kps[21, 1])
@@ -1358,7 +1990,7 @@ class StreamEngine:
         )
         if (
             do_compile
-            and STREAM_COMPILE_MODEL
+            and self.compile_model
             and self.device.type == "cuda"
             and not self._model_compiled
             and not self._compile_failed
@@ -1367,7 +1999,7 @@ class StreamEngine:
         # Denoise runs: compile path uses STREAM_COMPILE_WARMUP_RUNS; else 1.
         will_compile = (
             do_compile
-            and STREAM_COMPILE_MODEL
+            and self.compile_model
             and self.device.type == "cuda"
             and not self._compile_failed
         )
@@ -1415,8 +2047,8 @@ class StreamEngine:
             if self._ref_keypoints is None:
                 return
             if self._ref_keypoints_model is None:
-                self._ref_keypoints_model = _keypoints_for_model(
-                    self._ref_keypoints
+                self._ref_keypoints_model = keypoints_for_model(
+                    self._ref_keypoints, self.keypoint_layout
                 )
             if self.fast_mode and "TinyVAE" in stages:
                 self._ensure_tiny_vae()
@@ -1554,7 +2186,7 @@ class StreamEngine:
                     _tick("Decode warmup…")
 
             # One-shot compile verification so the UI green light is truthful.
-            if self.fast_mode and STREAM_COMPILE_MODEL and self.device.type == "cuda":
+            if self.fast_mode and self.compile_model and self.device.type == "cuda":
                 if on_progress is not None:
                     on_progress(done, total, "Compile test…")
                 ok = self.verify_compile()
@@ -1576,10 +2208,11 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> tuple[Image.Image, float]:
         with self._cuda_lock:
             return self._generate_from_keypoints_locked(
-                keypoints, num_steps, sanitize=sanitize
+                keypoints, num_steps, sanitize=sanitize, hair_maps=hair_maps
             )
 
     def denoise_to_latents(
@@ -1588,6 +2221,7 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> dict:
         """Pipeline stage 1: pose prep + DiT denoise only (holds the CUDA lock).
 
@@ -1597,7 +2231,7 @@ class StreamEngine:
         """
         with self._cuda_lock:
             return self._denoise_to_latents_locked(
-                keypoints, num_steps, sanitize=sanitize
+                keypoints, num_steps, sanitize=sanitize, hair_maps=hair_maps
             )
 
     def _ensure_decode_stream(self) -> "torch.cuda.Stream | None":
@@ -1647,9 +2281,10 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> tuple[Image.Image, float]:
         images, elapsed = self._generate_batch_from_keypoints_locked(
-            keypoints, num_steps, sanitize=sanitize
+            keypoints, num_steps, sanitize=sanitize, hair_maps=hair_maps
         )
         return images[0], elapsed
 
@@ -1659,11 +2294,12 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> tuple[list[Image.Image], float]:
         """Denoise + decode one or more poses; returns every image in the batch."""
         with self._cuda_lock:
             return self._generate_batch_from_keypoints_locked(
-                keypoints, num_steps, sanitize=sanitize
+                keypoints, num_steps, sanitize=sanitize, hair_maps=hair_maps
             )
 
     def _generate_batch_from_keypoints_locked(
@@ -1672,8 +2308,11 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> tuple[list[Image.Image], float]:
-        result = self._denoise_to_latents_locked(keypoints, num_steps, sanitize=sanitize)
+        result = self._denoise_to_latents_locked(
+            keypoints, num_steps, sanitize=sanitize, hair_maps=hair_maps
+        )
 
         t1 = time.perf_counter()
         with torch.inference_mode():
@@ -1699,6 +2338,7 @@ class StreamEngine:
             "id_cfg": float(result["id_cfg"]),
             "batch": float(len(images)),
             "fps": (len(images) / elapsed) if elapsed > 0 else 0.0,
+            "hold_last": 1.0 if result.get("hold_last") else 0.0,
         }
         return images, elapsed
 
@@ -1728,7 +2368,7 @@ class StreamEngine:
                 f"Batch size must be 1..{STREAM_BATCH_MAX}, got {kps_batch.shape[0]}"
             )
 
-        from .pose_controller import format_body_diagnostics, sanitize_pose
+        from .pose_controller import block_model_slots, format_body_diagnostics, sanitize_pose
 
         sanitize_mode = (
             str(sanitize).strip().lower()
@@ -1801,7 +2441,7 @@ class StreamEngine:
             elif verbose:
                 print("[pose-diag] generate: SKIP sanitize")
                 print(format_body_diagnostics(one, label="generate/RAW"))
-            out[i] = one
+            out[i] = block_model_slots(one)
 
         if verbose:
             print(
@@ -1817,6 +2457,7 @@ class StreamEngine:
         num_steps: int | None = None,
         *,
         sanitize: bool | str = True,
+        hair_maps: np.ndarray | torch.Tensor | None = None,
     ) -> dict:
         if not self._ready:
             self.load()
@@ -1827,12 +2468,15 @@ class StreamEngine:
         self.last_target_keypoints = kps_batch[-1].copy()
         self.last_target_keypoints_batch = kps_batch.copy()
         kps_model = np.stack(
-            [_keypoints_for_model(kps_batch[i]) for i in range(kps_batch.shape[0])],
+            [
+                keypoints_for_model(kps_batch[i], self.keypoint_layout)
+                for i in range(kps_batch.shape[0])
+            ],
             axis=0,
         )
         if self._ref_keypoints_model is None:
-            self._ref_keypoints_model = _keypoints_for_model(
-                self._ref_keypoints
+            self._ref_keypoints_model = keypoints_for_model(
+                self._ref_keypoints, self.keypoint_layout
             )
 
         steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
@@ -1845,6 +2489,19 @@ class StreamEngine:
             )
 
         start = time.perf_counter()
+        hold_last = bool(self.hold_last)
+        now_kps = kps_batch[-1]
+        prev = self._last_gen_latent if hold_last else None
+        start_t = 0.0
+        if prev is not None:
+            move = face_pose_delta(self._last_hold_kps, now_kps)
+            drift = face_pose_delta(self._ref_keypoints, now_kps)
+            start_t, pull = hold_plan(move, drift)
+            if start_t <= 1e-4:
+                prev = None
+                start_t = 0.0
+            else:
+                prev = anchor_hold_latent(prev, self._ref_latent, pull=pull)
         with torch.inference_mode():
             t0 = time.perf_counter()
             latents = denoise_keypoint(
@@ -1861,10 +2518,16 @@ class StreamEngine:
                 # Same noise for every batch item — otherwise Batch×2 A/B frames
                 # look like two different samples and flicker hard on display.
                 shared_noise=True,
+                hair_maps=hair_maps,
+                last_latent=prev,
+                start_t=start_t,
             )
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
             denoise_s = time.perf_counter() - t0
+        # Clone so decode (side CUDA stream) does not race the next mix.
+        self._last_gen_latent = latents[-1:].detach().clone()
+        self._last_hold_kps = now_kps.copy()
 
         return {
             "latents": latents,
@@ -1875,4 +2538,5 @@ class StreamEngine:
             "id_cfg": id_cfg,
             "keypoints_used": kps_batch,
             "batch": int(kps_batch.shape[0]),
+            "hold_last": bool(prev is not None),
         }

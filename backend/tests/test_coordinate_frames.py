@@ -2,19 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-TORCH = ROOT / "vendor" / "torch_train"
-if TORCH.is_dir() and str(TORCH) not in sys.path:
-    sys.path.insert(0, str(TORCH))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from utils.coordinate_frames import (  # noqa: E402
+from utils.coordinate_frames import (
     COORD_NORM_CROP,
     CropRect,
     assert_norm_crop,
@@ -22,7 +12,7 @@ from utils.coordinate_frames import (  # noqa: E402
     to_norm_crop,
     webcam_pixels_to_norm_crop,
 )
-from utils.keypoints import transform_keypoints_crop  # noqa: E402
+from utils.keypoints import transform_keypoints_crop
 
 
 def _pt(x: float, y: float) -> np.ndarray:

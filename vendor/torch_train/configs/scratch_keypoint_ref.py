@@ -62,6 +62,8 @@ def get_config():
     config.use_adaln = True
     config.num_keypoints = NUM_KEYPOINTS
     config.num_pose_channels = NUM_POSE_CHANNELS
+    # KEYPOINT_SCHEMA (full_stack 28+2+7). Old checkpoints omit this and stay hrnet_native.
+    config.keypoint_layout = "schema"
     config.drop_text_prob = 0.1
     config.drop_ref_prob = 0.1
     config.drop_pose_prob = 0.1

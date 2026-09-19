@@ -1,4 +1,4 @@
-"""Model-boundary conversion for legacy anime-HRNet checkpoint labels."""
+"""Model-boundary conversion and per-checkpoint keypoint layout detection."""
 
 from __future__ import annotations
 
@@ -7,14 +7,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import engine as engine_module
-from engine import (
-    MODEL_KEYPOINT_LAYOUT,
-    StreamEngine,
-    _keypoints_for_model,
-    neutral_keypoints,
+import backend.engine as engine_module
+from backend.engine import StreamEngine, keypoints_for_model, neutral_keypoints
+from backend.model_layout import (
+    LAYOUT_HRNET_NATIVE,
+    LAYOUT_SCHEMA,
+    keypoint_layout_from_config,
+    schema37_to_hrnet_native37,
+    stamp_checkpoint_keypoint_layout,
 )
-from model_layout import schema37_to_hrnet_native37
 
 
 def test_closed_schema_mouth_becomes_native_closed_signature() -> None:
@@ -79,30 +80,111 @@ def test_native_layout_matches_legacy_training_signature() -> None:
     assert {int(ids[a]), int(ids[b])} == {22, 24}
 
 
-def test_engine_model_boundary_uses_native_layout() -> None:
-    assert MODEL_KEYPOINT_LAYOUT == "hrnet_native"
+def test_layout_detector_explicit_schema_aliases() -> None:
+    assert keypoint_layout_from_config({"keypoint_layout": "schema"}) == LAYOUT_SCHEMA
+    assert keypoint_layout_from_config({"model_keypoint_layout": "label28"}) == LAYOUT_SCHEMA
+    assert keypoint_layout_from_config({"label_layout": "full_stack"}) == LAYOUT_SCHEMA
+    assert keypoint_layout_from_config({"keypoint_layout": "KEYPOINT_SCHEMA"}) == LAYOUT_SCHEMA
+
+
+def test_layout_detector_explicit_native_aliases() -> None:
+    assert keypoint_layout_from_config({"keypoint_layout": "hrnet_native"}) == LAYOUT_HRNET_NATIVE
+    assert keypoint_layout_from_config({"keypoint_layout": "legacy"}) == LAYOUT_HRNET_NATIVE
+    assert keypoint_layout_from_config({"model_keypoint_layout": "hrnet"}) == LAYOUT_HRNET_NATIVE
+
+
+def test_layout_detector_missing_key_defaults_native() -> None:
+    assert keypoint_layout_from_config(None) == LAYOUT_HRNET_NATIVE
+    assert keypoint_layout_from_config({}) == LAYOUT_HRNET_NATIVE
+    assert keypoint_layout_from_config({"num_keypoints": 37}) == LAYOUT_HRNET_NATIVE
+
+
+def test_layout_detector_names_slot_14_is_nose() -> None:
+    names = [f"face_{i}" for i in range(28)]
+    names[14] = "face_14_nose"
+    assert keypoint_layout_from_config({"keypoint_names": names}) == LAYOUT_SCHEMA
+    assert keypoint_layout_from_config({"KEYPOINT_NAMES": names}) == LAYOUT_SCHEMA
+    names[14] = "nose"
+    assert keypoint_layout_from_config({"keypoint_names": names}) == LAYOUT_SCHEMA
+
+
+def test_layout_detector_explicit_wins_over_names() -> None:
+    names = [f"face_{i}" for i in range(28)]
+    names[14] = "face_14_nose"
+    assert (
+        keypoint_layout_from_config(
+            {"keypoint_layout": "hrnet_native", "keypoint_names": names}
+        )
+        == LAYOUT_HRNET_NATIVE
+    )
+
+
+def test_engine_defaults_to_native_until_load() -> None:
+    stream = StreamEngine(device="cpu")
+    assert stream.keypoint_layout == LAYOUT_HRNET_NATIVE
+
+
+def test_runtime_status_reports_engine_layout() -> None:
+    from backend.stream import StreamRuntime
+
+    class _Runtime:
+        engine = type(
+            "E",
+            (),
+            {
+                "keypoint_layout": LAYOUT_SCHEMA,
+                "compile_status": "off",
+                "compile_detail": "",
+            },
+        )()
+
+    fields = StreamRuntime._compile_status_fields(_Runtime())
+    assert fields["keypoint_layout"] == LAYOUT_SCHEMA
+    assert fields["compile_model"] is False
+
+
+def test_keypoints_for_model_schema_is_identity() -> None:
+    schema = neutral_keypoints()
+    out = keypoints_for_model(schema, LAYOUT_SCHEMA)
+    np.testing.assert_allclose(out, schema)
+    assert out is not schema
+
+
+def test_keypoints_for_model_native_matches_remap() -> None:
     schema = neutral_keypoints()
     np.testing.assert_allclose(
-        _keypoints_for_model(schema),
+        keypoints_for_model(schema, LAYOUT_HRNET_NATIVE),
         schema37_to_hrnet_native37(schema),
     )
 
 
-def test_generate_sends_native_layout_but_keeps_schema_overlay(monkeypatch) -> None:
+def test_stamp_checkpoint_keypoint_layout(tmp_path: Path) -> None:
+    path = tmp_path / "toy.pt"
+    torch.save({"config": {"num_keypoints": 37}, "ema": {}}, path)
+    assert stamp_checkpoint_keypoint_layout(path, "schema") == LAYOUT_SCHEMA
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    assert ckpt["config"]["keypoint_layout"] == LAYOUT_SCHEMA
+    assert ckpt["config"]["num_keypoints"] == 37
+    assert keypoint_layout_from_config(ckpt["config"]) == LAYOUT_SCHEMA
+
+
+def _fake_engine(layout: str) -> StreamEngine:
     stream = StreamEngine(device="cpu")
     stream._ready = True
     stream.model = torch.nn.Linear(1, 1)
     stream.vae = object()
+    stream.keypoint_layout = layout
     stream._ref_path = Path("reference.png")
     stream._ref_latent = torch.zeros((1, 4, 2, 2), dtype=torch.float32)
     stream._ref_face_latent = None
     stream._ref_keypoints = neutral_keypoints()
-    stream._ref_keypoints_model = schema37_to_hrnet_native37(
-        stream._ref_keypoints
+    stream._ref_keypoints_model = keypoints_for_model(
+        stream._ref_keypoints, layout
     )
+    return stream
 
-    captured: dict[str, np.ndarray] = {}
 
+def _patch_generate(monkeypatch, captured: dict[str, np.ndarray]) -> None:
     def fake_denoise(_model, **kwargs):
         captured["target"] = np.asarray(kwargs["keypoints_target"]).copy()
         captured["ref"] = np.asarray(kwargs["ref_keypoints"]).copy()
@@ -120,13 +202,45 @@ def test_generate_sends_native_layout_but_keeps_schema_overlay(monkeypatch) -> N
         lambda _vae, _latents: np.zeros((1, 8, 8, 3), dtype=np.uint8),
     )
 
+
+def test_generate_sends_native_layout_but_keeps_schema_overlay(monkeypatch) -> None:
+    stream = _fake_engine(LAYOUT_HRNET_NATIVE)
+    captured: dict[str, np.ndarray] = {}
+    _patch_generate(monkeypatch, captured)
+
     target = neutral_keypoints()
     target[25, :2] = target[21, :2]
     stream.generate_from_keypoints(target, num_steps=1, sanitize="none")
 
-    np.testing.assert_allclose(
-        captured["target"],
-        schema37_to_hrnet_native37(target),
-    )
-    np.testing.assert_allclose(captured["ref"], stream._ref_keypoints_model)
+    sent = np.asarray(captured["target"])
+    if sent.ndim == 3:
+        sent = sent[0]
+    np.testing.assert_allclose(sent, schema37_to_hrnet_native37(target))
+    ref_sent = np.asarray(captured["ref"])
+    expected_ref = np.asarray(stream._ref_keypoints_model)
+    if ref_sent.ndim == 3:
+        ref_sent = ref_sent[0]
+    if expected_ref.ndim == 3:
+        expected_ref = expected_ref[0]
+    np.testing.assert_allclose(ref_sent, expected_ref)
+    np.testing.assert_allclose(stream.last_target_keypoints, target)
+
+
+def test_generate_sends_schema_layout_and_keeps_schema_overlay(monkeypatch) -> None:
+    stream = _fake_engine(LAYOUT_SCHEMA)
+    captured: dict[str, np.ndarray] = {}
+    _patch_generate(monkeypatch, captured)
+
+    target = neutral_keypoints()
+    target[25, :2] = target[21, :2]
+    stream.generate_from_keypoints(target, num_steps=1, sanitize="none")
+
+    sent = np.asarray(captured["target"])
+    if sent.ndim == 3:
+        sent = sent[0]
+    np.testing.assert_allclose(sent, target)
+    ref_sent = np.asarray(captured["ref"])
+    if ref_sent.ndim == 3:
+        ref_sent = ref_sent[0]
+    np.testing.assert_allclose(ref_sent, stream._ref_keypoints)
     np.testing.assert_allclose(stream.last_target_keypoints, target)

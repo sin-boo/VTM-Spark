@@ -92,6 +92,37 @@ def _timestep_schedule(
     return times
 
 
+def flow_start_from_last(
+    noise: torch.Tensor,
+    times: torch.Tensor,
+    last_latent: torch.Tensor | None,
+    start_t: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Start a flow at ``start_t`` mixed toward the previous frame latent.
+
+    ``times`` is the full ``[0, …, 1]`` schedule (noise → image). ``start_t``
+    of 0 keeps today's full denoise. Values in (0, 1) mix
+    ``(1-t) * noise + t * last`` and drop schedule points before ``t``.
+    """
+    if last_latent is None:
+        return noise, times
+    t0 = float(start_t)
+    if t0 <= 0.0:
+        return noise, times
+    t0 = min(max(t0, 0.0), 1.0 - 1e-4)
+    last = last_latent.to(device=noise.device, dtype=noise.dtype)
+    if last.shape[-3:] != noise.shape[-3:]:
+        return noise, times
+    if last.shape[0] != noise.shape[0]:
+        last = last[-1:].expand(noise.shape[0], -1, -1, -1)
+    latents = (1.0 - t0) * noise + t0 * last
+    rest = times[times > (t0 + 1e-6)]
+    if rest.numel() == 0:
+        rest = times[-1:]
+    t0_t = torch.as_tensor([t0], device=times.device, dtype=times.dtype)
+    return latents, torch.cat([t0_t, rest], dim=0)
+
+
 def _as_batch_keypoints(keypoints: np.ndarray | torch.Tensor, device: torch.device) -> torch.Tensor:
     if isinstance(keypoints, np.ndarray):
         t = torch.from_numpy(keypoints.astype(np.float32))
@@ -293,12 +324,21 @@ def denoise_keypoint(
     pose_sigma: float = 1.5,
     seed: int | None = None,
     shared_noise: bool = False,
+    hair_maps: np.ndarray | torch.Tensor | None = None,
+    last_latent: torch.Tensor | None = None,
+    start_t: float = 0.0,
 ) -> torch.Tensor:
     """Denoise with separate pose / identity CFG scales (3-way batched forward).
 
     When ``shared_noise`` is True, every batch item starts from the same noise
     sample (expanded). Useful for stream Batch×N A/B frames so items do not
     flicker from independent noise draws.
+
+    ``hair_maps`` is optional ``(3,H,W)`` or ``(B,3,H,W)`` in [0, 1] and is
+    written onto pose-map channels 8–10 when the checkpoint has 11 channels.
+
+    ``last_latent`` + ``start_t`` > 0 starts the flow from a mix of noise and
+    the previous generated latent (img2img hold) instead of a fresh still.
     """
     device = next(model.parameters()).device
     model_dtype = next(model.parameters()).dtype
@@ -320,9 +360,30 @@ def denoise_keypoint(
     for i in range(bsz):
         deltas_np.append(keypoint_deltas(kps_t[i].cpu().numpy(), kps_r[i].cpu().numpy()))
     deltas = torch.from_numpy(np.stack(deltas_np, axis=0)).to(device=device, dtype=model_dtype)
+    hair_t = None
+    if hair_maps is not None:
+        if isinstance(hair_maps, np.ndarray):
+            hair_t = torch.from_numpy(np.asarray(hair_maps, dtype=np.float32))
+        else:
+            hair_t = hair_maps.float()
+        if hair_t.ndim == 3:
+            hair_t = hair_t.unsqueeze(0)
+        hair_t = hair_t.to(device=device, dtype=torch.float32)
+        if hair_t.shape[0] == 1 and bsz > 1:
+            hair_t = hair_t.expand(bsz, -1, -1, -1)
     pose = rasterize_pose_maps(
-        kps_t, model.input_size, model.input_size, sigma=pose_sigma
+        kps_t, model.input_size, model.input_size, sigma=pose_sigma, hair_maps=hair_t
     ).to(device=device, dtype=model_dtype)
+    need = int(getattr(model, "num_pose_channels", pose.shape[1]))
+    if pose.shape[1] > need:
+        pose = pose[:, :need]
+    elif pose.shape[1] < need:
+        pad = torch.zeros(
+            (bsz, need - pose.shape[1], pose.shape[2], pose.shape[3]),
+            device=pose.device,
+            dtype=pose.dtype,
+        )
+        pose = torch.cat([pose, pad], dim=1)
 
     gen = torch.Generator(device=device)
     if seed is None:
@@ -345,11 +406,13 @@ def denoise_keypoint(
         )
 
     times = _timestep_schedule(num_steps, device, inference_timestep_shift)
+    latents, times = flow_start_from_last(latents, times, last_latent, start_t)
+    n_steps = int(times.numel() - 1)
     s_pose = float(pose_cfg_scale)
     s_id = float(id_cfg_scale)
     use_cfg = abs(s_pose - 1.0) > 1e-6 or abs(s_id - 1.0) > 1e-6
 
-    for i in range(num_steps):
+    for i in range(n_steps):
         t = times[i].expand(bsz)
         if not use_cfg:
             velocity = model(
@@ -490,6 +553,7 @@ __all__ = [
     "is_keypoint_checkpoint",
     "build_keypoint_model",
     "encode_reference",
+    "flow_start_from_last",
     "denoise_keypoint",
     "decode_sd_vae",
     "decode_tiny_vae",

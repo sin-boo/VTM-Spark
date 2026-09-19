@@ -70,6 +70,8 @@ class BridgeFrame:
     mirrored: bool = False
     iris_method: str = 'none'
     skeleton_method: str = 'none'
+    hair_method: str = 'none'
+    hair_segments: list[dict[str, Any]] | None = None
     pose: dict[str, Any] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     keypoints_norm: np.ndarray | None = None  # (37, 4) norm_crop
@@ -100,6 +102,7 @@ class BridgeFrame:
             'mirrored': self.mirrored,
             'iris_method': self.iris_method,
             'skeleton_method': self.skeleton_method,
+            'hair_method': self.hair_method,
             'coord_space': str(self.coord_space or 'pixel_src'),
             'image_size': int(self.image_size),
             'pose': self.pose,
@@ -112,6 +115,13 @@ class BridgeFrame:
                 out['crop'] = crop.as_dict()
             elif isinstance(crop, dict):
                 out['crop'] = crop
+        if self.hair_segments:
+            out['hair'] = {
+                'schema': 'hair_v1',
+                'coord_space': 'pixel_src',
+                'method': self.hair_method,
+                'segments': self.hair_segments,
+            }
         if self.keypoints_norm is not None:
             kn = np.asarray(self.keypoints_norm, dtype=np.float32)
             out['keypoints_norm'] = [
@@ -138,7 +148,7 @@ class BridgeFrame:
         w, h = self.image_wh
         lines = [
             f'KEYPOINT_SCHEMA  (37,4)  {w}x{h}',
-            f'iris={self.iris_method}  skel={self.skeleton_method}',
+            f'iris={self.iris_method}  skel={self.skeleton_method}  hair={self.hair_method}',
             f'mirror={self.mirrored}',
             '',
         ]
@@ -279,6 +289,8 @@ def build_bridge_frame(
     mirrored: bool = False,
     iris_method: str = 'none',
     skeleton_method: str = 'none',
+    hair_method: str = 'none',
+    hair_segments: list[dict[str, Any]] | None = None,
     pose: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
     t: float | None = None,
@@ -297,6 +309,8 @@ def build_bridge_frame(
         mirrored=mirrored,
         iris_method=iris_method,
         skeleton_method=skeleton_method,
+        hair_method=hair_method,
+        hair_segments=hair_segments,
         pose=pose or {},
         meta=meta or {},
     )

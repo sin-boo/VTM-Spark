@@ -11,13 +11,14 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-# Convenience launcher dropped next to start.bat by Smart Build
+# App launcher dropped next to install.bat / run.bat by Smart Build
 /VTMNoble.exe
 /VTMNoble.bat
 
 # Node
 ui/node_modules/
 ui/dist/
+ui/public/_early_splash.html
 
 # Runtime outputs / logs
 outputs/
@@ -25,18 +26,29 @@ outputs/
 vtm_noble.log
 real_stream.log
 
+# torch.compile / Triton kernel cache
+models/cache/
+
 # DiT weights (download into models/dit — never commit)
 models/dit/**
 !models/dit/.gitkeep
-# Typo folder leftover (correct path is models/dit)
 models/iamge/
 
-# User reference uploads (local only)
-data/refs/**
-!data/refs/.gitkeep
+# User refs + local picker state (models/ is the only data tree)
+models/refs/**
+!models/refs/.gitkeep
+models/characters/**
+!models/characters/.gitkeep
+models/blendshapes/**
+!models/blendshapes/.gitkeep
+models/*.lock
+models/extra_checkpoint_dirs.json
+models/session.json
 
-# Large local caches
-data/models/
+# Leftover pre-layout folder
+/data/
+
+# Large caches
 **/__pycache__/
 
 # Prefer models/trackers (downloaded from HF). Skip duplicate vendor copies.
@@ -47,6 +59,15 @@ vendor/tools/pose-traker/**/iris_pose.pt
 vendor/tools/pose-traker/**/dwpose_v2.pt
 vendor/tools/pose-traker/**/dwpose_v2.onnx
 
-# Local experiments
-test-pose/
-_bench_fast.py
+# Local uv bootstrap (Smart Build downloads Astral uv here if PATH has none)
+.tools/
+
+# Isolated face-tracking lab (local venv + copied weights + UI build)
+track_lab/.venv/
+track_lab/ui/node_modules/
+track_lab/ui/dist/
+track_lab/models/*
+!track_lab/models/.gitkeep
+track_lab/output/
+track_lab/input/*
+!track_lab/input/.gitkeep

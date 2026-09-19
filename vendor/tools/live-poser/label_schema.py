@@ -83,6 +83,28 @@ _OSF_TO_28 = {
     27: 65,  # lower R (inner)
 }
 
+# Overlay mouth slots the operator can rewire live.
+MOUTH_SLOTS = (20, 21, 22, 23, 24, 25, 26, 27)
+DEFAULT_MOUTH_OSF = {i: _OSF_TO_28[i] for i in MOUTH_SLOTS}
+# OSF mouth region (outer 48–57, corners 58/62, inner 59–61 / 63–65).
+OSF_MOUTH_IDS = tuple(range(48, 66))
+
+
+def normalize_mouth_osf_map(raw: object | None) -> dict[int, int]:
+    """8 overlay mouth slots → OSF landmark ids. Unknown keys keep defaults."""
+    out = dict(DEFAULT_MOUTH_OSF)
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        try:
+            slot = int(key)
+            src = int(value)
+        except (TypeError, ValueError):
+            continue
+        if slot in DEFAULT_MOUTH_OSF and 0 <= src <= 67:
+            out[slot] = src
+    return out
+
 
 def osf_lms_to_image_xy(lms: np.ndarray) -> np.ndarray:
     """OpenSeeFace stores landmarks as (y, x, conf), not (x, y, conf).
@@ -115,8 +137,13 @@ def _mean_xy(lms_xy: np.ndarray, idxs: list[int]) -> np.ndarray:
     return np.mean(pts, axis=0)
 
 
-def osf_to_label28(lms: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+def osf_to_label28(
+    lms: np.ndarray,
+    mouth_osf: dict[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     """Convert OpenSeeFace landmarks → (28,3) schema + optional eye lower lids.
+
+    ``mouth_osf`` remaps overlay slots 20–27 onto other OSF ids (live, per frame).
 
     Returns
     -------
@@ -129,7 +156,9 @@ def osf_to_label28(lms: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
     if lms is None or len(lms) == 0:
         return out, None
     xy = osf_lms_to_image_xy(lms)
-    for dst, src in _OSF_TO_28.items():
+    mapping = dict(_OSF_TO_28)
+    mapping.update(normalize_mouth_osf_map(mouth_osf))
+    for dst, src in mapping.items():
         if src < len(xy):
             out[dst, 0] = float(xy[src, 0])
             out[dst, 1] = float(xy[src, 1])
@@ -153,18 +182,6 @@ def osf_to_label28(lms: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
         eye_lower[0, 2] = 1.0
         eye_lower[1, 0:2] = re_lo
         eye_lower[1, 2] = 1.0
-
-        # If inner lips are nearly closed, snap upper/lower to the mid-line so
-        # tracker noise doesn't leave a false open oval. Keep a tight threshold
-        # so mid-lip shape still tracks while the mouth is slightly open.
-        if len(xy) >= 66:
-            gap = abs(float(out[21, 1] - out[25, 1]))
-            mouth_w = abs(float(out[23, 0] - out[26, 0])) + 1e-6
-            if gap / mouth_w < 0.035:
-                for up, lo in ((20, 24), (21, 25), (22, 27)):
-                    mid_y = 0.5 * (float(out[up, 1]) + float(out[lo, 1]))
-                    out[up, 1] = mid_y
-                    out[lo, 1] = mid_y
     return out, eye_lower
 
 

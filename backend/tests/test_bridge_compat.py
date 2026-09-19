@@ -3,21 +3,12 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-TORCH = ROOT / "vendor" / "torch_train"
-LIVE = ROOT / "vendor" / "tools" / "live-poser"
-for p in (TORCH, ROOT, LIVE):
-    if p.is_dir() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-
-from bridge import build_bridge_frame  # noqa: E402
-from engine import keypoints_from_json  # noqa: E402
-from utils.coordinate_frames import (  # noqa: E402
+from bridge import build_bridge_frame
+from backend.engine import keypoints_from_json
+from utils.coordinate_frames import (
     COORD_NORM_CROP,
     coord_meta_dict,
     webcam_pixels_to_norm_crop,

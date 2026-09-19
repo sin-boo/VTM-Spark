@@ -7,18 +7,20 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .desk_splash import ui_public_files
+from .engine import checkpoint_browse_start_dir, remember_checkpoint_location
+from .lab_harness import lab as lab_harness
 from .paths import (
     default_ref_path,
     display_path,
-    ensure_under_models,
-    models_dir,
     refs_dir,
+    resolve_user_path,
     ui_dist_dir,
 )
 from .stream import get_runtime, shutdown_runtime
@@ -31,7 +33,7 @@ __all__ = ["app", "configure_runtime", "mount_frontend", "shutdown_runtime"]
 app = FastAPI(title="VTM Noble", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "null"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,14 +43,33 @@ _ws_clients: list[WebSocket] = []
 _ws_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _frontend_mounted = False
+_runtime_configured = False
 _dialog_lock = threading.Lock()
 
 
-def _pick_checkpoint_file() -> str | None:
-    """Native OS file dialog scoped to package ``models/`` (opens in models/dit).
+_lab_boot_lock = threading.Lock()
+_lab_boot_started = False
 
-    Returns a package-relative path under ``models/``, or None if cancelled.
-    Raises HTTPException if the user picks a file outside ``models/``.
+
+def _boot_track_lab() -> None:
+    global _lab_boot_started
+    with _lab_boot_lock:
+        if _lab_boot_started:
+            return
+        _lab_boot_started = True
+    try:
+        from .lab_process import watch_lab
+
+        watch_lab()
+    except Exception as exc:
+        print(f"[track-lab] ensure failed: {exc}", flush=True)
+
+
+def _pick_checkpoint_file() -> str | None:
+    """Native OS file dialog for a DiT checkpoint (.pt / .pth).
+
+    Opens in the last custom folder when one exists, otherwise models/dit.
+    Returns a display path, or None if cancelled.
     """
     with _dialog_lock:
         try:
@@ -56,7 +77,7 @@ def _pick_checkpoint_file() -> str | None:
             from tkinter import filedialog
         except Exception:
             return None
-        start = models_dir()
+        start = checkpoint_browse_start_dir()
         start.mkdir(parents=True, exist_ok=True)
         root = tk.Tk()
         root.withdraw()
@@ -65,11 +86,13 @@ def _pick_checkpoint_file() -> str | None:
         except Exception:
             pass
         try:
+            # Windows only honors `*.ext` (semicolon-separated). `*.pt*` hides
+            # most real checkpoints and can make a folder look like it has one file.
             path = filedialog.askopenfilename(
-                title="Select DiT checkpoint (models/)",
+                title="Select DiT checkpoint",
                 initialdir=str(start),
                 filetypes=[
-                    ("Checkpoints", "*.pt*"),
+                    ("PyTorch checkpoint", "*.pt *.pth *.ckpt;*.pt;*.pth;*.ckpt"),
                     ("PyTorch weights", "*.pt"),
                     ("All files", "*.*"),
                 ],
@@ -82,33 +105,73 @@ def _pick_checkpoint_file() -> str | None:
         picked = str(path).strip() or None
         if not picked:
             return None
-        try:
-            return display_path(ensure_under_models(picked))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        resolved = resolve_user_path(picked).resolve()
+        remember_checkpoint_location(resolved)
+        return display_path(resolved)
 
 
 class SettingsBody(BaseModel):
     steps: int | None = None
+    pose_cfg: float | None = None
+    id_cfg: float | None = None
+    frame_blend: float | None = None
+    inbetweens: int | None = None
+    interpolate: bool | None = None
+    hold_last: bool | None = None
     track_fps: float | None = None
     drive_pose: bool | None = None
     show_mesh: bool | None = None
+    show_hair: bool | None = None
+    show_outline: bool | None = None
+    show_brows: bool | None = None
+    show_eyes: bool | None = None
+    show_nose: bool | None = None
+    show_mouth: bool | None = None
+    show_iris_overlay: bool | None = None
+    show_skeleton: bool | None = None
     mirror: bool | None = None
     use_iris: bool | None = None
     use_body: bool | None = None
     fast_mode: bool | None = None
+    compile_model: bool | None = None
     batch2: bool | None = None
     auto_sync_track: bool | None = None
     camera_index: int | None = None
+    travel_box: dict[str, Any] | None = None
 
 
 class PathBody(BaseModel):
     path: str = Field(..., min_length=1)
 
 
+class CharacterIdBody(BaseModel):
+    id: str = Field(..., min_length=1)
+    repair: bool = False
+
+
+class CharacterRenameBody(BaseModel):
+    id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
 class MeshBody(BaseModel):
     x: float
     y: float
+
+
+class BootCharacterBody(BaseModel):
+    id: str = ""
+    loaded: bool = False
+
+
+class LabCommandBody(BaseModel):
+    op: str = Field(..., min_length=1)
+    body: dict[str, Any] = Field(default_factory=dict)
+
+
+class DownloadBody(BaseModel):
+    name: str | None = None
+    names: list[str] | None = None
 
 
 def _broadcast(event: dict[str, Any]) -> None:
@@ -138,8 +201,14 @@ def _broadcast(event: dict[str, Any]) -> None:
 
 
 def configure_runtime() -> None:
+    global _runtime_configured
+    if _runtime_configured:
+        return
     rt = get_runtime()
     rt.add_listener(_broadcast)
+    threading.Thread(target=_boot_track_lab, daemon=True, name="track-lab").start()
+    rt.start_boot()
+    _runtime_configured = True
 
 
 def mount_frontend() -> None:
@@ -153,7 +222,20 @@ def mount_frontend() -> None:
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(dist / "index.html")
+        return FileResponse(
+            dist / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def _register_ui_file(filename: str, file_path: Path) -> None:
+        @app.get("/" + filename, name=f"ui_public_{filename}", include_in_schema=False)
+        async def serve_ui_public() -> FileResponse:
+            return FileResponse(file_path)
+
+        return None
+
+    for name, path in ui_public_files(dist).items():
+        _register_ui_file(name, path)
 
     _frontend_mounted = True
 
@@ -177,6 +259,43 @@ def health() -> dict[str, str]:
     return {"ok": "1"}
 
 
+@app.post("/api/reload")
+def reload_backend(request: Request) -> dict[str, Any]:
+    """Spawn the out-of-process hold window, then exit so Python reimports."""
+    from .desk_reload import request_reload
+
+    host = request.url.hostname or HOST
+    if host in {"localhost", "0.0.0.0", "::"}:
+        host = HOST
+    port = int(request.url.port or PORT)
+    if port in {80, 443, 5173}:
+        port = PORT
+    try:
+        return request_reload(host=str(host), port=port)
+    except OSError as exc:
+        raise HTTPException(500, f"Could not start reload window: {exc}") from exc
+
+
+@app.get("/api/boot")
+def boot_status() -> dict[str, Any]:
+    return get_runtime().boot_snapshot()
+
+
+@app.post("/api/boot")
+def boot_start() -> dict[str, Any]:
+    return get_runtime().start_boot()
+
+
+@app.post("/api/boot/character")
+def boot_character(body: BootCharacterBody) -> dict[str, Any]:
+    try:
+        return get_runtime().finish_boot_character(
+            body.id, already_loaded=bool(body.loaded)
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/status")
 def status() -> dict[str, Any]:
     return get_runtime().status()
@@ -198,20 +317,30 @@ def set_checkpoint(body: PathBody) -> dict[str, Any]:
 
 @app.post("/api/checkpoint/browse")
 def browse_checkpoint() -> dict[str, Any]:
-    """Open a native file picker and apply the selected checkpoint immediately."""
+    """Open a native file picker; load the file on a background thread.
+
+    Loading on the same request as Tk used to freeze/kill the webview while
+    CUDA swapped weights.
+    """
     path = _pick_checkpoint_file()
     if not path:
-        return {"cancelled": True, "status": get_runtime().status()}
-    try:
-        get_runtime().set_checkpoint(path)
-    except Exception as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"cancelled": False, "status": get_runtime().status()}
+        return {"cancelled": True, "path": None, "status": get_runtime().status()}
+    rt = get_runtime()
+    rt._set_status(busy=True, message="Switching model…", error="")
+
+    def _load() -> None:
+        try:
+            rt.set_checkpoint(path)
+        except Exception:
+            pass
+
+    threading.Thread(target=_load, name="vtm-ckpt-load", daemon=True).start()
+    return {"cancelled": False, "path": path, "status": rt.status()}
 
 
 @app.post("/api/settings")
 def settings(body: SettingsBody) -> dict[str, Any]:
-    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    data = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     return get_runtime().update_settings(**data)
 
 
@@ -257,11 +386,113 @@ def reference_default() -> dict[str, str]:
     return {"path": display_path(path), "exists": str(path.is_file()).lower()}
 
 
+@app.get("/api/characters")
+def characters_list() -> dict[str, Any]:
+    return {"characters": get_runtime().list_characters()}
+
+
+@app.get("/api/characters/{ident}/preview")
+def character_preview(ident: str) -> Response:
+    from .character_pack import (
+        CharacterPackError,
+        ensure_character_still,
+        resolve_character_id,
+    )
+
+    try:
+        if ident.strip().lower() == "current":
+            path = get_runtime().current_character_path()
+            if path is None:
+                return Response(status_code=204)
+        else:
+            path = resolve_character_id(ident)
+        still = ensure_character_still(path)
+        data = still.read_bytes()
+    except CharacterPackError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/characters/create")
+async def character_create(file: UploadFile = File(...)) -> dict[str, Any]:
+    from .character_pack import stage_create_still
+
+    suffix = Path(file.filename or "character.png").suffix or ".png"
+    dest = stage_create_still(await file.read(), suffix=suffix)
+    try:
+        result = await asyncio.to_thread(
+            get_runtime().create_character, dest, name=Path(file.filename or dest.stem).stem
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/characters/add")
+async def character_add(file: UploadFile = File(...)) -> dict[str, Any]:
+    from .character_pack import unique_character_path
+    from .paths import characters_dir
+
+    raw = await file.read()
+    tmp = unique_character_path(Path(file.filename or "import.vtm").stem, dest_dir=characters_dir())
+    # Write to a sidecar tmp so add_character can copy/validate without clobbering.
+    staging = refs_dir() / f"character_import_{tmp.stem}.vtm"
+    staging.write_bytes(raw)
+    try:
+        result = await asyncio.to_thread(get_runtime().add_character, staging)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        try:
+            staging.unlink()
+        except OSError:
+            pass
+    return {"ok": True, **result}
+
+
+@app.post("/api/characters/load")
+def character_load(body: CharacterIdBody) -> dict[str, Any]:
+    try:
+        result = get_runtime().load_character(body.id, repair=bool(body.repair))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/characters/remove")
+def character_remove(body: CharacterIdBody) -> dict[str, Any]:
+    try:
+        result = get_runtime().remove_character(body.id)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/characters/rename")
+def character_rename(body: CharacterRenameBody) -> dict[str, Any]:
+    try:
+        result = get_runtime().rename_character(body.id, body.name)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
 @app.get("/api/models/status")
 def models_status_api() -> dict[str, Any]:
     from .model_download import models_status
 
     return models_status()
+
+
+@app.get("/api/models/catalog")
+def models_catalog() -> dict[str, Any]:
+    from .model_download import hub_catalog_offers
+
+    return {"offers": hub_catalog_offers()}
 
 
 @app.get("/api/models/download/status")
@@ -272,10 +503,15 @@ def models_download_status() -> dict[str, Any]:
 
 
 @app.post("/api/models/download")
-def models_download_start() -> dict[str, Any]:
+def models_download_start(body: DownloadBody | None = None) -> dict[str, Any]:
     from .model_download import start_model_download
 
-    return start_model_download()
+    names: list[str] = []
+    if body is not None:
+        if body.name:
+            names.append(body.name)
+        names.extend(n for n in (body.names or []) if n)
+    return start_model_download(names or None)
 
 
 @app.post("/api/models/reload")
@@ -328,6 +564,42 @@ def tracking_recenter() -> dict[str, Any]:
     return get_runtime().status()
 
 
+@app.get("/api/lab/status")
+def lab_status() -> dict[str, Any]:
+    packet = lab_harness.status()
+    try:
+        if packet.get("online"):
+            rt = get_runtime()
+            # Live overlay is copied on the track thread. Doing it here too
+            # stacks harness GETs on the desk API and makes the face lag.
+            if not bool(getattr(rt, "_tracking", False)):
+                rt.adopt_lab_overlay(packet, emit=True)
+    except Exception:
+        pass
+    return packet
+
+
+@app.post("/api/lab/connect")
+def lab_connect() -> dict[str, Any]:
+    from .lab_process import CONNECT_WAIT, connect_lab
+
+    return connect_lab(timeout=CONNECT_WAIT)
+
+
+@app.post("/api/lab/command")
+def lab_command(body: LabCommandBody) -> dict[str, Any]:
+    print(f"[lab-harness] api op={body.op} body={body.body}", flush=True)
+    result = lab_harness.command(body.op, body.body)
+    if not result.get("online", True) and not result.get("ok"):
+        raise HTTPException(503, str(result.get("error") or "Track Lab is not running"))
+    if body.op == "calibrate":
+        try:
+            get_runtime().apply_lab_calibrate(result)
+        except Exception:
+            pass
+    return result
+
+
 @app.post("/api/generate")
 def generate() -> dict[str, Any]:
     try:
@@ -349,6 +621,21 @@ def stream_start() -> dict[str, Any]:
 @app.post("/api/stream/stop")
 def stream_stop() -> dict[str, Any]:
     get_runtime().stop_stream()
+    return get_runtime().status()
+
+
+@app.post("/api/stream/pause")
+def stream_pause() -> dict[str, Any]:
+    get_runtime().pause_stream()
+    return get_runtime().status()
+
+
+@app.post("/api/stream/resume")
+def stream_resume() -> dict[str, Any]:
+    try:
+        get_runtime().resume_stream()
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
     return get_runtime().status()
 
 
@@ -389,6 +676,19 @@ def mesh_release() -> dict[str, str]:
 def mesh_reset() -> dict[str, str]:
     get_runtime().mesh_reset()
     return {"ok": "1"}
+
+
+@app.post("/api/pose/freeze")
+def pose_freeze() -> dict[str, Any]:
+    try:
+        return get_runtime().freeze_pose()
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/pose/unfreeze")
+def pose_unfreeze() -> dict[str, Any]:
+    return get_runtime().unfreeze_pose()
 
 
 @app.get("/api/outputs/last")

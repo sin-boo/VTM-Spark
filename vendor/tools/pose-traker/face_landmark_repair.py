@@ -123,6 +123,9 @@ def _point_in_mouth_band(
 ) -> bool:
     if y < float(nose[1]) - 0.02 * eye_dist:
         return False
+    # On the nose tip — that slot is a mouth id confused with the nose, not a lip.
+    if float(np.hypot(x - float(nose[0]), y - float(nose[1]))) < 0.10 * eye_dist:
+        return False
     if y > float(chin[1]) + 0.08 * eye_dist:
         return False
     if abs(x - face_mid_x) > 0.55 * eye_dist:
@@ -156,6 +159,20 @@ def mouth_needs_repair(pts: np.ndarray) -> bool:
     # Above nose tip (mouth cannot sit in the eye band).
     if uy < float(nose[1]) - 0.05 * eye_dist:
         return True
+    # Upper-mid / upper lip parked on the nose while the lower lip is clearly below.
+    # The old band test kept those slots (y ≈ nose) and the mouth contour stretched
+    # from the real lips up to the nose tip.
+    if lower:
+        ly = float(np.mean([pts[i, 1] for i in lower]))
+        if ly > float(nose[1]) + 0.12 * eye_dist:
+            for i in (20, 21, 22):
+                if float(pts[i, 2]) < 0.15:
+                    continue
+                d_nose = float(
+                    np.hypot(float(pts[i, 0]) - float(nose[0]), float(pts[i, 1]) - float(nose[1]))
+                )
+                if d_nose < 0.10 * eye_dist:
+                    return True
     # Upper cluster parked on an eye (stricter than old chin-distance ratio,
     # which false-triggered on valid mouths that sit closer to eyes than chin).
     d_eye = min(

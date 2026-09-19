@@ -1,0 +1,55 @@
+from pathlib import Path
+
+
+def _ui(*parts: str) -> str:
+    return (Path(__file__).resolve().parents[2] / "ui" / "src").joinpath(*parts).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_toon_preview_opens_library() -> None:
+    lib = _ui("components", "CharacterLibrary.tsx")
+    rail = _ui("components", "ControlRail.tsx")
+    css = _ui("App.css")
+    assert "char-preview" in lib
+    assert "char-dock" not in lib
+    assert "No character" in lib
+    assert "Click to add" in lib
+    assert "libraryOpen" in lib
+    assert "setLibraryOpen(true)" in lib
+    assert "pickFile()" not in lib.split("function openDock")[1].split("async function beginCreate")[0]
+    assert "                    Create" in lib
+    assert "                    Add" in lib
+    assert "char-empty-well" in lib
+    assert "pickRef" not in lib
+    assert "libraryOpen" not in rail
+    assert "Create character" not in rail
+    assert "char-stage-open" not in rail
+    assert rail.index("char-stage") < rail.index("<CharacterLibrary")
+    preview = css.split(".char-preview {")[1].split("}")[0]
+    assert "flex: 1 1 auto" in preview
+    assert "152px" not in preview
+    assert "100cqh" not in css
+    assert "container-type" not in css
+
+
+def test_desk_settings_has_no_lab_overlay_flags() -> None:
+    rail = _ui("components", "ControlRail.tsx")
+    css = _ui("App.css")
+    assert "LAB_OVERLAY" not in rail
+    assert "use_visemes" not in rail
+    assert "invert_look" not in rail
+    assert "invert_pitch" not in rail
+    assert 'label="Mirror"' in rail
+    assert 'label="Invert"' not in rail
+    assert "Start Track Lab to edit these." not in rail
+    assert 'group-subtitle">Lab</h3>' not in rail
+    assert ".overlay-controls .group-subtitle" not in css
+
+
+def test_cel_stage_resets_zoom_when_character_changes() -> None:
+    stage = _ui("components", "CelStage.tsx")
+    app = _ui("App.tsx")
+    assert "stillId?: string" in stage
+    assert "[stillId]" in stage
+    assert "stillId={String(status?.character_id || status?.reference_path || '')}" in app

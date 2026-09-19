@@ -89,8 +89,12 @@ POSE_CHANNEL_GROUPS: tuple[str, ...] = (
     "mouth",
     "skeleton",
     "joints",
+    "hair_middle",
+    "hair_left",
+    "hair_right",
 )
-NUM_POSE_CHANNELS = len(POSE_CHANNEL_GROUPS)  # 8
+NUM_POSE_CHANNELS = len(POSE_CHANNEL_GROUPS)  # 11 (8 keypoint + 3 hair)
+HAIR_POSE_CHANNEL_SLICE = slice(8, 11)
 
 # Map face landmark index -> pose channel group name.
 FACE_ID_TO_GROUP: dict[int, str] = {
