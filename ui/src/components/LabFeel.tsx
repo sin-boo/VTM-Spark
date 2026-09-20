@@ -22,6 +22,60 @@ function feelPatch(key: keyof LabFeel, value: number): Partial<LabFeel> {
   return { [key]: value }
 }
 
+function mixRows(lab: LabStatus | null): [string, number][] {
+  const weights = lab?.weights ?? ZERO_WEIGHTS
+  const look = lab?.look
+  return [
+    ['blink L', lab?.blink?.l ?? 0],
+    ['blink R', lab?.blink?.r ?? 0],
+    ['look X', look?.x ?? 0],
+    ['look Y', look?.y ?? 0],
+    ...METERS.map((name) => [name, weights[name] ?? 0] as [string, number]),
+  ]
+}
+
+function meterFill(name: string, value: number) {
+  const n = name.startsWith('look') ? (value + 1) / 2 : value
+  return `${Math.round(Math.min(1, Math.max(0, n)) * 100)}%`
+}
+
+function MixLane({ rows }: { rows: [string, number][] }) {
+  return (
+    <>
+      {rows.map(([name, value]) => (
+        <li key={name} className={name.startsWith('look') ? 'is-look' : undefined}>
+          <span>{name}</span>
+          <i>
+            <b style={{ width: meterFill(name, value) }} />
+          </i>
+          <em className="mono">{value.toFixed(2)}</em>
+        </li>
+      ))}
+    </>
+  )
+}
+
+export function MixMeters({ lab }: { lab: LabStatus | null }) {
+  const live = Boolean(lab?.live)
+  const rows = mixRows(lab)
+  const eyes = rows.slice(0, 4)
+  const mouth = rows.slice(4)
+  return (
+    <section className={`desk-mix${live ? ' is-live' : ''}`} aria-label="Live">
+      <div className="char-stage-bar">
+        <h2 className="group-title">Live</h2>
+        <span className="char-stage-name">{live ? 'Tracking' : 'Waiting'}</span>
+      </div>
+      <ul className="lab-meters">
+        <li className="meter-kicker">Eyes</li>
+        <MixLane rows={eyes} />
+        <li className="meter-kicker">Mouth</li>
+        <MixLane rows={mouth} />
+      </ul>
+    </section>
+  )
+}
+
 type SliderProps = {
   rows: FeelSlider[]
   feel: LabFeel
@@ -95,8 +149,6 @@ export function LabFeel(props: Props) {
   const online = Boolean(props.lab?.online)
   const live = Boolean(props.lab?.live)
   const feel = props.lab?.feel ?? ZERO_LAB_FEEL
-  const weights = props.lab?.weights ?? ZERO_WEIGHTS
-  const look = props.lab?.look
   const lamp = live ? 'Track Lab live' : online ? 'Track Lab connected' : 'Track Lab offline'
 
   return (
@@ -114,39 +166,13 @@ export function LabFeel(props: Props) {
       ) : null}
       {props.actions}
       <div className={online ? undefined : 'is-offline'}>
-      <FeelSliders
-        rows={LIVE_FEEL}
-        feel={feel}
-        online={online}
-        busy={props.busy}
-        onFeel={props.onFeel}
-      />
-
-      {live ? (
-        <ul className="lab-meters">
-          {(
-            [
-              ['blink L', props.lab?.blink?.l ?? 0],
-              ['blink R', props.lab?.blink?.r ?? 0],
-              ['look X', look?.x ?? 0],
-              ['look Y', look?.y ?? 0],
-              ...METERS.map((name) => [name, weights[name] ?? 0] as [string, number]),
-            ] satisfies [string, number][]
-          ).map(([name, value]) => (
-            <li key={name}>
-              <span>{name}</span>
-              <i>
-                <b
-                  style={{
-                    width: `${Math.round(Math.min(1, Math.max(0, name.startsWith('look') ? (value + 1) / 2 : value)) * 100)}%`,
-                  }}
-                />
-              </i>
-              <em className="mono">{value.toFixed(2)}</em>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+        <FeelSliders
+          rows={LIVE_FEEL}
+          feel={feel}
+          online={online}
+          busy={props.busy}
+          onFeel={props.onFeel}
+        />
       </div>
     </div>
   )

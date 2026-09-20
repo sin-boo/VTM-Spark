@@ -26,9 +26,15 @@ def test_toon_preview_opens_library() -> None:
     assert "Create character" not in rail
     assert "char-stage-open" not in rail
     assert rail.index("char-stage") < rail.index("<CharacterLibrary")
+    assert rail.index("<MixMeters") > rail.index("<CharacterLibrary")
+    assert rail.index("<MixMeters") < rail.index("stream-panel")
     preview = css.split(".char-preview {")[1].split("}")[0]
-    assert "flex: 1 1 auto" in preview
+    img = css.split(".char-preview img {")[1].split("}")[0]
+    assert "168px" not in preview
     assert "152px" not in preview
+    assert "height: auto" in img
+    assert "width: 100%" in img
+    assert "object-fit: contain" in img
     assert "100cqh" not in css
     assert "container-type" not in css
 

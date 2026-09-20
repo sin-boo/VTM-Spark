@@ -82,7 +82,7 @@
 .char-stage {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-height: 0;
   margin: 0 6px;
   background: #2b2b2b;
@@ -94,9 +94,10 @@
   padding: 0;
   display: grid;
   place-items: center;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   align-self: stretch;
   width: auto;
+  height: auto;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -120,10 +121,17 @@ button.char-preview:focus-visible {
   cursor: default;
 }
 
+.char-preview.is-empty {
+  min-height: 148px;
+  aspect-ratio: 1;
+}
+
 .char-preview img {
+  display: block;
   width: 100%;
-  height: 100%;
+  height: auto;
   object-fit: contain;
+  object-position: center;
   pointer-events: none;
 }
 
@@ -165,6 +173,97 @@ button.char-preview:focus-visible {
   font-weight: 600;
 }
 
+.desk-mix {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0 6px 0;
+  overflow: hidden;
+  background: #2b2b2b;
+  border: 1px solid var(--line);
+}
+
+.desk-mix .lab-meters {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 0;
+  margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 0 2px 6px;
+  scrollbar-gutter: stable;
+}
+
+.desk-mix .lab-meters li {
+  flex: 0 0 18px;
+  min-height: 18px;
+  max-height: 18px;
+  padding-right: 4px;
+}
+
+.desk-mix .lab-meters .meter-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  grid-column: 1 / -1;
+  flex: 0 0 16px;
+  min-height: 16px;
+  max-height: 16px;
+  margin: 1px 0 0;
+  padding: 0 2px;
+  color: var(--mute);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+}
+
+.desk-mix .lab-meters .meter-kicker::before,
+.desk-mix .lab-meters .meter-kicker::after {
+  content: '';
+  flex: 1 1 auto;
+  min-width: 12px;
+  height: 1px;
+  background: var(--line);
+}
+
+.desk-mix .lab-meters .meter-kicker:first-child {
+  margin-top: 0;
+}
+
+.desk-mix .lab-meters i {
+  height: 4px;
+}
+
+.desk-mix .lab-meters li.is-look i {
+  position: relative;
+}
+
+.desk-mix .lab-meters li.is-look i::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 50%;
+  width: 1px;
+  background: var(--mute);
+  pointer-events: none;
+}
+
+.desk-mix:not(.is-live) .lab-meters {
+  opacity: 1;
+}
+
+.desk-mix:not(.is-live) .lab-meters b {
+  background: #4a4a4a;
+}
+
 .rail-panes {
   display: flex;
   flex: 0 0 24px;
@@ -201,6 +300,11 @@ button.char-preview:focus-visible {
   border-bottom: 0;
 }
 
+.rail-desk > .desk-mix {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .rail-desk > .rail-controls {
   flex: 0 1 auto;
 }
@@ -213,16 +317,7 @@ button.char-preview:focus-visible {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: #555 transparent;
-}
-
-.rail-controls::-webkit-scrollbar {
-  width: 8px;
-}
-
-.rail-controls::-webkit-scrollbar-thumb {
-  background: #555;
+  scrollbar-gutter: stable;
 }
 
 .rail-controls > .progress {
@@ -1213,12 +1308,6 @@ button.char-preview:focus-visible {
   background: #2f2f2f;
 }
 
-.status-line {
-  margin: 0;
-  color: var(--paper);
-  font-size: 12px;
-}
-
 .status-error {
   margin: 4px 0 0;
   color: #d08080;
@@ -1749,12 +1838,26 @@ html[data-splash] #root {
   flex: 0 0 min(34vw, 268px);
   display: flex;
   flex-direction: column;
-  padding: 28px 20px 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 22px;
   background: #333;
   border-left: 1px solid var(--line);
 }
 
+.krita-splash-plate {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+}
+
 .krita-splash-brand {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
 }
 
@@ -1762,7 +1865,7 @@ html[data-splash] #root {
   display: block;
   width: 72px;
   height: 72px;
-  margin: 4px auto 16px;
+  margin: 0 auto 12px;
   object-fit: contain;
   background: transparent;
 }
@@ -1785,15 +1888,17 @@ html[data-splash] #root {
 }
 
 .krita-splash-ver {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: var(--mute);
   font-size: 11px;
 }
 
 .krita-splash-status {
-  margin: auto 0 0;
+  width: 100%;
+  margin: 0;
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 8px;
 }
 
@@ -1801,6 +1906,7 @@ html[data-splash] #root {
   margin: 0;
   font-size: 12px;
   color: var(--mute);
+  text-align: center;
 }
 
 .krita-splash-bar {
@@ -1865,6 +1971,7 @@ html[data-splash] #root {
   margin: 0;
   color: #d08080;
   font-size: 12px;
+  text-align: center;
 }
 
 .win-caption {

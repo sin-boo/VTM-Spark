@@ -14,7 +14,7 @@ import {
 } from '../api'
 import { DEVELOPER } from '../developer'
 import { CharacterLibrary } from './CharacterLibrary'
-import { LabFeel } from './LabFeel'
+import { LabFeel, MixMeters } from './LabFeel'
 import { TravelBox } from './TravelBox'
 import { Lamp, ProgressMeter, Toggle } from './widgets'
 
@@ -567,6 +567,8 @@ export function ControlRail(props: Props) {
             />
           </section>
 
+          <MixMeters lab={props.lab} />
+
           <section className="group stream-panel">
             <div className="group-head">
               <h2 className="group-title">Stream</h2>
@@ -832,9 +834,6 @@ export function ControlRail(props: Props) {
                   Reload backend
                 </button>
               </div>
-              <p className="hint">
-                Restarts Python. A small window stays open while the desk comes back.
-              </p>
             </section>
             {DEVELOPER ? (
               <section className="group">
@@ -895,13 +894,11 @@ export function ControlRail(props: Props) {
           </div>
         )}
       </div>
-      <footer className="rail-status">
-        <p className="status-line">{s?.message || 'Starting…'}</p>
-        {props.error || s?.error ? (
+      {props.error || s?.error ? (
+        <footer className="rail-status">
           <p className="status-error">{props.error || s?.error}</p>
-        ) : null}
-        {s?.device ? <p className="hint mono">{s.device}</p> : null}
-      </footer>
+        </footer>
+      ) : null}
     </aside>
   )
 }

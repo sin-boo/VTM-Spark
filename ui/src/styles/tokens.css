@@ -62,6 +62,16 @@
 
   --row-h: 22px;
 
+  --scroll-size: 16px;
+
+  --scroll-track: #1f1f1f;
+
+  --scroll-thumb: #5a5a5a;
+
+  --scroll-thumb-hover: #7a7a7a;
+
+  --scroll-face: #3a3a3a;
+
 }
 
 
@@ -151,6 +161,104 @@ select:focus-visible {
     transition-duration: 0.01ms !important;
 
   }
+
+}
+
+
+::-webkit-scrollbar {
+
+  width: var(--scroll-size);
+
+  height: var(--scroll-size);
+
+}
+
+
+::-webkit-scrollbar-track {
+
+  background: var(--scroll-track);
+
+}
+
+
+::-webkit-scrollbar-thumb {
+
+  background: var(--scroll-thumb);
+
+  border: 1px solid var(--line);
+
+}
+
+
+::-webkit-scrollbar-thumb:hover {
+
+  background: var(--scroll-thumb-hover);
+
+}
+
+
+::-webkit-scrollbar-button:single-button {
+
+  display: block;
+
+  width: var(--scroll-size);
+
+  height: var(--scroll-size);
+
+  background-color: var(--scroll-face);
+
+  background-repeat: no-repeat;
+
+  background-position: center;
+
+  background-size: 8px 8px;
+
+  border: 1px solid var(--line);
+
+}
+
+
+::-webkit-scrollbar-button:single-button:vertical:decrement {
+
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpolygon points='4,2 7,6 1,6' fill='%238d8d8d'/%3E%3C/svg%3E");
+
+}
+
+
+::-webkit-scrollbar-button:single-button:vertical:increment {
+
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpolygon points='1,2 7,2 4,6' fill='%238d8d8d'/%3E%3C/svg%3E");
+
+}
+
+
+::-webkit-scrollbar-button:single-button:horizontal:decrement {
+
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpolygon points='2,4 6,1 6,7' fill='%238d8d8d'/%3E%3C/svg%3E");
+
+}
+
+
+::-webkit-scrollbar-button:single-button:horizontal:increment {
+
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpolygon points='2,1 6,4 2,7' fill='%238d8d8d'/%3E%3C/svg%3E");
+
+}
+
+
+::-webkit-scrollbar-button:single-button:hover {
+
+  background-color: var(--row);
+
+}
+
+
+::-webkit-scrollbar-button:vertical:start:increment,
+::-webkit-scrollbar-button:vertical:end:decrement,
+::-webkit-scrollbar-button:horizontal:start:increment,
+::-webkit-scrollbar-button:horizontal:end:decrement {
+
+  display: none;
 
 }
 
