@@ -9,12 +9,7 @@ from PIL import Image
 
 from backend.ref_pose_fit import _align_body_nose_to_face, reference_display_rgb
 
-GIGI = (
-    Path(__file__).resolve().parents[2]
-    / "test-pose"
-    / "input"
-    / "vtuber_ref_gigi_mood_green.png"
-)
+GIGI = Path(__file__).resolve().parent / "fixtures" / "vtuber_ref_gigi_mood_green.png"
 
 
 def test_align_body_nose_to_face() -> None:

@@ -259,7 +259,7 @@ async def _on_startup() -> None:
     global _loop
     _loop = asyncio.get_running_loop()
     configure_runtime()
-    # First-run setup: fetch VTM-ELF.pt into models/dit when missing.
+    # First-run setup: fetch VTM-1.5.1.pt into models/dit when missing.
     try:
         from .model_download import ensure_default_model
 

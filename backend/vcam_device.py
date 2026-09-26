@@ -59,7 +59,7 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
     missing = [p for p in filter_dlls() if not p.is_file()]
     if missing:
         raise RuntimeError(
-            "VTM Noble Cam filters missing — re-run Smart Build "
+            "VTM Noble Cam filters missing — re-run install.bat "
             f"(expected under {vcam_bundle_dir()})"
         )
     script = install_script()
@@ -68,7 +68,7 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
 
     if not allow_prompt:
         raise RuntimeError(
-            f"{DEVICE_NAME} is not installed. Run Smart Build [1] "
+            f"{DEVICE_NAME} is not installed. Run install.bat "
             "(approve the UAC prompt once)."
         )
 

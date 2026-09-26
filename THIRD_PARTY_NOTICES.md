@@ -12,7 +12,7 @@ Eligible publisher: this project / [sinBoo1/VTM-Elf-0.01](https://huggingface.co
 
 | File | What it is |
 |------|------------|
-| `models/dit/VTM-ELF.pt` | Our DiT generation checkpoint |
+| `models/dit/VTM-1.5.1.pt` | Our DiT generation checkpoint |
 | `models/trackers/iris_pose.pt` | Our YOLO-pose iris / pupil fine-tune |
 | `models/trackers/dwpose_v2.pt` (+ `.onnx`) | Our YOLO-pose body fine-tune |
 | `models/trackers/animeseg_hair3.pt` | Our Mask2Former hair-part fine-tune |

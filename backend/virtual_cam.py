@@ -171,7 +171,7 @@ class VirtualCameraOut:
         try:
             import pyvirtualcam
         except ImportError as exc:
-            self._error = "pyvirtualcam is not installed — run Smart Build [1]"
+            self._error = "pyvirtualcam is not installed — re-run install.bat"
             raise RuntimeError(self._error) from exc
 
         try:
@@ -193,7 +193,7 @@ class VirtualCameraOut:
         except Exception as exc:
             self._error = (
                 f"Could not open {DEVICE_NAME}. "
-                f"Run Smart Build [1] and approve UAC once. ({exc})"
+                f"Re-run install.bat and approve UAC once. ({exc})"
             )
             raise RuntimeError(self._error) from exc
 

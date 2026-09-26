@@ -1143,7 +1143,7 @@ class StreamRuntime:
                         0.02,
                         label="Downloading model",
                         kind="download",
-                        message="Downloading VTM-ELF.pt into models/dit…",
+                        message="Downloading VTM-1.5.1.pt into models/dit…",
                         busy=True,
                         state="downloading_models",
                         error="",

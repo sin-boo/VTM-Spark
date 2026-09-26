@@ -6,15 +6,17 @@ Face-tracking bench. Shares the main VTM Noble venv (`.venv-build`). Source edit
 
 ## Setup (once)
 
-From this folder, after the main app has a venv (`start.bat` → **[1] Smart Build**):
+`install.bat` at the repo root sets up the lab for you: after the app build it runs `setup.ps1` and installs `ui/` npm packages. Its closing summary shows **Track Lab** as OK or needs attention.
+
+To redo it by hand from this folder (the main app venv must exist, so run `install.bat` first):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 cd ui
-npm install
+npm ci
 ```
 
-`setup.ps1` copies OpenSeeFace Python here. Face weights stay in `vendor/tools/openseeface/models` and `models/trackers`. It does **not** create a second venv. `start.ps1` runs setup on its own if the OSF Python files are missing.
+`setup.ps1` copies OpenSeeFace Python here. Face weights stay in `vendor/tools/openseeface/models` and `models/trackers`. It does **not** create a second venv. `start.ps1` runs setup on its own if the OSF Python files are missing, and installs `ui/` packages if `node_modules` is missing.
 
 ## Run
 
@@ -22,7 +24,7 @@ npm install
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-Or double-click `start.bat`. Open [http://127.0.0.1:5174](http://127.0.0.1:5174).
+Or double-click `start.bat` in this folder. Open [http://127.0.0.1:5174](http://127.0.0.1:5174).
 
 - **Track** — fit the rest mesh on `input/source.png`
 - **Reset** — tear down the Python tracker / ONNX sessions

@@ -34,7 +34,7 @@ _CATALOG_TTL_S = 10 * 60
 _catalog_lock = threading.Lock()
 _catalog_cache: tuple[float, list[dict[str, Any]]] | None = None
 
-# When True, print ASCII progress to stderr (Smart Build / CLI). Off inside the live app UI.
+# When True, print ASCII progress to stderr (install.bat / CLI). Off inside the live app UI.
 _console_progress = False
 _progress_line_len = 0
 _progress_last_newline_at = 0.0

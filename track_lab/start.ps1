@@ -16,7 +16,7 @@ $FaceModel = Join-Path $Repo "vendor\tools\openseeface\models\lm_model3_opt.onnx
 $OsfPy = Join-Path $Root "osf\tracker.py"
 
 if (-not (Test-Path $Py)) {
-  throw "Missing $Py. Run start.bat -> [1] Smart Build first."
+  throw "Missing $Py. Run install.bat at the repo root first."
 }
 
 $env:PYTHONPATH = $Root
@@ -25,17 +25,24 @@ Set-Location $Root
 if (-not (Test-Path $OsfPy)) {
   Write-Host "OpenSeeFace Python missing -- running setup.ps1"
   & powershell -NoProfile -ExecutionPolicy Bypass -File $Setup
+  if ($LASTEXITCODE -ne 0) {
+    throw "setup.ps1 failed with code $LASTEXITCODE"
+  }
 }
 if (-not (Test-Path $FaceModel)) {
-  throw "Face models missing in vendor\tools\openseeface\models. Run start.bat -> [1] Smart Build first."
+  throw "Face models missing in vendor\tools\openseeface\models. Run install.bat at the repo root first."
 }
 
 Set-Location $Ui
 if (-not (Test-Path (Join-Path $Ui "node_modules"))) {
+  # Same as install.bat: npm ci from the lockfile, npm install as fallback.
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    npm install
+    npm ci
+    if ($LASTEXITCODE -ne 0) {
+      npm install
+    }
     if ($LASTEXITCODE -ne 0) {
       throw "npm install failed with code $LASTEXITCODE"
     }

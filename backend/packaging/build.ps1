@@ -1,6 +1,6 @@
 ﻿# VTM Noble setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
 # run.exe runs the desk from source with that venv.
-# DiT weights download into models/dit on Smart Build / first launch.
+# DiT weights download into models/dit on install.bat / first launch.
 param(
   [string]$BasePython = "",
   [switch]$RecreateVenv,
@@ -15,6 +15,12 @@ Set-Location $Root
 $VenvDir = Join-Path $Root ".venv-build"
 $Py = Join-Path $VenvDir "Scripts\python.exe"
 
+# Pinned uv release (downloaded into .tools\ only when uv is not already on PATH).
+$UvVersion = "0.12.9"
+$UvZipUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
+# Managed Python that uv downloads when no usable system Python is found.
+$ManagedPythonVersion = "3.13"
+
 . (Join-Path $PSScriptRoot "console-progress.ps1")
 . (Join-Path $PSScriptRoot "venv-home.ps1")
 
@@ -23,21 +29,31 @@ function Get-UvExe {
   if ($cmd -and $cmd.Source) { return [string]$cmd.Source }
   $local = Join-Path $Root ".tools\uv.exe"
   if (Test-Path -LiteralPath $local) { return $local }
-  Write-Host "==> Downloading uv into .tools\ (one-time)"
+  Write-Host "==> Downloading uv $UvVersion into .tools\ (one-time)"
   $tools = Join-Path $Root ".tools"
   New-Item -ItemType Directory -Force -Path $tools | Out-Null
-  $zip = Join-Path $env:TEMP "uv-x86_64-pc-windows-msvc.zip"
-  $url = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-  $extract = Join-Path $env:TEMP "uv-extract"
-  if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
-  Expand-Archive -Path $zip -DestinationPath $extract -Force
-  $found = Get-ChildItem -Path $extract -Filter "uv.exe" -Recurse | Select-Object -First 1
-  if (-not $found) { throw "uv.exe missing from Astral download" }
-  Copy-Item -Force $found.FullName $local
-  $uvx = Get-ChildItem -Path $extract -Filter "uvx.exe" -Recurse | Select-Object -First 1
-  if ($uvx) { Copy-Item -Force $uvx.FullName (Join-Path $tools "uvx.exe") }
+  $tag = [guid]::NewGuid().ToString("N")
+  $zip = Join-Path $env:TEMP "vtm-uv-$tag.zip"
+  $extract = Join-Path $env:TEMP "vtm-uv-extract-$tag"
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    try {
+      Invoke-WebRequest -Uri $UvZipUrl -OutFile $zip -UseBasicParsing
+    } catch {
+      throw "Could not download uv $UvVersion from $UvZipUrl ($($_.Exception.Message)). Check your internet connection / proxy and re-run install.bat, or install uv yourself (https://docs.astral.sh/uv/) so it is on PATH."
+    }
+    Expand-Archive -Path $zip -DestinationPath $extract -Force
+    $found = Get-ChildItem -Path $extract -Filter "uv.exe" -Recurse | Select-Object -First 1
+    if (-not $found) {
+      throw "uv.exe missing from the Astral download ($UvZipUrl). Delete .tools\ and re-run install.bat, or install uv yourself so it is on PATH."
+    }
+    Copy-Item -Force $found.FullName $local
+    $uvx = Get-ChildItem -Path $extract -Filter "uvx.exe" -Recurse | Select-Object -First 1
+    if ($uvx) { Copy-Item -Force $uvx.FullName (Join-Path $tools "uvx.exe") }
+  } finally {
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue }
+  }
   return $local
 }
 
@@ -45,6 +61,24 @@ $script:UvExe = Get-UvExe
 Write-Host "==> Using uv: $($script:UvExe)"
 
 Write-Host "==> VTM Noble setup (UI + .venv-build)"
+
+# --- NVIDIA GPU / driver (warn only: cu128 wheels still install without one) ---
+function Test-NvidiaDriver {
+  if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { return $true }
+  if (${env:SystemRoot} -and (Test-Path -LiteralPath (Join-Path ${env:SystemRoot} "System32\nvidia-smi.exe"))) { return $true }
+  return (Test-Path -LiteralPath "C:\Windows\System32\nvidia-smi.exe")
+}
+
+if (Test-NvidiaDriver) {
+  Write-Host "==> NVIDIA driver found (nvidia-smi)"
+} else {
+  Write-Host ""
+  Write-Host "    WARNING: nvidia-smi not found - no NVIDIA GPU driver detected."
+  Write-Host "    WARNING: VTM Noble needs an NVIDIA GPU + current NVIDIA driver to run CUDA torch."
+  Write-Host "    WARNING: Setup will continue (CUDA torch wheels still install), but the desk will not"
+  Write-Host "    WARNING: run until you install a driver from https://www.nvidia.com/Download/index.aspx"
+  Write-Host ""
+}
 
 Write-Host "==> Killing leftover VTM Noble / backend processes"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "kill-orphans.ps1")
@@ -55,22 +89,25 @@ $HasMonorepo = Test-Path -LiteralPath $MonorepoMarker
 $DoSync = $SyncVendor -and (-not $SkipVendorSync)
 if ($DoSync) {
   if (-not $HasMonorepo) {
-    throw "-SyncVendor requires parent monorepo (send2pod/torch_train). Standalone clones use committed vendor/."
+    throw "-SyncVendor requires parent monorepo (send2pod/torch_train). Standalone clones use committed vendor/ - re-run install.bat without -SyncVendor."
   }
   Write-Host "==> Syncing lean vendor/ from monorepo parent (-SyncVendor)"
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-vendor.ps1")
-  if ($LASTEXITCODE -ne 0) { throw "vendor sync failed" }
+  if ($LASTEXITCODE -ne 0) { throw "vendor sync failed - see sync-vendor.ps1 output above; fix the monorepo checkout or re-run without -SyncVendor to use the committed vendor/." }
 } else {
   Write-Host "==> Using committed vendor/ (pass -SyncVendor only when refreshing from monorepo)"
 }
 if (-not (Test-Path (Join-Path $Root "vendor\torch_train\inference_keypoint.py"))) {
-  throw "vendor/torch_train missing - re-clone the repo (vendor/ must be present)"
+  throw "vendor/torch_train missing - re-clone the repo (vendor/ must be present), then re-run install.bat"
 }
 if (-not (Test-Path (Join-Path $Root "vendor\tools\live-poser\live_poser.py"))) {
-  throw "vendor/tools/live-poser missing - re-clone the repo (vendor/ must be present)"
+  throw "vendor/tools/live-poser missing - re-clone the repo (vendor/ must be present), then re-run install.bat"
 }
 
 # --- UI --------------------------------------------------------------------
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  throw "Node.js is required to build the UI but 'npm' is not on PATH. Install Node.js LTS from https://nodejs.org/ (keep 'Add to PATH' checked), then open a NEW terminal and re-run install.bat."
+}
 Write-Host "==> Building UI (Vite)"
 Push-Location "$Root\ui"
 try {
@@ -88,7 +125,7 @@ try {
         -Activity "npm install" `
         -HeartbeatSeconds 12
     }
-    if ($code -ne 0) { throw "npm install failed" }
+    if ($code -ne 0) { throw "npm install failed - see npm output above. Check your internet connection, delete ui\node_modules, and re-run install.bat." }
   }
   $UiDist = Join-Path $Root "ui\dist\index.html"
   $NeedUiBuild = $true
@@ -109,7 +146,7 @@ try {
       -ArgumentList @("/c", "npm", "run", "build") `
       -Activity "vite build" `
       -HeartbeatSeconds 10
-    if ($code -ne 0) { throw "UI build failed" }
+    if ($code -ne 0) { throw "UI build failed - see npm output above; try deleting ui\node_modules and re-run install.bat." }
   }
 } finally {
   Pop-Location
@@ -137,7 +174,7 @@ function Resolve-BasePython {
   if ($Preferred) {
     if (Test-Path -LiteralPath $Preferred) {
       if (Test-PythonExe $Preferred) { return $Preferred }
-      throw "BasePython path is not a usable Python 3.10+: $Preferred"
+      throw "BasePython path is not a usable Python 3.10+: $Preferred. Point -BasePython at a working python.exe, or omit it to let uv download Python $ManagedPythonVersion."
     }
     return $Preferred
   }
@@ -182,17 +219,24 @@ if ((Test-Path $Py) -and -not (Test-VtmPythonExe $Py)) {
 
 if (-not (Test-Path $Py)) {
   $BasePython = Resolve-BasePython -Preferred $BasePython
-  if (-not $BasePython) {
-    throw "No Python 3.10+ found. Pass -BasePython <path-to-python.exe>."
+  if ($BasePython) {
+    $VenvPython = $BasePython
+  } else {
+    # No usable system Python: let uv download a managed CPython instead.
+    Write-Host "==> No system Python 3.10+ found - uv will download a managed Python $ManagedPythonVersion"
+    $VenvPython = $ManagedPythonVersion
   }
-  Write-Host "==> Creating build venv with uv at $VenvDir"
+  Write-Host "==> Creating build venv with uv at $VenvDir (python: $VenvPython)"
   Write-LongStepHint "First run downloads a Python environment into .venv-build..."
   $code = Invoke-NativeWithHeartbeat `
     -FilePath $script:UvExe `
-    -ArgumentList @("venv", $VenvDir, "--python", $BasePython) `
+    -ArgumentList @("venv", $VenvDir, "--python", $VenvPython) `
     -Activity "uv venv" `
     -HeartbeatSeconds 8
-  if ($code -ne 0 -or -not (Test-Path $Py)) { throw "Failed to create build venv with uv" }
+  if ($code -is [System.Array]) { $code = $code | Select-Object -Last 1 }
+  if ($code -ne 0 -or -not (Test-Path $Py)) {
+    throw "Failed to create build venv with uv (python: $VenvPython, exit $code) - see uv output above. Check your internet connection, delete .venv-build, and re-run install.bat; or install Python $ManagedPythonVersion from https://www.python.org/downloads/ and pass -BasePython <path-to-python.exe>."
+  }
 }
 
 Write-Host "==> Using Python: $Py"
@@ -276,10 +320,10 @@ function Install-CudaTorch {
     "--index-url", "https://download.pytorch.org/whl/cu128"
   ) -Activity "CUDA torch cu128 download/install" -HeartbeatSeconds 10
   if ($code -ne 0) {
-    throw "CUDA torch install failed (uv pip exit $code)"
+    throw "CUDA torch install failed (uv pip exit $code) - see uv output above. Check your internet connection and free disk space (2+ GB), then re-run install.bat."
   }
   if (-not (Test-CudaTorch)) {
-    throw "CUDA torch not installed (still CPU / import failed). Aborting package."
+    throw "CUDA torch not installed (still CPU / import failed) - see torch probe above. Delete .venv-build and re-run install.bat."
   }
 }
 
@@ -310,7 +354,7 @@ if ($NeedDeps) {
   $code = Invoke-Pip -PipArgs @(
     "install", "-r", "$Root\requirements.txt"
   ) -Activity "requirements.txt" -HeartbeatSeconds 12
-  if ($code -ne 0) { throw "uv pip install failed (exit $code)" }
+  if ($code -ne 0) { throw "uv pip install -r requirements.txt failed (exit $code) - see uv output above. Check your internet connection and re-run install.bat; if it keeps failing, delete .venv-build and re-run." }
 
   # If anything clobbered the CUDA wheel, put it back.
   if (-not (Test-CudaTorch)) {
@@ -331,8 +375,8 @@ if ($NeedDeps) {
   }
 }
 
-if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages" }
-if (-not (Test-CudaTorch)) { throw "Build venv must have torch+cu128" }
+if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages - re-run install.bat without -SkipDeps; if it persists, delete .venv-build and re-run install.bat." }
+if (-not (Test-CudaTorch)) { throw "Build venv must have torch+cu128 - delete .venv-build and re-run install.bat." }
 Write-Host "    runtime imports OK (CUDA torch)"
 
 Write-Host ""

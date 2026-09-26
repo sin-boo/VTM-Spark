@@ -70,5 +70,8 @@ track_lab/output/
 track_lab/input/*
 !track_lab/input/.gitkeep
 
-# Large tracker weights (GitHub caps files at 100 MB)
-models/trackers/animeseg_hair3.pt
+# Tracker weights download via install.bat (models/model_sources.json)
+models/trackers/*.pt
+models/trackers/*.pth
+models/trackers/*.onnx
+models/trackers/*.task

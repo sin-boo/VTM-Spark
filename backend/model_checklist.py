@@ -36,10 +36,10 @@ class ChecklistItem:
 CHECKLIST: tuple[ChecklistItem, ...] = (
     ChecklistItem(
         id="dit",
-        label="VTM-ELF.pt",
+        label="VTM-1.5.1.pt",
         purpose="DiT generation checkpoint",
         required=True,
-        candidates=("models/dit/VTM-ELF.pt",),
+        candidates=("models/dit/VTM-1.5.1.pt",),
         min_bytes=_MIN_BYTES,
         auto_download=True,
     ),
@@ -90,6 +90,7 @@ CHECKLIST: tuple[ChecklistItem, ...] = (
         required=False,
         candidates=("models/trackers/animeseg_hair3.pt",),
         min_bytes=_MIN_BYTES,
+        auto_download=True,
     ),
     ChecklistItem(
         id="anime_face_yolo",

@@ -31,7 +31,7 @@ import torch
 
 TORCH_TRAIN_DIR = torch_train_dir()
 # Resolved dynamically via models_dir() so downloads into models/dit are picked up.
-STREAM_CKPT_NAME = "VTM-ELF.pt"
+STREAM_CKPT_NAME = "VTM-1.5.1.pt"
 # Default still — models/refs only (user upload / shipped default).
 DEFAULT_REF = default_ref_path()
 DEFAULT_REF_FALLBACK = default_ref_path()

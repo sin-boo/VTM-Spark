@@ -50,3 +50,29 @@ def test_catalog_off_when_sources_disabled(monkeypatch) -> None:
         lambda: {"enabled": False},
     )
     assert hub_catalog_offers(listing=[{"name": "x.pt"}]) == []
+
+
+def test_auto_download_checklist_items_have_a_source() -> None:
+    from backend.model_checklist import CHECKLIST
+    from backend.model_download import _asset_jobs, load_model_sources
+
+    sources = load_model_sources()
+    assert sources.get("enabled")
+    dests = {str(job["dest"]) for job in _asset_jobs(sources)}
+    missing = [
+        item.candidates[0]
+        for item in CHECKLIST
+        if item.auto_download and item.candidates[0] not in dests
+    ]
+    assert missing == []
+
+
+def test_http_sources_are_https_with_dest() -> None:
+    from backend.model_download import _asset_jobs, load_model_sources
+
+    http_jobs = [j for j in _asset_jobs(load_model_sources()) if j["kind"] == "http"]
+    assert http_jobs
+    for job in http_jobs:
+        assert str(job["url"]).startswith("https://")
+        assert str(job["dest"]).startswith("models/trackers/")
+        assert int(job["min_bytes"]) >= 1_000_000

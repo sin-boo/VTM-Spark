@@ -4,17 +4,22 @@
   "hf_repo": "sinBoo1/VTM-Elf-0.01",
   "hf_revision": "main",
   "files": [
-    "VTM-ELF.pt"
+    "VTM-1.5.1.pt"
   ],
   "assets": [
     {
-      "hf": "VTM-ELF.pt",
-      "dest": "models/dit/VTM-ELF.pt",
+      "hf": "VTM-1.5.1.pt",
+      "dest": "models/dit/VTM-1.5.1.pt",
       "min_bytes": 1000000
     },
     {
       "hf": "trackers/iris_pose.pt",
       "dest": "models/trackers/iris_pose.pt",
+      "min_bytes": 1000000
+    },
+    {
+      "hf": "trackers/animeseg_hair3.pt",
+      "dest": "models/trackers/animeseg_hair3.pt",
       "min_bytes": 1000000
     },
     {
@@ -53,5 +58,18 @@
       "min_bytes": 100
     }
   ],
-  "http_files": []
+  "http_files": [
+    {
+      "name": "face_yolov8n.pt",
+      "url": "https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8n.pt",
+      "dest": "models/trackers/face_yolov8n.pt",
+      "min_bytes": 1000000
+    },
+    {
+      "name": "mmpose_anime-face_hrnetv2.pth",
+      "url": "https://github.com/hysts/anime-face-detector/releases/download/v0.0.1/mmpose_anime-face_hrnetv2.pth",
+      "dest": "models/trackers/mmpose_anime-face_hrnetv2.pth",
+      "min_bytes": 1000000
+    }
+  ]
 }

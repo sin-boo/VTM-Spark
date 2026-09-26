@@ -1,4 +1,4 @@
-# Thin process helpers for Smart Build / packaging.
+# Thin process helpers for install.bat / packaging.
 # No custom ASCII bars — let uv/npm/vite show their own progress when possible.
 # Dot-source from build.ps1 / start-menu.ps1.
 

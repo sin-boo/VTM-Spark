@@ -189,7 +189,8 @@ function Invoke-EnsureModel {
     $ErrorActionPreference = "Continue"
     $code = 1
     try {
-      & $VenvPy -m backend.model_download
+      # Out-Host: show stdout and keep it out of this function's return value.
+      & $VenvPy -m backend.model_download | Out-Host
       $code = [int]$LASTEXITCODE
     } catch {
       Write-Ansi "Model download threw: $_" rose
@@ -207,7 +208,7 @@ function Invoke-EnsureModel {
       Write-Ansi "Model catalog sync finished." green
     } else {
       Write-Ansi "Model download failed or incomplete." rose
-      Write-Ansi "Place a .pt file in models\dit or retry Rebuild / Start." slate
+      Write-Ansi "Place a .pt file in models\dit or re-run install.bat." slate
       if ($Required) { return $false }
       return $false
     }
@@ -221,7 +222,7 @@ function Invoke-EnsureModel {
   $ErrorActionPreference = "Continue"
   $checkCode = 1
   try {
-    & $VenvPy -m backend.model_download --checklist-only
+    & $VenvPy -m backend.model_download --checklist-only | Out-Host
     $checkCode = [int]$LASTEXITCODE
   } catch {
     Write-Ansi "Checklist scan threw: $_" rose
@@ -263,7 +264,7 @@ function Invoke-EnsureVtmNobleCam {
   $ErrorActionPreference = "Continue"
   $ready = $false
   try {
-    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)" | Out-Host
     $ready = ($LASTEXITCODE -eq 0)
   } catch {
     $ready = $false
@@ -304,7 +305,7 @@ function Invoke-EnsureVtmNobleCam {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
+    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)" | Out-Host
     $ready = ($LASTEXITCODE -eq 0)
   } catch {
     $ready = $false
@@ -325,15 +326,105 @@ function Invoke-EnsureVtmNobleCam {
   return $false
 }
 
+function Invoke-EnsureTrackLab {
+  # Track Lab shares .venv-build: copy OpenSeeFace Python, probe imports, and
+  # install the lab UI npm packages. Same steps track_lab\start.ps1 runs lazily.
+  $labDir = Join-Path $Root "track_lab"
+  $setup = Join-Path $labDir "setup.ps1"
+  $labUi = Join-Path $labDir "ui"
+  if (-not (Test-Path -LiteralPath $setup)) {
+    Write-Ansi "==> Track Lab missing under track_lab\ - skipped" amber
+    return $false
+  }
+
+  Write-Host ""
+  Write-Ansi "==> Setting up Track Lab" cyan
+  $ok = $true
+
+  $setupCode = 1
+  try {
+    $setupCode = Invoke-ProcessWithHeartbeat `
+      -FilePath "powershell.exe" `
+      -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $setup) `
+      -Activity "track_lab setup.ps1" `
+      -HeartbeatSeconds 10
+  } catch {
+    Write-Ansi "Track Lab setup threw: $_" rose
+    $setupCode = 1
+  }
+  if ($setupCode -ne 0) {
+    Write-Ansi "Track Lab setup.ps1 exited $setupCode." amber
+    $ok = $false
+  }
+
+  if (Test-Path -LiteralPath (Join-Path $labUi "node_modules")) {
+    Write-Ansi "    track_lab\ui\node_modules present - skipping npm" slate
+  } elseif (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Ansi "npm not found on PATH - Track Lab UI packages not installed." amber
+    $ok = $false
+  } else {
+    $npmCode = 1
+    Push-Location $labUi
+    try {
+      $npmCode = Invoke-ProcessWithHeartbeat `
+        -FilePath "cmd.exe" `
+        -ArgumentList @("/c", "npm", "ci") `
+        -Activity "npm ci (track_lab\ui)" `
+        -HeartbeatSeconds 12
+      if ($npmCode -ne 0) {
+        $npmCode = Invoke-ProcessWithHeartbeat `
+          -FilePath "cmd.exe" `
+          -ArgumentList @("/c", "npm", "install") `
+          -Activity "npm install (track_lab\ui)" `
+          -HeartbeatSeconds 12
+      }
+    } catch {
+      Write-Ansi "Track Lab npm install threw: $_" rose
+      $npmCode = 1
+    } finally {
+      Pop-Location
+    }
+    if ($npmCode -ne 0) {
+      Write-Ansi "Track Lab npm install exited $npmCode." amber
+      $ok = $false
+    }
+  }
+
+  if ($ok) {
+    Write-Ansi "Track Lab ready." green
+  }
+  return $ok
+}
+
+function Write-InstallStep {
+  param(
+    [string]$Label,
+    [bool]$Ok,
+    [string]$Hint = ""
+  )
+  Write-Ansi ("  " + $Label.PadRight(16)) white -NoNewline
+  if ($Ok) {
+    Write-Ansi "OK" green
+    return
+  }
+  Write-Ansi "needs attention" amber
+  if ($Hint) {
+    Write-Ansi "    $Hint" slate
+  }
+}
+
 function Invoke-SmartBuild {
+  # Sets $script:InstallExitCode: 0 all OK, 1 app build failed,
+  # 2 app built but a later step (models / virtual cam / Track Lab) needs attention.
+  $script:InstallExitCode = 1
   Write-Host ""
   Write-Ansi "==> Clearing leftovers..." amber
   Invoke-KillOrphans
   $state = Get-RunState
   if ($state.HasVenv) {
-    Write-Ansi "==> Rebuild (checks deps - installs anything missing, e.g. pyvirtualcam)" cyan
+    Write-Ansi "==> Install / update (checks deps - installs anything missing, e.g. pyvirtualcam)" cyan
   } else {
-    Write-Ansi "==> Rebuild (first install - creating venv and installing deps)" cyan
+    Write-Ansi "==> Install (first run - creating venv and installing deps)" cyan
   }
   Write-Ansi "    Long steps use each tool's own progress (uv/npm); copies print start/done." slate
   Write-Host ""
@@ -354,21 +445,45 @@ function Invoke-SmartBuild {
   }
   if ($code -ne 0) {
     Write-Host ""
-    Write-Ansi "Rebuild failed. Review the message above." rose
+    Write-Ansi "Install failed during the app build (exit $code). Review the message above." rose
+    Write-Ansi "  Common causes:" slate
+    Write-Ansi "    - No internet connection (uv, PyTorch and npm download packages)" slate
+    Write-Ansi "    - Node.js missing - install Node.js LTS, then open a new terminal" slate
+    Write-Ansi "    - No NVIDIA driver - the CUDA check needs a recent NVIDIA GPU driver" slate
+    Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Noble / pause AV and retry" slate
+    Write-Ansi "  Re-running install.bat is safe; it keeps what finished and retries the rest." slate
     Write-Host ""
     Write-Ansi "Press Enter to return..." slate
     [void][Console]::ReadLine()
+    $script:InstallExitCode = 1
     return
   }
 
+  # Track Lab (face-tracking bench): OSF Python copy + lab UI npm packages.
+  $trackLabOk = [bool](@(Invoke-EnsureTrackLab)[-1])
+
   # Explicit setup step: fetch DiT weights into models\dit if missing.
-  [void](Invoke-EnsureModel)
+  $modelsOk = [bool](@(Invoke-EnsureModel)[-1])
 
   # Register bundled DirectShow virtual camera (VTM Noble Cam) once.
-  [void](Invoke-EnsureVtmNobleCam)
+  $vcamOk = [bool](@(Invoke-EnsureVtmNobleCam)[-1])
 
+  $allOk = $modelsOk -and $vcamOk -and $trackLabOk
   Write-Host ""
-  Write-Ansi "Rebuild finished." green
+  Write-Ansi "==> Install summary" cyan
+  Write-InstallStep "App build" $true
+  Write-InstallStep "Models" $modelsOk "Check your internet and re-run install.bat, or place a .pt file in models\dit."
+  Write-InstallStep "Virtual camera" $vcamOk "Re-run install.bat and approve UAC, or click Virtual camera in the app."
+  Write-InstallStep "Track Lab" $trackLabOk "Needs Node.js for the lab UI. Re-run install.bat or run track_lab\start.bat."
+  Write-Host ""
+  if ($allOk) {
+    Write-Ansi "Install finished." green
+    $script:InstallExitCode = 0
+  } else {
+    Write-Ansi "Install finished, but some steps need attention (see above)." amber
+    Write-Ansi "  The desk may still open. Re-running install.bat is safe." slate
+    $script:InstallExitCode = 2
+  }
   Write-Ansi "  Double-click run.exe to open the desk." slate
   Write-Host ""
   Write-Ansi "Press Enter to return..." slate
@@ -537,7 +652,9 @@ function Invoke-StartApp {
 Enable-PrettyConsole
 
 if ($Action -eq "install") {
+  $script:InstallExitCode = 1
   Invoke-SmartBuild
+  exit $script:InstallExitCode
 } else {
   Invoke-StartApp
 }

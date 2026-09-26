@@ -76,7 +76,7 @@ def _open_camera(index: int) -> cv2.VideoCapture | None:
 def _make_tracker(width: int, height: int) -> object:
     if not (MODELS_DIR / "lm_model3_opt.onnx").is_file():
         raise FileNotFoundError(
-            f"Face models missing in {MODELS_DIR}. Run start.bat -> [1] Smart Build."
+            f"Face models missing in {MODELS_DIR}. Run install.bat at the repo root."
         )
     from tracker import Tracker  # noqa: E402
 

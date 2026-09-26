@@ -39,6 +39,10 @@ def main() -> int:
             ROOT / "vendor/tools/openseeface/models/priorbox_640x640.json",
             "openseeface/priorbox_640x640.json",
         ),
+        (
+            ROOT / "models/trackers/animeseg_hair3.pt",
+            "trackers/animeseg_hair3.pt",
+        ),
     ]
 
     for src, dest in uploads:

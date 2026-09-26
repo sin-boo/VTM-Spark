@@ -51,7 +51,7 @@ function Get-VtmPythonMinor {
 function Get-VtmHostPythonCandidates {
   $local = [Environment]::GetFolderPath("LocalApplicationData")
   $pf = ${env:ProgramFiles}
-  $home = $env:USERPROFILE
+  $userHome = $env:USERPROFILE
   return @(
     (Join-Path $local "Programs\Python\Python313\python.exe"),
     (Join-Path $local "Programs\Python\Python312\python.exe"),
@@ -60,8 +60,8 @@ function Get-VtmHostPythonCandidates {
     (Join-Path $pf "Python312\python.exe"),
     (Join-Path $pf "Python311\python.exe"),
     (Join-Path $pf "Python310\python.exe"),
-    (Join-Path $home "miniconda3\python.exe"),
-    (Join-Path $home "anaconda3\python.exe")
+    (Join-Path $userHome "miniconda3\python.exe"),
+    (Join-Path $userHome "anaconda3\python.exe")
   )
 }
 

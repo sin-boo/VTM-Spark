@@ -73,6 +73,103 @@ def test_start_repairs_dead_venv_home() -> None:
     assert "Scripts\\pythonw.exe" not in body
 
 
+def _function_body(name: str) -> str:
+    text = _start_menu_text()
+    start = text.index(f"function {name}")
+    end = text.index("\nfunction ", start + 1)
+    return text[start:end]
+
+
+def test_install_bat_returns_to_caller_with_exit_code() -> None:
+    install = (_root() / "install.bat").read_text(encoding="utf-8")
+    assert "exit /b %EC%" in install
+    lines = [line.strip().lower() for line in install.splitlines()]
+    assert not any(line.endswith("exit %ec%") and "/b" not in line for line in lines)
+
+
+def test_install_exits_with_script_exit_code() -> None:
+    text = _start_menu_text()
+    tail = text[text.index('if ($Action -eq "install")') :]
+    assert "exit $script:InstallExitCode" in tail
+    body = _function_body("Invoke-SmartBuild")
+    assert "$script:InstallExitCode = 0" in body
+    assert "$script:InstallExitCode = 1" in body
+    assert "$script:InstallExitCode = 2" in body
+
+
+def test_install_summary_uses_step_results() -> None:
+    body = _function_body("Invoke-SmartBuild")
+    assert "[void](Invoke-EnsureModel)" not in body
+    assert "[void](Invoke-EnsureVtmNobleCam)" not in body
+    assert "$modelsOk" in body
+    assert "$vcamOk" in body
+    assert "$trackLabOk" in body
+    assert "Rebuild finished." not in body
+    ok = body.index('"Install finished." green')
+    assert body.rindex("if ($allOk)", 0, ok) < ok
+    assert "some steps need attention" in body
+    for label in ("App build", "Models", "Virtual camera", "Track Lab"):
+        assert f'Write-InstallStep "{label}"' in body
+
+
+def test_install_build_failure_has_hints() -> None:
+    body = _function_body("Invoke-SmartBuild")
+    assert "Rebuild failed" not in body
+    for hint in ("internet", "Node.js", "NVIDIA driver", "Antivirus", ".venv-build"):
+        assert hint in body
+    assert "Re-running install.bat is safe" in body
+
+
+def test_install_sets_up_track_lab_after_build() -> None:
+    body = _function_body("Invoke-SmartBuild")
+    assert body.index("$BuildScript") < body.index("Invoke-EnsureTrackLab")
+    lab = _function_body("Invoke-EnsureTrackLab")
+    assert "setup.ps1" in lab
+    assert "Invoke-ProcessWithHeartbeat" in lab
+    assert '"npm", "ci"' in lab
+    assert '"npm", "install"' in lab
+    assert "node_modules" in lab
+    assert "LASTEXITCODE" not in lab
+
+
+def test_model_step_keeps_python_stdout_out_of_return_value() -> None:
+    body = _function_body("Invoke-EnsureModel")
+    assert "& $VenvPy -m backend.model_download | Out-Host" in body
+    assert "& $VenvPy -m backend.model_download --checklist-only | Out-Host" in body
+    assert "Rebuild" not in body
+
+
+def test_track_lab_scripts_point_at_install_bat() -> None:
+    lab = _root() / "track_lab"
+    for name in ("setup.ps1", "start.ps1", "README.md"):
+        text = (lab / name).read_text(encoding="utf-8")
+        assert "Smart Build" not in text, name
+        assert "start.bat ->" not in text, name
+    assert "install.bat" in (lab / "setup.ps1").read_text(encoding="utf-8")
+    assert "install.bat" in (lab / "start.ps1").read_text(encoding="utf-8")
+
+
+def test_edited_ps1_files_parse() -> None:
+    import subprocess
+
+    root = _root()
+    for rel in ("backend/packaging/start-menu.ps1", "track_lab/setup.ps1", "track_lab/start.ps1"):
+        script = (root / rel).as_posix()
+        cmd = (
+            "$err = $null; "
+            "[void][System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{script}', [ref]$null, [ref]$err); "
+            "if ($err) { $err | ForEach-Object { $_.ToString() }; exit 1 }"
+        )
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.returncode == 0, rel + ": " + out.stdout + out.stderr
+
+
 def test_start_split_into_install_and_run() -> None:
     root = _root()
     pack = root / "backend" / "packaging"
