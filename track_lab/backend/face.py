@@ -35,13 +35,17 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> N
         pass
 
 
+def _same_index(cam: dict[str, object], index: int) -> bool:
+    try:
+        return int(cam["index"]) == int(index)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _camera_name(cameras: list[dict[str, object]], index: int) -> str:
     for cam in cameras:
-        try:
-            if int(cam["index"]) == int(index):
-                return str(cam.get("name") or "").strip()
-        except (KeyError, TypeError, ValueError):
-            continue
+        if _same_index(cam, index):
+            return str(cam.get("name") or "").strip()
     return ""
 from .calibrate import calibrator
 from .feel import feel
@@ -197,7 +201,7 @@ class FaceBench:
         self._head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
         self._blink = {"l": 0.0, "r": 0.0}
         self.camera_bgr: bytes | None = None
-        self._cameras: list[dict[str, object]] = []
+        self._cameras: list[dict[str, object]] | None = None
         self.camera_index = 0
         self._saved_camera, self._saved_camera_name = load_camera_choice()
         if self._saved_camera is not None:
@@ -214,20 +218,31 @@ class FaceBench:
         feel.update(lab_feel_caps(travel.payload()))
         self._ensure_source()
 
+    def _refresh_cameras(self) -> None:
+        """Re-list devices and re-find the chosen camera by name."""
+        try:
+            self._cameras = list_cameras()
+        except Exception:
+            self._cameras = []
+        self.camera_index = pick_default(
+            self._cameras,
+            self._saved_camera,
+            saved_name=self._saved_camera_name,
+        )
+
+    def refresh_cameras(self) -> dict[str, object]:
+        if not self._osf.running:
+            self._refresh_cameras()
+        return self.status(publish=True)
+
     def _camera_fields(self) -> dict[str, object]:
-        if not self._cameras:
-            try:
-                self._cameras = list_cameras()
-            except Exception:
-                self._cameras = []
-            self.camera_index = pick_default(
-                self._cameras,
-                self._saved_camera,
-                saved_name=self._saved_camera_name,
-            )
+        # None = never listed. An empty list is cached too, so a machine with
+        # no camera does not re-probe on every status.
+        if self._cameras is None:
+            self._refresh_cameras()
         return {
             "camera_index": int(self.camera_index),
-            "cameras": self._cameras,
+            "cameras": self._cameras or [],
         }
 
     def _live_source(self) -> str:
@@ -643,6 +658,10 @@ class FaceBench:
         self._expr.reset()
         if camera is not None:
             self.set_camera(int(camera))
+            if self.last_error:
+                return self.status(publish=True)
+        # Indices shift when a device comes or goes; re-find the pick by name.
+        self._refresh_cameras()
         try:
             self._osf.start(self._on_osf, index=int(self.camera_index))
         except Exception as exc:
@@ -656,14 +675,16 @@ class FaceBench:
         if self._osf.running:
             self.last_error = "Stop OSF before changing cameras"
             return self.status(publish=True)
+        if self._cameras is None:
+            self._refresh_cameras()
+        cameras = self._cameras or []
+        # An empty list means enumeration failed; let OpenCV try the index.
+        if cameras and not any(_same_index(cam, index) for cam in cameras):
+            self.last_error = f"No camera at index {int(index)}"
+            return self.status(publish=True)
         self.camera_index = int(index)
         self._saved_camera = self.camera_index
-        name = _camera_name(self._cameras, self.camera_index)
-        if not name:
-            try:
-                name = _camera_name(list_cameras(), self.camera_index)
-            except Exception:
-                name = ""
+        name = _camera_name(cameras, self.camera_index)
         self._saved_camera_name = name
         save_camera_index(self.camera_index, name)
         self.last_error = ""

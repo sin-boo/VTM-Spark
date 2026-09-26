@@ -184,6 +184,11 @@ async def camera(request: Request) -> dict:
     return await asyncio.to_thread(_command, "set_camera", {"index": int(body.get("index", 0))})
 
 
+@app.post("/api/cameras/refresh")
+async def refresh_cameras() -> dict:
+    return await asyncio.to_thread(_command, "refresh_cameras")
+
+
 @app.post("/api/feel")
 async def set_feel(request: Request) -> dict:
     body = await request.json()

@@ -302,7 +302,7 @@ export default function App() {
                 weights: next.weights,
                 head: next.head,
                 blink: next.blink,
-                camera_index: next.camera_index,
+                camera_index: next.camera_index ?? s.camera_index,
                 source: next.source ?? s.source,
                 ifm: next.ifm
                   ? {
@@ -1613,6 +1613,9 @@ export default function App() {
         onIfmPort={setIfmPort}
         onSaveIfm={saveIfm}
         onSetCamera={(index) => void setCamera(index)}
+        onRefreshCameras={() => {
+          void api.refreshCameras().then((next) => apply(next, undefined, false, true)).catch((e) => setError(String(e)))
+        }}
       />
 
       <footer className="bar">
@@ -1652,14 +1655,14 @@ export default function App() {
             {busy === 'osf'
               ? source === 'ifm'
                 ? 'Listen…'
-                : 'Stake…'
+                : 'Track…'
               : live
                 ? source === 'ifm'
                   ? 'Stop'
-                  : 'Stop Stake'
+                  : 'Stop Track'
                 : source === 'ifm'
                   ? 'Listen'
-                  : 'Stake'}
+                  : 'Track'}
           </button>
           {sourceMenu ? (
             <div

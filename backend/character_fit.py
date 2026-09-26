@@ -1,4 +1,9 @@
-"""Still-space hair, skeleton, and limiter boxes for the create fit step."""
+"""Still-space hair, skeleton, and limiter boxes for the create fit step.
+
+The fit (hair mask, skeleton, limiters) lives in the character's ``.vtm`` as
+``fit.json``. Older installs kept it beside the preview still; that sidecar is
+still read and folds into the pack on the next save.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,14 @@ from typing import Any
 
 import numpy as np
 
-from .character_pack import CharacterPackError, character_still_path
+from .character_pack import (
+    CharacterPackError,
+    character_still_path,
+    read_pack_fit,
+    replace_pack_members,
+    resolve_character_id,
+    write_pack_fit,
+)
 from .pose_controller import face_height
 from .travel_box import (
     body_mesh_rect_norm,
@@ -31,10 +43,18 @@ FIT_NAME = "fit.json"
 
 
 def character_fit_path(ident: str, *, dest_dir: Path | None = None) -> Path:
+    """Legacy sidecar beside the preview still."""
     return character_still_path(ident, dest_dir=dest_dir).with_name(FIT_NAME)
 
 
-def read_character_fit(ident: str, *, dest_dir: Path | None = None) -> dict[str, Any]:
+def _pack_path(ident: str, dest_dir: Path | None) -> Path | None:
+    try:
+        return resolve_character_id(ident, dest_dir=dest_dir)
+    except CharacterPackError:
+        return None
+
+
+def _read_sidecar(ident: str, dest_dir: Path | None) -> dict[str, Any]:
     path = character_fit_path(ident, dest_dir=dest_dir)
     if not path.is_file():
         return {}
@@ -45,11 +65,28 @@ def read_character_fit(ident: str, *, dest_dir: Path | None = None) -> dict[str,
     return data if isinstance(data, dict) else {}
 
 
+def read_character_fit(ident: str, *, dest_dir: Path | None = None) -> dict[str, Any]:
+    data = _read_sidecar(ident, dest_dir)
+    pack = _pack_path(ident, dest_dir)
+    if pack is not None:
+        try:
+            data.update(read_pack_fit(pack))
+        except CharacterPackError:
+            pass
+    return data
+
+
 def write_character_fit(ident: str, data: dict[str, Any], *, dest_dir: Path | None = None) -> Path:
-    path = character_fit_path(ident, dest_dir=dest_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return path
+    pack = _pack_path(ident, dest_dir)
+    sidecar = character_fit_path(ident, dest_dir=dest_dir)
+    if pack is not None:
+        write_pack_fit(pack, data)
+        if sidecar.is_file():
+            sidecar.unlink()
+        return pack
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return sidecar
 
 
 def update_character_fit(ident: str, patch: dict[str, Any], *, dest_dir: Path | None = None) -> Path:
@@ -185,24 +222,12 @@ def build_fit_view(
 def replace_pack_keypoints(path: Path, keypoints: np.ndarray) -> None:
     """Swap ``keypoints.npy`` inside a ``.vtm`` without touching the latents."""
     import io
-    import zipfile
 
-    from .character_pack import KEYPOINTS_NAME, _read_zip
+    from .character_pack import KEYPOINTS_NAME
 
     kps = np.asarray(keypoints, dtype=np.float32)
     if kps.shape != (37, 4):
         raise CharacterPackError(f"Expected keypoints (37, 4), got {kps.shape}")
     buf = io.BytesIO()
     np.save(buf, kps)
-    raw = buf.getvalue()
-    zf = _read_zip(path)
-    try:
-        others = [(name, zf.read(name)) for name in zf.namelist() if name != KEYPOINTS_NAME]
-    finally:
-        zf.close()
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as dest:
-        for name, data in others:
-            dest.writestr(name, data)
-        dest.writestr(KEYPOINTS_NAME, raw)
-    path.write_bytes(out.getvalue())
+    replace_pack_members(path, {KEYPOINTS_NAME: buf.getvalue()})

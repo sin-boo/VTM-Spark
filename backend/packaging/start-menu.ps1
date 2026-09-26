@@ -343,9 +343,9 @@ function Invoke-SmartBuild {
     # Later builds: -SkipDeps, and build.ps1 still installs if imports/CUDA
     # (or new requirements like pyvirtualcam) are incomplete.
     if ($state.HasVenv) {
-      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps -SkipPackage
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipDeps
     } else {
-      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript -SkipPackage
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildScript
     }
     $code = [int]$LASTEXITCODE
   } catch {

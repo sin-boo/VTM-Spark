@@ -207,6 +207,9 @@ def test_kill_orphan_webview2_kills_matching_pid(monkeypatch) -> None:
             }
             self.killed = False
 
+        def cmdline(self) -> list[str]:
+            return self.info["cmdline"]
+
         def kill(self) -> None:
             self.killed = True
 

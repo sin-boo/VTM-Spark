@@ -36,8 +36,6 @@ if str(_ROOT) not in sys.path:
 
 
 def _log_path() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "vtm_noble.log"
     return _ROOT / "models" / "vtm_noble.log"
 
 
@@ -93,6 +91,22 @@ def _can_bind(host: str, port: int) -> bool:
             pass
 
 
+def _port_free(host: str, port: int) -> bool:
+    """Exclusive bind test — no SO_REUSEADDR, which on Windows binds over a live listener."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        bind_host = "127.0.0.1" if host in {"localhost", "0.0.0.0", "::", "::1"} else host
+        s.bind((bind_host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
 def _pick_port(host: str, preferred: int, *, span: int = 1) -> int | None:
     """Pick preferred port, optionally trying preferred+1… within span.
 
@@ -114,6 +128,9 @@ def _blocked_by_existing(host: str, port: int) -> str | None:
     """Why this port cannot be claimed. None = free enough to try a bind."""
     from backend.single_instance import health_url, probe_existing_api
 
+    if _port_free(host, port):
+        # Nothing listening. Skips a refused HTTP probe (~0.7s on Windows).
+        return None
     if probe_existing_api(host, port):
         url = health_url(host, port).rsplit("/api/", 1)[0]
         return (
@@ -270,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     from backend.desk_splash import ensure_stdio
 
     ensure_stdio()
-    _file_log(f"starting ui={args.ui} frozen={getattr(sys, 'frozen', False)}")
+    _file_log(f"starting ui={args.ui}")
 
     # Cap CPU thread oversubscription before torch/onnx import (helps RAM/CPU thrash).
     for key, val in (
@@ -320,11 +337,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.ui == "none":
         blocked = _claim_desk()
         if blocked:
-            if getattr(sys, "frozen", False):
-                try:
-                    input("Already running. Press Enter to close…")
-                except Exception:
-                    pass
             return 2
         server = threading.Thread(
             target=_run_uvicorn,
@@ -346,8 +358,6 @@ def main(argv: list[str] | None = None) -> int:
 
         server.start()
         if _wait_api_none() is None:
-            if getattr(sys, "frozen", False):
-                input("Press Enter to close…")
             _shutdown_all(exit_code=1)
             return 1
         _file_log("API-only mode. Press Ctrl+C to stop.")
@@ -384,34 +394,10 @@ def main(argv: list[str] | None = None) -> int:
     blocked = _claim_desk()
     if blocked:
         _file_log(blocked)
-        if getattr(sys, "frozen", False):
-            try:
-                input("Already running. Press Enter to close…")
-            except Exception:
-                pass
         return 2
 
-    try:
-        from backend.paths import ensure_import_paths
-
-        _file_log("preloading FastAPI/torch before webview")
-        ensure_import_paths()
-        import uvicorn  # noqa: F401
-        from backend.api import configure_runtime, mount_frontend
-
-        configure_runtime()
-        if mount_ui:
-            mount_frontend()
-        _file_log("preload ready")
-    except Exception:
-        _file_log("preload failed:\n" + traceback.format_exc())
-        if getattr(sys, "frozen", False):
-            try:
-                input("Failed to load the desk. Press Enter to close…")
-            except Exception:
-                pass
-        return 1
-
+    # torch / FastAPI import on the uvicorn thread after the splash is up;
+    # an import failure lands on the splash as "Desk API failed to start".
     try:
         from backend.desk_splash import (
             WindowBridge,
@@ -546,9 +532,4 @@ if __name__ == "__main__":
     except Exception:
         _file_log("fatal:\n" + traceback.format_exc())
         _shutdown_all(exit_code=1)
-        if getattr(sys, "frozen", False):
-            try:
-                input("Press Enter to close…")
-            except Exception:
-                time.sleep(10)
         raise

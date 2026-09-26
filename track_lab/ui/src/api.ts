@@ -192,7 +192,8 @@ export type LiveStatus = {
   weights: MixWeights
   head: { pitch: number; yaw: number; roll: number }
   blink: { l: number; r: number }
-  camera_index: number
+  // Frame packets (/api/live once a frame exists) leave this out.
+  camera_index?: number
   source?: 'camera' | 'ifm'
   ifm?: IfmStatus
   calib?: CalibStatus
@@ -265,6 +266,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ index }),
     }).then(read),
+  refreshCameras: () => fetch('/api/cameras/refresh', { method: 'POST' }).then(read),
   live: () => fetch('/api/live').then(readLive),
   upload: (file: File) =>
     fetch('/api/source', {

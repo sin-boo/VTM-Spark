@@ -1,7 +1,9 @@
 """Portable VTM character packs (``.vtm`` = zip, no compile artifacts).
 
 A pack is the cooked identity another NVIDIA box can load without VAE-encoding
-the still again: preview PNG + float16 latents + KEYPOINT_SCHEMA rest pose.
+the still again: preview PNG + float16 latents + KEYPOINT_SCHEMA rest pose,
+plus ``fit.json`` (painted hair mask, fitted skeleton, and the character's own
+limiters / travel box).
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import io
 import json
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -26,6 +28,7 @@ MANIFEST_NAME = "manifest.json"
 PREVIEW_NAME = "preview.png"
 LATENTS_NAME = "latents.npz"
 KEYPOINTS_NAME = "keypoints.npy"
+FIT_NAME = "fit.json"
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -45,6 +48,7 @@ class CharacterPack:
     skip_crop: bool
     source_name: str
     has_face_latent: bool
+    fit: dict[str, Any] = field(default_factory=dict)
 
     def manifest(self) -> dict[str, Any]:
         return {
@@ -112,6 +116,7 @@ def write_character_pack(
     image_size: int,
     skip_crop: bool,
     source_name: str = "",
+    fit: dict[str, Any] | None = None,
 ) -> Path:
     """Write a validated ``.vtm`` zip. Overwrites ``dest``."""
     kps = np.asarray(keypoints, dtype=np.float32)
@@ -152,6 +157,8 @@ def write_character_pack(
         zf.writestr(PREVIEW_NAME, preview_buf.getvalue())
         zf.writestr(LATENTS_NAME, latents_buf.getvalue())
         zf.writestr(KEYPOINTS_NAME, kps_buf.getvalue())
+        if fit:
+            zf.writestr(FIT_NAME, json.dumps(fit, indent=2))
     path.write_bytes(buf.getvalue())
     still = character_still_path(path.stem, dest_dir=path.parent)
     still.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +196,46 @@ def _load_manifest(zf: zipfile.ZipFile) -> dict[str, Any]:
     if version != FORMAT_VERSION:
         raise CharacterPackError(f"Unsupported character pack version {version}")
     return raw
+
+
+def _read_fit(zf: zipfile.ZipFile) -> dict[str, Any]:
+    """Packs written before fit.json existed simply have none."""
+    try:
+        raw = json.loads(zf.read(FIT_NAME).decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def read_pack_fit(path: Path | str) -> dict[str, Any]:
+    zf = _read_zip(Path(path))
+    try:
+        _load_manifest(zf)
+        return _read_fit(zf)
+    finally:
+        zf.close()
+
+
+def replace_pack_members(path: Path | str, members: dict[str, bytes]) -> None:
+    """Swap whole entries inside a ``.vtm``; every other entry is kept as-is."""
+    file_path = Path(path)
+    zf = _read_zip(file_path)
+    try:
+        _load_manifest(zf)
+        others = [(name, zf.read(name)) for name in zf.namelist() if name not in members]
+    finally:
+        zf.close()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as dest:
+        for name, data in others:
+            dest.writestr(name, data)
+        for name, data in members.items():
+            dest.writestr(name, data)
+    file_path.write_bytes(buf.getvalue())
+
+
+def write_pack_fit(path: Path | str, fit: dict[str, Any]) -> None:
+    replace_pack_members(path, {FIT_NAME: json.dumps(fit, indent=2).encode("utf-8")})
 
 
 def read_character_preview_png(path: Path | str) -> bytes:
@@ -237,6 +284,7 @@ def read_character_pack(path: Path | str) -> CharacterPack:
             skip_crop=bool(raw.get("skip_crop")),
             source_name=str(raw.get("source_name") or ""),
             has_face_latent=face is not None,
+            fit=_read_fit(zf),
         )
     finally:
         zf.close()

@@ -29,7 +29,7 @@ Rebuild runs a **model checklist**. If DiT weights are still missing, Start will
 
 **Layout**
 
-- `backend/` — app (`python -m backend`) plus `backend/packaging/` (start menu + optional package)
+- `backend/` — app (`python -m backend`) plus `backend/packaging/` (install / start menu scripts)
 - `ui/` — Vite/React operator UI
 - `vendor/` — inference + LivePoser + OpenSeeFace + virtual cam
 - `models/` — DiT, trackers, download map, refs
@@ -37,15 +37,7 @@ Rebuild runs a **model checklist**. If DiT weights are still missing, Start will
 
 Regression tests (optional): `python -m pytest backend/tests`
 
-**Optional packaged exe** (not used by `run.exe`):
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File backend\packaging\build.ps1
-```
-
-That writes `dist/VTMNoble/` (thin launcher + CUDA `runtime/`). Day-to-day use is `run.exe`.
-
-Vendor code is committed under `vendor/`. Only pass `-SyncVendor` if you are developing inside the optional parent monorepo and need to refresh vendor copies.
+Vendor code is committed under `vendor/`. Only pass `-SyncVendor` to `backend\packaging\build.ps1` if you are developing inside the optional parent monorepo and need to refresh vendor copies.
 
 **License**
 

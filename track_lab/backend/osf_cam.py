@@ -553,7 +553,7 @@ class OsfCam:
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
         # A native read can outlive release. Forget the handle so the next
-        # Stake is not refused with "still stopping".
+        # Track is not refused with "still stopping".
         if self._grab_thread is grab:
             self._grab_thread = None
         if self._thread is thread:

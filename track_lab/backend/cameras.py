@@ -120,7 +120,8 @@ def pick_default(
         for cam in cameras:
             if str(cam.get("name") or "").strip().lower() == wanted:
                 return int(cam["index"])
-    if saved is not None:
+    # A named pick that is gone: its old index now belongs to another device.
+    elif saved is not None:
         for cam in cameras:
             if int(cam["index"]) == int(saved):
                 return int(saved)

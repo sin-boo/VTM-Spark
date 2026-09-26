@@ -36,6 +36,7 @@ export type SideProps = {
   onIfmPort: (value: string) => void
   onSaveIfm: () => void
   onSetCamera: (index: number) => void
+  onRefreshCameras: () => void
 }
 
 export function Side({
@@ -69,6 +70,7 @@ export function Side({
   onIfmPort,
   onSaveIfm,
   onSetCamera,
+  onRefreshCameras,
 }: SideProps) {
   return (
     <aside className="side">
@@ -109,6 +111,7 @@ export function Side({
           busy={busy}
           status={status}
           onSetCamera={onSetCamera}
+          onRefreshCameras={onRefreshCameras}
         />
       )}
       <TrackingSection
@@ -617,21 +620,30 @@ function CameraSection({
   busy,
   status,
   onSetCamera,
-}: Pick<SideProps, 'live' | 'busy' | 'status' | 'onSetCamera'>) {
-  const cameras = status?.cameras?.length
-    ? status.cameras
-    : [{ index: status?.camera_index ?? 0, name: `Camera ${status?.camera_index ?? 0}` }]
+  onRefreshCameras,
+}: Pick<SideProps, 'live' | 'busy' | 'status' | 'onSetCamera' | 'onRefreshCameras'>) {
+  const index = status?.camera_index ?? 0
+  const listed = status?.cameras ?? []
+  const current = listed.find((cam) => cam.index === index)
+  // A value with no matching option makes the select show the first camera
+  // while another one is chosen, and picking that first one fires no change.
+  const cameras = current
+    ? listed
+    : [{ index, name: listed.length ? `Camera ${index} (not found)` : `Camera ${index}` }, ...listed]
+  const name = current?.name ?? cameras[0].name
   return (
     <>
       <p className="side-label mix">Camera</p>
       <select
         className="cam"
-        value={status?.camera_index ?? 0}
+        value={index}
+        title={live ? `${name} (stop tracking to change camera)` : name}
         disabled={live || busy !== ''}
+        onFocus={onRefreshCameras}
         onChange={(e) => onSetCamera(Number(e.target.value))}
       >
         {cameras.map((cam) => (
-          <option key={cam.index} value={cam.index}>
+          <option key={cam.index} value={cam.index} disabled={listed.length > 0 && !listed.includes(cam)}>
             {cam.name}
           </option>
         ))}

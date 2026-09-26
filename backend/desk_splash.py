@@ -26,8 +26,6 @@ def ensure_stdio() -> None:
                 from backend.paths import package_root
 
                 path = package_root() / "models" / "vtm_noble.log"
-                if getattr(sys, "frozen", False):
-                    path = Path(sys.executable).resolve().parent / "vtm_noble.log"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 log = path.open("a", encoding="utf-8")
             return log
@@ -1506,12 +1504,14 @@ def kill_orphan_webview2() -> list[int]:
     except ImportError:
         psutil = None
     if psutil is not None:
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        # Only read cmdline for WebView2 hosts — fetching it for every process
+        # cost ~4s before the splash could open.
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
                 name = str(proc.info.get("name") or "").lower()
                 if name not in {"msedgewebview2.exe", "msedgewebview2"}:
                     continue
-                cmd = " ".join(str(part) for part in (proc.info.get("cmdline") or []) if part)
+                cmd = " ".join(str(part) for part in (proc.cmdline() or []) if part)
                 if not _webview2_cmdline_is_ours(cmd, folders):
                     continue
                 pid = int(proc.info["pid"])

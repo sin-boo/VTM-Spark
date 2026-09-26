@@ -10,9 +10,7 @@ from pathlib import Path
 def package_root() -> Path:
     """Directory that contains `backend/`, `ui/`, `vendor/`, `models/`, and `characters/`.
 
-    - Dev / GitHub tree: VTM Noble /
-    - Packaged thin-launcher layout: dist/VTMNoble/
-    - Legacy PyInstaller onedir: exe folder or `_internal`
+    Defaults to the folder above `backend/`; `VTM_NOBLE_ROOT` overrides it.
     """
     env_root = (
         os.environ.get("VTM_NOBLE_ROOT", "").strip()
@@ -22,18 +20,6 @@ def package_root() -> Path:
         p = Path(env_root)
         if p.is_dir():
             return p.resolve()
-
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
-        for candidate in (exe_dir, exe_dir / "_internal", meipass):
-            if (
-                (candidate / "models").is_dir()
-                or (candidate / "ui" / "dist").is_dir()
-                or (candidate / "vendor" / "torch_train").is_dir()
-            ):
-                return candidate
-        return meipass
 
     # backend/paths.py -> backend/ -> install root
     return Path(__file__).resolve().parent.parent
@@ -251,14 +237,7 @@ def outputs_dir() -> Path:
 
 
 def ui_dist_dir() -> Path:
-    """Return packaged Vite output."""
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
-        for candidate in (exe_dir, exe_dir / "_internal", meipass, package_root()):
-            dist = candidate / "ui" / "dist"
-            if (dist / "index.html").is_file():
-                return dist
+    """Return the built Vite output."""
     return package_root() / "ui" / "dist"
 
 

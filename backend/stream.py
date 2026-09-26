@@ -805,6 +805,8 @@ class StreamRuntime:
 
     def _restore_character_fit(self) -> None:
         """A lab re-track re-detects hair and skeleton. Put the painted ones back."""
+        # Track Lab was offline when the character loaded; hand it the limiters now.
+        self._apply_character_limiters()
         try:
             changed = self._apply_character_fit()
         except Exception as exc:
@@ -1598,6 +1600,7 @@ class StreamRuntime:
                     image_size=int(exported["image_size"]),
                     skip_crop=bool(exported["skip_crop"]),
                     source_name=src.name,
+                    fit={"travel_box": normalize_travel_box(self._status.get("travel_box"))},
                 )
                 if getattr(self, "_lab_overlay_gen", None) is not None:
                     self._snapshot_character_shapes(dest.stem)
@@ -1692,6 +1695,7 @@ class StreamRuntime:
             )
             frame = self._install_loaded_reference(preview, np.asarray(kps))
             self._mark_current_character(path, pack.name)
+            self._apply_character_limiters()
             try:
                 self._sync_lab_character(replace=replace_lab)
             except Exception:
@@ -2184,6 +2188,7 @@ class StreamRuntime:
             from .ui_session import save_ui_session
 
             save_ui_session(travel_box=updates["travel_box"])
+            self._save_character_limiters(updates["travel_box"])
             # Clear the stopped-tracking preview first so a live emit shows the
             # camera pose at the new cap, not the slider's extreme.
             self._refresh_travel_preview(old_travel, updates["travel_box"])
@@ -2601,8 +2606,56 @@ class StreamRuntime:
             self._status["travel_box"] = incoming
             snap = dict(self._status)
         save_ui_session(travel_box=incoming)
+        if user_edit:
+            self._save_character_limiters(incoming)
         self._emit({"type": "status", "status": snap})
         return True
+
+    def _save_character_limiters(self, box: Any) -> None:
+        """Limiter edits belong to the loaded character's ``.vtm``."""
+        from .character_fit import update_character_fit
+
+        ident = str(self._status.get("character_id") or "")
+        if not ident:
+            return
+        try:
+            update_character_fit(ident, {"travel_box": normalize_travel_box(box)})
+        except Exception as exc:
+            print(f"Limiters did not save into the character: {exc}")
+
+    def _apply_character_limiters(self) -> None:
+        """Install the limiters saved in the loaded character's ``.vtm``.
+
+        Packs made before limiters were saved per character adopt the desk's
+        current box, so each character keeps its own from then on.
+        """
+        from .character_fit import read_character_fit
+
+        ident = str(self._status.get("character_id") or "")
+        if not ident:
+            return
+        try:
+            saved = read_character_fit(ident).get("travel_box")
+        except Exception as exc:
+            print(f"Character limiters unreadable: {exc}")
+            return
+        if not isinstance(saved, dict):
+            self._save_character_limiters(self._status.get("travel_box"))
+            return
+        from .ui_session import save_ui_session
+
+        box = normalize_travel_box(saved)
+        old = self._status.get("travel_box")
+        with self._lock:
+            self._status["travel_box"] = box
+            snap = dict(self._status)
+        save_ui_session(travel_box=box)
+        # The character owns the limiters; Track Lab's stale copy must not win.
+        self._travel_from_desk = True
+        if normalize_travel_box(old) != box:
+            self._emit({"type": "status", "status": snap})
+        if getattr(self, "_lab_seen_online", False):
+            self._push_lab_limiters(user_edit=True)
 
     def _lab_ack(self, op: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         from .lab_harness import lab as lab_harness

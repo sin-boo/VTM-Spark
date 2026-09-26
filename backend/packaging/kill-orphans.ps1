@@ -101,12 +101,6 @@ if (-not $Fast) {
     # Get-NetTCPConnection may be unavailable; ignore.
   }
 
-  # Stale PyInstaller from a crashed build
-  Get-Process -Name "pyinstaller" -ErrorAction SilentlyContinue | ForEach-Object {
-    if (-not $Quiet) { Write-Host "    killing pyinstaller pid=$($_.Id)" }
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-  }
-
   Start-Sleep -Milliseconds 500
 }
 

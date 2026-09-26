@@ -11,9 +11,6 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-# App launcher dropped next to install.bat / run.bat by Smart Build
-/VTMNoble.exe
-/VTMNoble.bat
 
 # Node
 ui/node_modules/
@@ -72,3 +69,6 @@ track_lab/models/*
 track_lab/output/
 track_lab/input/*
 !track_lab/input/.gitkeep
+
+# Large tracker weights (GitHub caps files at 100 MB)
+models/trackers/animeseg_hair3.pt

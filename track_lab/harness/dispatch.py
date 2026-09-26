@@ -59,6 +59,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.reset()
     if op == "set_camera":
         return bench.set_camera(int(body.get("index", 0)))
+    if op == "refresh_cameras":
+        return bench.refresh_cameras()
     if op == "set_input":
         return bench.set_source_mode(str(body.get("source", "camera")))
     if op == "set_ifm":

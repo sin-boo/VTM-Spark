@@ -386,11 +386,6 @@ export function ControlRail(props: Props) {
             ) : null}
           </section>
           <section className="group">
-            <div className="group-head">
-              <h2 className="group-title">Tracking</h2>
-              <Lamp on={tracking} label={tracking ? 'Tracking on' : 'Tracking off'} />
-            </div>
-
             <LabFeel
               lab={props.lab}
               busy={Boolean(s?.fast_warming) || Boolean(s?.track_busy)}

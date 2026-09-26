@@ -1,26 +1,17 @@
-﻿# Memory-safe VTM Noble packaging.
-# Does NOT freeze torch/transformers with PyInstaller (that can use tens of GB RAM).
-# Instead:
-#   1) ensure .venv-build has deps (CUDA torch cu128 last)
-#   2) copy that venv to dist/VTMNoble/runtime
-#   3) copy app code + lean vendor/
-#   4) build a TINY launcher exe (stdlib only) that runs: runtime\Scripts\python.exe -m backend
-# DiT weights download into models/dit on Smart Build / first launch (not frozen into the zip).
+﻿# VTM Noble setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
+# run.exe runs the desk from source with that venv.
+# DiT weights download into models/dit on Smart Build / first launch.
 param(
   [string]$BasePython = "",
   [switch]$RecreateVenv,
   [switch]$SkipDeps,
-  [switch]$ForceBundle,
-  [switch]$SkipLauncher,
   [switch]$SkipVendorSync,
-  [switch]$SyncVendor,
-  [switch]$SkipPackage
+  [switch]$SyncVendor
 )
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $Root
-$Out = Join-Path $Root "dist\VTMNoble"
 $VenvDir = Join-Path $Root ".venv-build"
 $Py = Join-Path $VenvDir "Scripts\python.exe"
 
@@ -53,8 +44,7 @@ function Get-UvExe {
 $script:UvExe = Get-UvExe
 Write-Host "==> Using uv: $($script:UvExe)"
 
-Write-Host "==> VTM Noble package (thin launcher + side-by-side runtime)"
-Write-Host "    NOTE: PyInstaller will NOT analyze torch. Peak RAM should stay normal."
+Write-Host "==> VTM Noble setup (UI + .venv-build)"
 
 Write-Host "==> Killing leftover VTM Noble / backend processes"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "kill-orphans.ps1")
@@ -328,11 +318,6 @@ if ($NeedDeps) {
     Install-CudaTorch
   }
 
-  Write-Host "==> Ensuring PyInstaller"
-  $code = Invoke-Pip -PipArgs @("install", "pyinstaller") `
-    -Activity "pyinstaller" -HeartbeatSeconds 10
-  if ($code -ne 0) { throw "PyInstaller install failed (exit $code)" }
-
   # Windows: official PyPI triton has no wheels; torch.compile needs triton-windows.
   # Pin to Triton's minor for the installed torch (2.11 -> 3.6.x).
   Write-Host "==> Ensuring triton-windows for torch.compile"
@@ -350,267 +335,5 @@ if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages
 if (-not (Test-CudaTorch)) { throw "Build venv must have torch+cu128" }
 Write-Host "    runtime imports OK (CUDA torch)"
 
-if ($SkipPackage) {
-  Write-Host ""
-  Write-Host "==> SkipPackage: deps and UI only (no VTMNoble.exe)"
-  Write-Host "    Use run.exe to run the operator desk from source."
-  exit 0
-}
-
-# --- Prepare dist folder (overwrite in place - no .old stashes) ------------
-function Clear-DistSoft {
-  param([string]$DistDir)
-  Write-Host "==> Preparing $DistDir (overwrite in place)"
-  Get-Process -Name "VTMNoble","RealStream","robocopy" -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
-  cmd /c "taskkill /F /IM VTMNoble.exe >nul 2>&1" | Out-Null
-  cmd /c "taskkill /F /IM RealStream.exe >nul 2>&1" | Out-Null
-  Start-Sleep -Seconds 1
-
-  $parent = Split-Path -Parent $DistDir
-  $leaf = Split-Path -Leaf $DistDir
-  if (Test-Path -LiteralPath $parent) {
-    Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -like "$leaf.old.*" } |
-      ForEach-Object {
-        Write-Host "    removing leftover $($_.Name)"
-        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-      }
-  }
-
-  if (-not (Test-Path -LiteralPath $DistDir)) {
-    New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-    return
-  }
-
-  if ($ForceBundle) {
-    Write-Host "    refreshing dist except models/ and characters/ (-ForceBundle)"
-    Get-ChildItem -LiteralPath $DistDir -Force -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -ne "models" -and $_.Name -ne "characters" } |
-      ForEach-Object {
-        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-      }
-    return
-  }
-
-  # Keep runtime/, models/, and characters/ (user DiT drops, VTM packs, session). Wipe the rest.
-  Get-ChildItem -LiteralPath $DistDir -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ne "runtime" -and $_.Name -ne "models" -and $_.Name -ne "characters" } |
-    ForEach-Object {
-      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }
-  Write-Host "    overwriting package (kept runtime/, models/, characters/ - use -ForceBundle to refresh runtime)"
-}
-
-Clear-DistSoft -DistDir $Out
-
-# Copy runtime venv
-$RuntimeDest = Join-Path $Out "runtime"
-$RuntimeMarker = Join-Path $RuntimeDest "Scripts\python.exe"
-$RuntimePy = Join-Path $RuntimeDest "Scripts\python.exe"
-if ((Test-Path $RuntimeMarker) -and -not $ForceBundle) {
-  Write-Host "==> runtime/ already present - skipping venv copy (use -ForceBundle to refresh)"
-  # Still sync new wheels (e.g. pyvirtualcam) into the packaged runtime when deps changed.
-  if ($DidInstallDeps -and (Test-Path -LiteralPath $RuntimePy)) {
-    Write-Host "==> Syncing requirements into existing dist runtime (new packages)"
-    $code = Invoke-Pip `
-      -PipArgs @("install", "-r", "$Root\requirements.txt") `
-      -PythonExe $RuntimePy `
-      -Activity "runtime requirements sync" `
-      -HeartbeatSeconds 12
-    if ($code -ne 0) {
-      Write-Host "    WARNING: runtime uv pip sync failed (exit $code) - use -ForceBundle to refresh runtime/"
-    } else {
-      Write-Host "    runtime packages updated"
-    }
-  }
-} else {
-  New-Item -ItemType Directory -Force -Path $RuntimeDest | Out-Null
-  Write-LongStepHint "Copy uses disk I/O (not tens of GB of RAM)."
-  $null = Invoke-RobocopyWithProgress `
-    -Source $VenvDir `
-    -Dest $RuntimeDest `
-    -Label "Copying Python runtime (venv -> dist/VTMNoble/runtime)" `
-    -ExtraArgs @("/E", "/J", "/MT:4", "/XD", "__pycache__", ".git", ".pytest_cache", "Tests", "tests", "test", "/XF", "*.pyc", "*.pyo")
-  if (-not (Test-Path $RuntimeMarker)) { throw "Failed to copy runtime python.exe" }
-}
-
-# App code
-Write-Host "==> Copying app code (backend, ui/dist, models placeholders)"
-$null = Invoke-RobocopyWithProgress `
-  -Source (Join-Path $Root "backend") `
-  -Dest (Join-Path $Out "backend") `
-  -Label "Copying backend/" `
-  -ExtraArgs @("/E", "/XD", "__pycache__", ".pytest_cache", "tests", "packaging", "/XF", "*.pyc")
-if (Test-Path (Join-Path $Root "ui\dist")) {
-  New-Item -ItemType Directory -Force -Path (Join-Path $Out "ui\dist") | Out-Null
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "ui\dist") `
-    -Dest (Join-Path $Out "ui\dist") `
-    -Label "Copying ui/dist/" `
-    -ExtraArgs @("/E")
-}
-
-# Sync models without deleting custom DiT / refs the user dropped in.
-Write-Host "==> Syncing models/ (keep existing checkpoints; do not purge)"
-New-Item -ItemType Directory -Force -Path (Join-Path $Out "models\dit") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $Out "models\trackers") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $Out "models\refs") | Out-Null
-if (Test-Path (Join-Path $Root "models\trackers")) {
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "models\trackers") `
-    -Dest (Join-Path $Out "models\trackers") `
-    -Label "Syncing models/trackers/" `
-    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
-}
-if (Test-Path (Join-Path $Root "models\dit")) {
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "models\dit") `
-    -Dest (Join-Path $Out "models\dit") `
-    -Label "Syncing models/dit/ (no deletes)" `
-    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
-}
-if (Test-Path (Join-Path $Root "models\refs")) {
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "models\refs") `
-    -Dest (Join-Path $Out "models\refs") `
-    -Label "Syncing models/refs/" `
-    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
-}
-New-Item -ItemType Directory -Force -Path (Join-Path $Out "characters") | Out-Null
-if (Test-Path (Join-Path $Root "characters")) {
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "characters") `
-    -Dest (Join-Path $Out "characters") `
-    -Label "Syncing characters/" `
-    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
-}
-$sourcesJson = Join-Path $Root "models\model_sources.json"
-if (Test-Path -LiteralPath $sourcesJson) {
-  Copy-Item -Force $sourcesJson (Join-Path $Out "models\model_sources.json")
-}
-
-# Ping Hub for *new* DiT files only; never overwrite or delete local weights.
-Write-Host "==> Checking Hugging Face for new DiT checkpoints (skip files already present)"
-Write-LongStepHint "Only missing Hub files download. Custom local .pt files are left alone."
-$prevPyPath = $env:PYTHONPATH
-$env:PYTHONPATH = $Root
-try {
-  & $Py -m backend.model_download
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Hub sync failed - existing local models are unchanged." -ForegroundColor Yellow
-  }
-} finally {
-  if ($null -eq $prevPyPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
-  else { $env:PYTHONPATH = $prevPyPath }
-}
-# Copy any newly downloaded repo dit files into the package (still no deletes).
-if (Test-Path (Join-Path $Root "models\dit")) {
-  $null = Invoke-RobocopyWithProgress `
-    -Source (Join-Path $Root "models\dit") `
-    -Dest (Join-Path $Out "models\dit") `
-    -Label "Syncing new DiT files into package" `
-    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
-}
-
-# Lean vendor only (never monorepo tools/ datasets)
-$null = Invoke-RobocopyWithProgress `
-  -Source (Join-Path $Root "vendor") `
-  -Dest (Join-Path $Out "vendor") `
-  -Label "Copying vendor/ (lean)" `
-  -ExtraArgs @("/E", "/MT:4", "/XD", "__pycache__", ".git", ".pytest_cache", "tests", "Tests", "training", "datasets", "data", "input", "/XF", "*.pyc")
-
-# Tiny launcher exe — also dropped next to run.exe for one-click run.
-# Always rebuild unless -SkipLauncher: Explorer "Date modified" on root VTMNoble.exe
-# must reflect this Smart Build (skipping left a stale  stamp while dist/ refreshed).
-$LauncherExe = Join-Path $Out "VTMNoble.exe"
-$RootExe = Join-Path $Root "VTMNoble.exe"
-if ($SkipLauncher) {
-  Write-Host "==> Launcher skip requested (-SkipLauncher)"
-  if (-not (Test-Path -LiteralPath $RootExe)) {
-    throw "No VTMNoble.exe at repo root to reuse. Re-run without -SkipLauncher."
-  }
-  Copy-Item -Force $RootExe $LauncherExe
-  $now = Get-Date
-  (Get-Item -LiteralPath $RootExe).LastWriteTime = $now
-  (Get-Item -LiteralPath $LauncherExe).LastWriteTime = $now
-  Write-Host "    stamped Date modified -> $now"
-} else {
-  Write-Host "==> Building tiny launcher exe (stdlib only - low memory)"
-  $null = Invoke-Pip -PipArgs @("install", "pyinstaller") `
-    -Activity "pyinstaller" -HeartbeatSeconds 10
-  $LaunchWork = Join-Path $Root "build\launcher"
-  New-Item -ItemType Directory -Force -Path $LaunchWork | Out-Null
-  Write-LongStepHint "PyInstaller is packing the tiny launcher - usually under a minute..."
-  $code = Invoke-ProcessWithHeartbeat `
-    -FilePath $Py `
-    -ArgumentList @(
-      "-m", "PyInstaller", "--noconfirm", "--clean",
-      "--distpath", (Join-Path $Root "build\launcher_dist"),
-      "--workpath", $LaunchWork,
-      (Join-Path $PSScriptRoot "launcher.spec")
-    ) `
-    -Activity "PyInstaller launcher" `
-    -HeartbeatSeconds 10
-  if ($code -ne 0) { throw "Launcher PyInstaller failed" }
-  $built = Join-Path $Root "build\launcher_dist\VTMNoble.exe"
-  if (-not (Test-Path $built)) { throw "Launcher exe not produced" }
-  Copy-Item -Force $built $LauncherExe
-  Copy-Item -Force $built $RootExe
-  Write-Host "    wrote $RootExe"
-}
-
-$Bat = @"
-@echo off
-cd /d "%~dp0"
-"%~dp0runtime\Scripts\python.exe" -m backend %*
-"@
-Set-Content -Path (Join-Path $Out "VTMNoble.bat") -Value $Bat -Encoding ASCII
-
-# Register VTM Noble Cam DirectShow filter (bundled Unity Capture, custom name).
-$VcamInstall = Join-Path $Root "vendor\tools\vtm_noble_cam\Install-VTMNobleCam.bat"
-if (Test-Path -LiteralPath $VcamInstall) {
-  Write-Host "==> Ensuring virtual camera device: VTM Noble Cam"
-  Write-LongStepHint "Approve UAC once if Windows asks (DirectShow registration)."
-  $prevPyPath = $env:PYTHONPATH
-  $env:PYTHONPATH = $Root
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  $vcamReady = $false
-  try {
-    & $Py -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
-    $vcamReady = ($LASTEXITCODE -eq 0)
-  } catch {
-    $vcamReady = $false
-  }
-  if (-not $vcamReady) {
-    try {
-      Start-Process -FilePath $VcamInstall -WorkingDirectory (Split-Path $VcamInstall -Parent) -Wait -Verb RunAs
-      Start-Sleep -Milliseconds 800
-      & $Py -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)"
-      $vcamReady = ($LASTEXITCODE -eq 0)
-    } catch {
-      Write-Host "    WARNING: VTM Noble Cam install skipped ($_)" -ForegroundColor Yellow
-    }
-  }
-  $ErrorActionPreference = $prev
-  if ($null -eq $prevPyPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
-  else { $env:PYTHONPATH = $prevPyPath }
-  if ($vcamReady) {
-    Write-Host "    VTM Noble Cam ready"
-  } else {
-    Write-Host "    WARNING: VTM Noble Cam not registered yet - app will prompt on first use" -ForegroundColor Yellow
-  }
-} else {
-  Write-Host "==> WARNING: vendor\tools\vtm_noble_cam missing - virtual camera unavailable" -ForegroundColor Yellow
-}
-
 Write-Host ""
-Write-Host "==> Done"
-Write-Host "    Click to run:  $RootExe"
-Write-Host "    (same folder as run.exe — you do not need to open dist\ )"
-Write-Host "    Package data:  $Out"
-Write-Host "    Fallback:      $Out\VTMNoble.bat"
-Write-Host "DiT models: Hub ping for new files only; local models/dit is never purged"
-Write-Host "Virtual cam: VTM Noble Cam (OBS Video Capture Device)"
-Write-Host "Supported GPUs: GeForce RTX 30 / 40 / 50 (CUDA). No AMD."
+Write-Host "==> Done - use run.exe to open the operator desk."

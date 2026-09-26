@@ -76,3 +76,86 @@ def test_replace_pack_keypoints_swaps_npy(tmp_path: Path) -> None:
     pack = read_character_pack(dest)
     np.testing.assert_allclose(pack.keypoints[31, :2], (0.42, -0.17), atol=1e-5)
     assert pack.keypoints.shape == (37, 4)
+
+
+def test_fit_lives_inside_the_pack_and_absorbs_the_sidecar(tmp_path: Path) -> None:
+    from backend.character_fit import character_fit_path, write_character_fit
+    from backend.character_pack import read_pack_fit
+
+    dest = tmp_path / "hero.vtm"
+    write_character_pack(dest, **_tiny_pack_payload())
+    legacy = character_fit_path("hero", dest_dir=tmp_path)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text('{"hair": [{"class": "hair_left", "polygon": [[0, 0], [1, 0], [0, 1]]}]}', encoding="utf-8")
+
+    assert read_character_fit("hero", dest_dir=tmp_path)["hair"][0]["class"] == "hair_left"
+    box = {**default_travel_box(), "left": 0.3}
+    update_character_fit("hero", {"travel_box": box}, dest_dir=tmp_path)
+
+    assert not legacy.exists()
+    inside = read_pack_fit(dest)
+    assert inside["hair"][0]["class"] == "hair_left"
+    assert inside["travel_box"]["left"] == 0.3
+    write_character_fit("hero", inside, dest_dir=tmp_path)
+    assert read_character_pack(dest).fit["travel_box"]["left"] == 0.3
+
+
+def test_pack_fit_survives_keypoint_swap(tmp_path: Path) -> None:
+    dest = tmp_path / "fit.vtm"
+    box = {**default_travel_box(), "up": 0.9}
+    write_character_pack(dest, **_tiny_pack_payload(), fit={"travel_box": box})
+    replace_pack_keypoints(dest, neutral_keypoints())
+    assert read_character_pack(dest).fit["travel_box"]["up"] == 0.9
+
+
+def _limiter_runtime(ident: str):
+    from backend.stream import StreamRuntime
+
+    rt = StreamRuntime.__new__(StreamRuntime)
+    import threading
+
+    rt._lock = threading.Lock()
+    rt._status = {"character_id": ident, "travel_box": default_travel_box()}
+    rt._emitted = []
+    rt._emit = rt._emitted.append
+    rt._lab_seen_online = False
+    rt._travel_from_desk = False
+    return rt
+
+
+def test_each_character_loads_its_own_limiters(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    monkeypatch.setattr("backend.character_pack.characters_dir", lambda: tmp_path)
+    monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **kwargs: None)
+    write_character_pack(
+        tmp_path / "a.vtm", **_tiny_pack_payload(), fit={"travel_box": {**default_travel_box(), "left": 0.2}}
+    )
+    write_character_pack(
+        tmp_path / "b.vtm", **_tiny_pack_payload(), fit={"travel_box": {**default_travel_box(), "left": 0.9}}
+    )
+
+    rt = _limiter_runtime("a")
+    StreamRuntime._apply_character_limiters(rt)
+    assert rt._status["travel_box"]["left"] == 0.2
+    assert rt._travel_from_desk is True
+
+    rt._status["character_id"] = "b"
+    StreamRuntime._apply_character_limiters(rt)
+    assert rt._status["travel_box"]["left"] == 0.9
+
+    StreamRuntime._save_character_limiters(rt, {**rt._status["travel_box"], "left": 0.5})
+    assert read_character_pack(tmp_path / "b.vtm").fit["travel_box"]["left"] == 0.5
+    assert read_character_pack(tmp_path / "a.vtm").fit["travel_box"]["left"] == 0.2
+
+
+def test_old_pack_adopts_current_limiters(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    monkeypatch.setattr("backend.character_pack.characters_dir", lambda: tmp_path)
+    monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **kwargs: None)
+    write_character_pack(tmp_path / "old.vtm", **_tiny_pack_payload())
+    rt = _limiter_runtime("old")
+    rt._status["travel_box"] = {**default_travel_box(), "down": 0.4}
+    StreamRuntime._apply_character_limiters(rt)
+    assert read_character_pack(tmp_path / "old.vtm").fit["travel_box"]["down"] == 0.4

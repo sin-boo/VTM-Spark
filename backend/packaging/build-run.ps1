@@ -1,4 +1,5 @@
 # Bake splash-mark.png onto run.exe with a transparent ICO. A .bat cannot carry an Explorer icon.
+# winexe: no console window. The stub opens start-menu.ps1 in a console only when it must.
 $ErrorActionPreference = "Stop"
 $Pack = $PSScriptRoot
 $Root = (Resolve-Path (Join-Path $Pack "..\..")).Path
@@ -24,6 +25,6 @@ $Fav = Join-Path $Root "ui\public\favicon.ico"
 & $py -m backend.app_icon $Png $Fav
 if ($LASTEXITCODE -ne 0) { throw "failed to write $Fav" }
 
-& $Csc /nologo /optimize /target:exe /win32icon:"$Ico" /out:"$Out" "$Cs"
+& $Csc /nologo /optimize /target:winexe /win32icon:"$Ico" /out:"$Out" "$Cs"
 if ($LASTEXITCODE -ne 0) { throw "csc failed" }
 Write-Host "wrote $Out"
