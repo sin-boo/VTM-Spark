@@ -500,7 +500,11 @@ def test_ifm_look_up_nods_the_head_rig() -> None:
         feel.update(prev)
     assert out is not None
     rest_chin = abs(float(rest[2, 1] - rest[15, 1]))
-    assert abs(float(out[2, 1] - out[15, 1])) > rest_chin
+    chin = abs(float(out[2, 1] - out[15, 1]))
+    # A look-up foreshortens the drawing. The chin stays a chin.
+    assert chin < rest_chin
+    assert chin > 0.75 * rest_chin
+    assert float(out[5, 1]) < float(out[15, 1]) < float(out[2, 1])
 
 
 def test_mapped_blink_is_not_applied_twice() -> None:

@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "track_lab" / "input" / "source.png"
 PARTS = ROOT / "track_lab" / "output" / "overlay_parts.json"
-VTM = ROOT / "models" / "characters" / "ChatGPT-Image-Aug-3-2026-11_36_05-PM.vtm"
+VTM = ROOT / "characters" / "ChatGPT-Image-Aug-3-2026-11_36_05-PM.vtm"
 OUT = ROOT / "track_lab" / "output"
 
 COLORS = {

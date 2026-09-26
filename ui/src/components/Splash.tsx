@@ -68,18 +68,20 @@ export function Splash(props: Props) {
     >
       <div className="krita-splash-art" aria-hidden="true" />
       <aside className="krita-splash-panel">
-        <header className="krita-splash-brand">
-          <img className="krita-splash-mark" src="/splash-mark.png?alpha=1" width={72} height={72} alt="" />
-          <p className="krita-splash-kicker">VTM</p>
-          <h1>Noble</h1>
-          <p className="krita-splash-ver">{APP_VERSION}</p>
-        </header>
-        <div className="krita-splash-status">
-          <p className="krita-splash-line">{bar.label}</p>
-          <div className="krita-splash-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
-            <b style={{ width: `${pct.toFixed(1)}%` }}><i /></b>
+        <div className="krita-splash-plate">
+          <header className="krita-splash-brand">
+            <img className="krita-splash-mark" src="/splash-mark.png?alpha=1" width={72} height={72} alt="" />
+            <p className="krita-splash-kicker">VTM</p>
+            <h1>Noble</h1>
+            <p className="krita-splash-ver">{APP_VERSION}</p>
+          </header>
+          <div className="krita-splash-status">
+            <p className="krita-splash-line">{bar.label}</p>
+            <div className="krita-splash-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
+              <b style={{ width: `${pct.toFixed(1)}%` }}><i /></b>
+            </div>
+            {notice ? <p className="status-error">{notice}</p> : null}
           </div>
-          {notice ? <p className="status-error">{notice}</p> : null}
         </div>
       </aside>
     </div>

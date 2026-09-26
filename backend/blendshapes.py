@@ -73,6 +73,89 @@ def fingerprint(shapes: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+# One stored step after normalize (xy to 0.001, score to 0.0001). Wider than that is a new plan.
+SHAPE_MATCH_XY = 0.001
+SHAPE_MATCH_SCORE = 0.0001
+
+
+def shapes_match(a: object, b: object) -> bool:
+    """True when two plans are the same after rounding, including one-step noise."""
+    left = normalize_shapes(a)
+    right = normalize_shapes(b)
+    if set(left) != set(right):
+        return False
+    for name, rows in left.items():
+        other = right[name]
+        if len(rows) != len(other):
+            return False
+        for p, q in zip(rows, other):
+            if abs(p[0] - q[0]) > SHAPE_MATCH_XY or abs(p[1] - q[1]) > SHAPE_MATCH_XY:
+                return False
+            if abs(p[2] - q[2]) > SHAPE_MATCH_SCORE:
+                return False
+    return True
+
+
+MOUTH_SLOTS = tuple(range(20, 28))
+_MOUTH_RIGHT = 23
+_MOUTH_LEFT = 26
+
+
+def _mouth_offsets(
+    shapes: dict[str, list[list[float]]],
+) -> tuple[dict[str, list[tuple[float, float]]], float] | None:
+    """Each shape's lips relative to rest, in rest's mouth frame, per mouth width."""
+    rest = shapes.get("rest")
+    if not rest:
+        return None
+    rx, ry = rest[_MOUTH_RIGHT][0], rest[_MOUTH_RIGHT][1]
+    ax, ay = rest[_MOUTH_LEFT][0] - rx, rest[_MOUTH_LEFT][1] - ry
+    width = (ax * ax + ay * ay) ** 0.5
+    if width < 1e-3:
+        return None
+    ax, ay = ax / width, ay / width
+    dx, dy = -ay, ax
+    if dy < 0.0:
+        dx, dy = -dx, -dy
+    out: dict[str, list[tuple[float, float]]] = {}
+    for name, rows in shapes.items():
+        if name == "rest":
+            continue
+        offs: list[tuple[float, float]] = []
+        for slot in MOUTH_SLOTS:
+            ox = rows[slot][0] - rest[slot][0]
+            oy = rows[slot][1] - rest[slot][1]
+            offs.append(((ox * ax + oy * ay) / width, (ox * dx + oy * dy) / width))
+        out[name] = offs
+    return out, width
+
+
+def plans_match(a: object, b: object) -> bool:
+    """Same authored visemes, wherever the lab's rest face currently sits.
+
+    Track Lab rebases every shape onto the rest of the still it has loaded, so
+    raw pixels move whenever a different character is tracked. The lip offsets
+    from rest, in the mouth's own frame and per mouth width, are what that
+    rebase keeps — compare those. Without a rest, fall back to raw pixels.
+    """
+    left = normalize_shapes(a)
+    right = normalize_shapes(b)
+    if set(left) != set(right):
+        return False
+    fa = _mouth_offsets(left)
+    fb = _mouth_offsets(right)
+    if fa is None or fb is None:
+        return shapes_match(left, right)
+    offs_a, width_a = fa
+    offs_b, width_b = fb
+    tol = 2.5 * SHAPE_MATCH_XY / min(width_a, width_b)
+    for name, rows in offs_a.items():
+        for p, q in zip(rows, offs_b[name]):
+            if abs(p[0] - q[0]) > tol or abs(p[1] - q[1]) > tol:
+                return False
+    return True
+
+
 def empty_plan(ident: str = CURRENT_ID) -> dict[str, Any]:
     return {
         "format": FORMAT_ID,
@@ -148,11 +231,18 @@ def shapes_from_lab(packet: dict[str, Any] | None) -> dict[str, list[list[float]
 
 
 def refresh_current_from_lab(packet: dict[str, Any] | None) -> dict[str, Any]:
-    """Copy authored lab shapes into ``current.json``. Never writes to the lab."""
+    """Copy authored lab shapes into ``current.json``. Never writes to the lab.
+
+    Rounding noise from the lab is not a new plan, so an unchanged authoring
+    pass does not rewrite the file or invalidate characters created from it.
+    """
     shapes = shapes_from_lab(packet)
-    if has_plan(shapes):
-        return save_current(shapes)
-    return load_current()
+    if not has_plan(shapes):
+        return load_current()
+    current = load_current()
+    if has_plan(current.get("shapes")) and shapes_match(current.get("shapes"), shapes):
+        return current
+    return save_current(shapes)
 
 
 def apply_current_to_character(ident: str) -> dict[str, Any]:
@@ -172,7 +262,9 @@ def compatibility(ident: str, current: dict[str, Any] | None = None) -> dict[str
     character_fp = fingerprint(char_shapes)
     has_current = bool(current_fp)
     has_character = bool(character_fp)
-    compatible = (not has_current) or (has_character and character_fp == current_fp)
+    compatible = (not has_current) or (
+        has_character and plans_match(cur_shapes, char_shapes)
+    )
     return {
         "compatible": compatible,
         "has_current_plan": has_current,

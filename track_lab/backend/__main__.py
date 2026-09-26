@@ -24,7 +24,8 @@ def _wait_free(seconds: float = 8.0) -> str:
     return state
 
 
-def main() -> int:
+def claim_port() -> int | None:
+    """Free 8780 for a new API. None = go ahead and bind; else the exit code."""
     print(f"[track-lab] probing {HOST}:{PORT}", flush=True)
     state = probe_state(HOST, PORT)
     print(
@@ -49,7 +50,13 @@ def main() -> int:
         print(f"[track-lab] {stale_message(PORT)} still bound", flush=True)
         _pause(stale_message(PORT))
         return 2
+    return None
 
+
+def main() -> int:
+    code = claim_port()
+    if code is not None:
+        return code
     print(
         f"[track-lab] binding http://{HOST}:{PORT}  harness=/harness  ws=/harness/ws",
         flush=True,

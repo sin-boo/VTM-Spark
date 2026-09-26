@@ -14,7 +14,7 @@ cd ui
 npm install
 ```
 
-`setup.ps1` copies OpenSeeFace Python + face models here. It does **not** create a second venv. `start.ps1` runs setup on its own if the face models are missing.
+`setup.ps1` copies OpenSeeFace Python here. Face weights stay in `vendor/tools/openseeface/models` and `models/trackers`. It does **not** create a second venv. `start.ps1` runs setup on its own if the OSF Python files are missing.
 
 ## Run
 
@@ -56,5 +56,4 @@ From this folder: `..\.venv-build\Scripts\python.exe -m pytest harness`
 - `backend/` — FastAPI + still-image tracker
 - `harness/` — tracking packets out, settings commands in
 - `osf/` — local OpenSeeFace Python (safe to edit)
-- `models/` — local face ONNX weights
 - `ui/` — React bench

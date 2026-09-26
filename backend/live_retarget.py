@@ -631,8 +631,11 @@ def extract_controls(
         return g * calibrated
 
     caps = motion or {}
-    yaw_lim = float(caps.get("yaw", HEAD_YAW_MAX_DEG))
-    roll_lim = float(caps.get("roll", HEAD_ROLL_MAX_DEG))
+    # Left / right are screen sides of the character; right is positive.
+    yaw_left = abs(float(caps.get("turn_left", HEAD_YAW_MAX_DEG)))
+    yaw_right = abs(float(caps.get("turn_right", HEAD_YAW_MAX_DEG)))
+    roll_left = abs(float(caps.get("tilt_left", HEAD_ROLL_MAX_DEG)))
+    roll_right = abs(float(caps.get("tilt_right", HEAD_ROLL_MAX_DEG)))
     pitch_up = float(caps.get("pitch_up", HEAD_PITCH_MAX_DEG))
     pitch_down = float(caps.get("pitch_down", HEAD_PITCH_MAX_DEG))
 
@@ -650,7 +653,8 @@ def extract_controls(
         roll = np.degrees(_wrap_pi(a_live - a_origin)) * g
     else:
         roll = 0.0
-    roll = _cap(roll, roll_lim, limit_face)
+    if limit_face:
+        roll = _clip(roll, -roll_left, roll_right)
 
     # --- Yaw / pitch: prefer calibrated RelativePose, else landmark geometry ---
     # Camera mesh shows raw landmark rotation even when CenterCalibration has
@@ -693,10 +697,11 @@ def extract_controls(
     # Even with optional tight limiters disabled, keep turns in the range the
     # 2D rig can represent cleanly. A physical 90° turn maps to a strong 45°
     # character turn instead of folding the mesh.
-    yaw = _cap(yaw, yaw_lim, limit_face)
+    if limit_face:
+        yaw = _clip(yaw, -yaw_left, yaw_right)
     if limit_face:
         pitch = _clip(pitch, -pitch_up, pitch_down)
-    yaw = _clip(yaw, -min(45.0, max(yaw_lim, 1e-6)), min(45.0, max(yaw_lim, 1e-6)))
+    yaw = _clip(yaw, -min(45.0, max(yaw_left, 1e-6)), min(45.0, max(yaw_right, 1e-6)))
     pitch = _clip(pitch, -min(30.0, max(pitch_up, 1e-6)), min(30.0, max(pitch_down, 1e-6)))
 
     # --- Forward/back as calibrated face-size scale ---

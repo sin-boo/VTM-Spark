@@ -1,8 +1,7 @@
 """Live hair-part tracker for Live Poser.
 
-Prefers the full-stack labeling model ``animeseg_hair3.pt`` (AnimeSeg
-Mask2Former, 4-class semantic: bg + hair_middle / hair_left / hair_right).
-Falls back to YOLO-seg ``hair_seg.pt`` if those weights cannot be loaded.
+Uses ``animeseg_hair3.pt`` (AnimeSeg Mask2Former, 4-class semantic:
+bg + hair_middle / hair_left / hair_right).
 """
 
 from __future__ import annotations
@@ -29,12 +28,7 @@ DEFAULT_HAIR3_CANDIDATES = [
     ROOT / "models" / "animeseg_hair3.pt",
     _POSE_TRACKER_HAIR / "animeseg_hair3.pt",
 ]
-DEFAULT_YOLO_HAIR_CANDIDATES = [
-    _PACKAGE_TRACKERS / "hair_seg.pt",
-    ROOT / "models" / "hair_seg.pt",
-    _POSE_TRACKER_HAIR / "hair_seg.pt",
-]
-DEFAULT_HAIR_CANDIDATES = DEFAULT_HAIR3_CANDIDATES + DEFAULT_YOLO_HAIR_CANDIDATES
+DEFAULT_HAIR_CANDIDATES = DEFAULT_HAIR3_CANDIDATES
 
 HAIR_CLASSES = ("hair_middle", "hair_left", "hair_right")
 HAIR_SWAP_LR = {"hair_left": "hair_right", "hair_right": "hair_left"}
@@ -44,12 +38,8 @@ HAIR_COLORS = {
     "hair_left": (255, 180, 0),
     "hair_right": (160, 80, 255),
 }
-HAIR_DETECT_CONF = 0.12
-HAIR_DETECT_IOU = 0.7
-HAIR_IMGSZ = 640
 HAIR3_IMGSZ = 768
 MIN_POLY_AREA = 60.0
-APPROX_EPS_RATIO = 0.006
 HAIR3_APPROX_EPS_RATIO = 0.0015
 FT_ID_TO_CLASS = {1: "hair_middle", 2: "hair_left", 3: "hair_right"}
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -61,16 +51,6 @@ def resolve_hair_weights(explicit: Path | str | None = None) -> Path | None:
         p = Path(explicit)
         return p if p.is_file() else None
     for c in DEFAULT_HAIR_CANDIDATES:
-        if c.is_file():
-            return c
-    return None
-
-
-def resolve_yolo_hair_weights(explicit: Path | str | None = None) -> Path | None:
-    if explicit is not None:
-        p = Path(explicit)
-        return p if p.is_file() else None
-    for c in DEFAULT_YOLO_HAIR_CANDIDATES:
         if c.is_file():
             return c
     return None
@@ -196,115 +176,12 @@ class HairHold:
         if segs:
             self.last = segs
             self.last_t = float(now)
-            self.method = str(method or "hair_seg")
+            self.method = str(method or "animeseg_hair3")
             return clone_hair_segments(segs), False, self.method
         if self.last and (float(now) - self.last_t) <= self.max_age_s:
             held_method = f"{self.method}_held" if self.method else "held"
             return clone_hair_segments(self.last), True, held_method
         return None, True, "none"
-
-
-class HairSegTracker:
-    """Thin wrapper around Ultralytics YOLO-seg ``hair_seg.pt``."""
-
-    def __init__(self, weights: Path | str | None = None, device: str | None = "cpu"):
-        path = resolve_yolo_hair_weights(weights)
-        if path is None:
-            raise FileNotFoundError(
-                "hair_seg.pt not found. Place it at models/trackers/hair_seg.pt"
-            )
-        from ultralytics import YOLO  # lazy
-
-        self.weights = Path(path)
-        self.model = YOLO(str(self.weights))
-        self.device = device if device is not None else "cpu"
-        self.method = "hair_seg"
-
-    def detect(
-        self,
-        image_bgr: np.ndarray,
-        *,
-        conf: float = HAIR_DETECT_CONF,
-        iou: float = HAIR_DETECT_IOU,
-        imgsz: int = HAIR_IMGSZ,
-    ) -> list[dict[str, Any]]:
-        """Return one polygon per class in source-pixel coordinates."""
-        if image_bgr is None or image_bgr.size == 0:
-            return []
-        h, w = image_bgr.shape[:2]
-        kwargs = dict(
-            source=image_bgr,
-            conf=float(conf),
-            iou=float(iou),
-            verbose=False,
-            device=self.device,
-            retina_masks=True,
-            imgsz=int(imgsz),
-        )
-        # Ultralytics keeps the first predictor; later imgsz/conf kwargs are ignored.
-        self.model.predictor = None
-        results = self.model.predict(**kwargs)
-        if not results or results[0].masks is None or results[0].boxes is None:
-            return []
-        r0 = results[0]
-        names = r0.names
-        best: dict[str, dict[str, Any]] = {}
-        clss = r0.boxes.cls.cpu().numpy().astype(int)
-        confs = r0.boxes.conf.cpu().numpy()
-        orig_h, orig_w = r0.orig_shape[:2] if getattr(r0, "orig_shape", None) else (h, w)
-        for i, cls_id in enumerate(clss):
-            cid = int(cls_id)
-            if isinstance(names, dict):
-                cls_name = names.get(cid)
-            elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
-                cls_name = names[cid]
-            else:
-                cls_name = None
-            if cls_name not in HAIR_CLASSES:
-                if 0 <= cid < len(HAIR_CLASSES):
-                    cls_name = HAIR_CLASSES[cid]
-                else:
-                    continue
-            xy = None
-            try:
-                xyn = r0.masks.xyn[i]
-            except Exception:
-                xyn = None
-            if xyn is not None and len(xyn) >= 3:
-                xy = np.asarray(xyn, dtype=np.float32)
-                xy = np.stack([xy[:, 0] * orig_w, xy[:, 1] * orig_h], axis=1)
-            else:
-                raw = r0.masks.xy[i]
-                if raw is None or len(raw) < 3:
-                    continue
-                xy = np.asarray(raw, dtype=np.float32)
-            if xy is None or len(xy) < 3:
-                continue
-            pts = xy.reshape(-1, 1, 2)
-            peri = cv2.arcLength(pts, True)
-            approx = cv2.approxPolyDP(pts, max(0.8, APPROX_EPS_RATIO * peri), True)
-            if len(approx) < 3:
-                continue
-            poly = [
-                [
-                    round(float(np.clip(p[0][0], 0, orig_w - 1)), 1),
-                    round(float(np.clip(p[0][1], 0, orig_h - 1)), 1),
-                ]
-                for p in approx
-            ]
-            area = float(cv2.contourArea(approx))
-            if area < MIN_POLY_AREA:
-                continue
-            rec = {
-                "class": cls_name,
-                "polygon": poly,
-                "area": round(area, 1),
-                "score": round(float(confs[i]), 3),
-            }
-            prev = best.get(cls_name)
-            if prev is None or area > float(prev.get("area") or 0):
-                best[cls_name] = rec
-        return [best[c] for c in HAIR_CLASSES if c in best]
 
 
 def _mask_to_hair_polygons(
@@ -427,19 +304,10 @@ def create_hair_tracker(
     weights: Path | str | None = None,
     device: str | None = None,
 ):
-    """Load animeseg_hair3 when present; otherwise YOLO hair_seg.pt."""
+    """Load animeseg_hair3.pt."""
     path = resolve_hair_weights(weights)
-    if path is not None and _is_hair3_weights(path):
-        try:
-            return AnimeSegHair3Tracker(path, device=device)
-        except Exception as exc:
-            print(f"animeseg_hair3 load failed ({exc}) — trying hair_seg.pt")
-            path = resolve_yolo_hair_weights(None)
-            if path is None:
-                raise
-            return HairSegTracker(path, device=device or "cpu")
     if path is None:
         raise FileNotFoundError(
             "Hair weights not found. Place animeseg_hair3.pt at models/trackers/"
         )
-    return HairSegTracker(path, device=device or "cpu")
+    return AnimeSegHair3Tracker(path, device=device)

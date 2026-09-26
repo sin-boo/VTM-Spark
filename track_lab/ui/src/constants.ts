@@ -30,6 +30,7 @@ export const FEEL: { key: keyof FeelSettings; label: string; max?: number }[] = 
   { key: 'gaze_gain', label: 'Gaze', max: 2 },
   { key: 'gaze_smooth', label: 'Gaze smooth' },
   { key: 'hair_pin', label: 'Hair pin' },
+  { key: 'hair_width', label: 'Hair width', max: 2 },
 ]
 
 export const OVERLAY: { key: keyof FeelSettings; label: string; title?: string }[] = [
@@ -50,6 +51,7 @@ export const ZERO_FEEL: FeelSettings = {
   show_hair: 1,
   show_ids: 0,
   hair_pin: 0.7,
+  hair_width: 1,
   gaze_gain: 1,
   gaze_smooth: 0.28,
 }
@@ -62,5 +64,4 @@ export const DEFAULT_PRESETS: MouthPreset[] = [
   { id: 'I', label: 'I', ready: false },
   { id: 'U', label: 'U', ready: false },
   { id: 'E', label: 'E', ready: false },
-  { id: 'O', label: 'O', ready: false },
 ]

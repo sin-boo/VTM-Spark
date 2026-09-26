@@ -95,6 +95,22 @@ def test_rest_shifted_when_mesh_jumps_to_the_real_face() -> None:
     assert rest_shifted(face, jitter, 1254, 1254) is False
 
 
+def test_runaway_nose_tip_stays_between_the_eyes() -> None:
+    from backend.anime import drop_anime_chin, hrnet_native_to_label28
+
+    pts = np.zeros((28, 3), dtype=np.float32)
+    pts[:, 2] = 1.0
+    pts[11], pts[12], pts[13] = [300, 200, 1], [320, 200, 1], [340, 200, 1]
+    pts[17], pts[18], pts[19] = [460, 200, 1], [480, 200, 1], [500, 200, 1]
+    pts[2] = [400, 420, 1]
+    pts[23] = [330, 280, 0.8]
+    pts[24], pts[25], pts[26], pts[27] = [360, 330, 1], [400, 320, 1], [440, 330, 1], [400, 350, 1]
+    out = drop_anime_chin(hrnet_native_to_label28(pts))
+    assert abs(float(out[15, 0]) - 400.0) < 1.0
+    assert abs(float(out[2, 0]) - 400.0) < 1.0
+    assert abs(float(out[2, 1]) - 420.0) < 1.0
+
+
 def test_drop_anime_chin_extends_a_cropped_jaw() -> None:
     from backend.anime import drop_anime_chin
 
@@ -110,6 +126,23 @@ def test_drop_anime_chin_extends_a_cropped_jaw() -> None:
     assert float(out[2, 1]) > float(pts[25, 1]) + 50.0
     assert abs(float(out[21, 1]) - 140.0) < 1e-3
     assert float(out[1, 1]) > float(pts[1, 1])
+
+
+def test_drop_anime_chin_ignores_an_open_lower_lip() -> None:
+    from backend.anime import drop_anime_chin
+
+    pts = np.zeros((28, 3), dtype=np.float32)
+    pts[:, 2] = 1.0
+    pts[15] = [100.0, 100.0, 1.0]
+    pts[21] = [100.0, 130.0, 1.0]
+    pts[25] = [100.0, 190.0, 1.0]
+    pts[2] = [100.0, 175.0, 1.0]
+    pts[1] = [70.0, 160.0, 1.0]
+    pts[3] = [130.0, 160.0, 1.0]
+    out = drop_anime_chin(pts)
+    assert abs(float(out[2, 1]) - 175.0) < 1e-3
+    assert abs(float(out[1, 1]) - 160.0) < 1e-3
+    assert abs(float(out[25, 1]) - 190.0) < 1e-3
 
 
 def test_drop_anime_chin_leaves_a_deep_jaw_alone() -> None:

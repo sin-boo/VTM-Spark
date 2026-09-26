@@ -2,24 +2,26 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
 from .feel import feel
+from .paths import TRACKERS
 from .rig import FaceRig, mesh_center, _mesh_scale
 
-ROOT = Path(__file__).resolve().parents[1]
-TRACKERS = ROOT.parent / "models" / "trackers"
 HAIR3_WEIGHTS = TRACKERS / "animeseg_hair3.pt"
-HAIR_FALLBACK = TRACKERS / "hair_seg.pt"
 HAIR_CLASSES = ("hair_middle", "hair_left", "hair_right")
-_HAIR_PIN_INNER = 0.55
-_HAIR_PIN_OUTER = 1.25
 _MAX_HAIR_TURN = 45.0
+_HAIR_WIDTH_MIN = 0.55
+_HAIR_WIDTH_MAX = 1.35
+_HAIR_WIDTH_GAIN = 0.5
+_HAIR_MIDDLE_SPAN = 0.2
+_HAIR_WELD = 0.05
+_SIDE_OF = {"hair_middle": "mid", "hair_left": "l", "hair_right": "r"}
 FT_ID_TO_CLASS = {1: "hair_middle", 2: "hair_left", 3: "hair_right"}
 MIN_AREA = 60.0
 APPROX = 0.0015
@@ -28,7 +30,6 @@ _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 _hair3 = None
-_yolo = None
 
 
 def _torch_device() -> str:
@@ -40,10 +41,6 @@ def _torch_device() -> str:
     except Exception:
         pass
     return "cpu"
-
-
-def _yolo_device():
-    return 0 if _torch_device() == "cuda" else "cpu"
 
 
 def _load_hair3():
@@ -79,18 +76,6 @@ def _load_hair3():
         "amp": device.startswith("cuda"),
     }
     return _hair3
-
-
-def _model_yolo():
-    global _yolo
-    if _yolo is not None:
-        return _yolo
-    if not HAIR_FALLBACK.is_file():
-        raise FileNotFoundError(f"Hair fallback missing: {HAIR_FALLBACK}")
-    from ultralytics import YOLO
-
-    _yolo = YOLO(str(HAIR_FALLBACK))
-    return _yolo
 
 
 def _mask_to_polygons(pred: np.ndarray, img_h: int, img_w: int) -> list[dict[str, Any]]:
@@ -324,36 +309,200 @@ def _hair_poly(cls: str, xs: np.ndarray, ys: np.ndarray) -> dict[str, Any]:
 
 
 @dataclass
+class HairPart:
+    cls: str
+    local: np.ndarray
+    anchor: np.ndarray
+    offsets: np.ndarray
+
+
+@dataclass
+class HairWeld:
+    mid_part: int
+    mid_vert: int
+    src_part: int
+    src_vert: int
+
+
+@dataclass
 class HairRig:
-    parts: list[tuple[str, np.ndarray]]
+    parts: list[HairPart]
     rest_cx: float
     rest_cy: float
     rest_ms: float
+    welds: list[HairWeld]
 
 
-def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
-    span = max(float(edge1) - float(edge0), 1e-8)
-    t = np.clip((np.asarray(x, dtype=np.float64) - edge0) / span, 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
+def _clip_turn(yaw: float, pitch: float, max_turn: float | None) -> tuple[float, float]:
+    if max_turn is None:
+        return float(yaw), float(pitch)
+    cap = math.radians(float(max_turn))
+    yaw = float(yaw)
+    pitch = float(pitch)
+    if yaw < -cap:
+        yaw = -cap
+    elif yaw > cap:
+        yaw = cap
+    if pitch < -cap:
+        pitch = -cap
+    elif pitch > cap:
+        pitch = cap
+    return yaw, pitch
+
+
+def _part_side(cls: str, anchor: np.ndarray, rest_ms: float) -> str:
+    named = _SIDE_OF.get(cls)
+    if named:
+        return named
+    dist = float(np.hypot(float(anchor[0]), float(anchor[1]))) / max(float(rest_ms), 1.0)
+    if dist < _HAIR_MIDDLE_SPAN:
+        return "mid"
+    return "r" if float(anchor[0]) >= 0.0 else "l"
+
+
+def _part_width(part: HairPart, yaw_r: float, rest_ms: float, gain: float) -> float:
+    side = _part_side(part.cls, part.anchor, rest_ms)
+    if side == "mid":
+        return 1.0
+    sign = 1.0 if side == "r" else -1.0
+    # +yaw brings screen-left (negative rest X) toward the camera.
+    facing = -sign * math.sin(float(yaw_r))
+    width = 1.0 + _HAIR_WIDTH_GAIN * float(gain) * facing
+    return float(np.clip(width, _HAIR_WIDTH_MIN, _HAIR_WIDTH_MAX))
+
+
+def _hairline_local(rest: np.ndarray, origin: np.ndarray) -> np.ndarray:
+    """Brow midpoint, rest-centered. Bangs glue here — not at the hanging tips."""
+    face = np.asarray(rest, dtype=np.float64)
+    brows: list[np.ndarray] = []
+    for index in (5, 6, 7, 8, 9, 10):
+        if index >= len(face):
+            continue
+        if face.shape[1] >= 3 and float(face[index, 2]) < 0.05:
+            continue
+        brows.append(face[index, :2])
+    if brows:
+        mid = np.mean(np.stack(brows, axis=0), axis=0)
+    else:
+        mid = np.asarray(origin, dtype=np.float64).copy()
+        mid[1] = mid[1] - 0.35 * max(float(_mesh_scale(face)), 1.0)
+    return np.asarray(mid, dtype=np.float64) - np.asarray(origin, dtype=np.float64)
+
+
+def _build_welds(parts: list[HairPart], rest_ms: float) -> list[HairWeld]:
+    """Pin middle vertices that already sit on a left/right seam."""
+    thresh = max(4.0, _HAIR_WELD * max(float(rest_ms), 1.0))
+    mids = [(i, part) for i, part in enumerate(parts) if part.cls == "hair_middle"]
+    sides = [
+        (i, part) for i, part in enumerate(parts) if part.cls in ("hair_left", "hair_right")
+    ]
+    if not mids or not sides:
+        return []
+    welds: list[HairWeld] = []
+    for mi, middle in mids:
+        for vi, vertex in enumerate(middle.local):
+            best_i = -1
+            best_j = -1
+            best_d = thresh
+            for si, side in sides:
+                delta = side.local - vertex
+                dist = np.sqrt(np.sum(delta * delta, axis=1))
+                idx = int(np.argmin(dist))
+                d = float(dist[idx])
+                if d < best_d:
+                    best_d = d
+                    best_i = si
+                    best_j = idx
+            if best_i >= 0:
+                welds.append(
+                    HairWeld(mid_part=mi, mid_vert=vi, src_part=best_i, src_vert=best_j)
+                )
+    return welds
+
+
+def _widen(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    ax: float,
+    ay: float,
+    width: float,
+    roll: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Scale a polygon about its posed anchor along the rolled X axis."""
+    if abs(float(width) - 1.0) < 1e-6:
+        return xs, ys
+    dx = np.asarray(xs, dtype=np.float64) - ax
+    dy = np.asarray(ys, dtype=np.float64) - ay
+    c = math.cos(roll)
+    s = math.sin(roll)
+    lx = dx * c + dy * s
+    ly = -dx * s + dy * c
+    lx = lx * float(width)
+    return ax + lx * c - ly * s, ay + lx * s + ly * c
+
+
+def _part_pose(
+    part: HairPart,
+    face_rig: FaceRig,
+    rest_ms: float,
+    max_turn: float | None,
+    gain: float,
+) -> tuple[float, float, float, float, float]:
+    """Posed anchor, left/right width, head zoom, roll for one part."""
+    ax = np.asarray([part.anchor[0]], dtype=np.float64)
+    ay = np.asarray([part.anchor[1]], dtype=np.float64)
+    posed_x, posed_y = face_rig.map_plane(ax, ay, max_turn=max_turn)
+    turn = face_rig.turn()
+    yaw_r, _pitch = _clip_turn(turn["yaw"], turn["pitch"], max_turn)
+    width = _part_width(part, yaw_r, rest_ms, gain)
+    scale = float(face_rig.place()["scale"])
+    return float(posed_x[0]), float(posed_y[0]), width, scale, float(turn["roll"])
+
+
+def _rigid_part(
+    part: HairPart,
+    ax: float,
+    ay: float,
+    width: float,
+    scale: float,
+    roll: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    c = math.cos(roll)
+    s = math.sin(roll)
+    ox = part.offsets[:, 0] * width
+    oy = part.offsets[:, 1]
+    rx = scale * (ox * c - oy * s)
+    ry = scale * (ox * s + oy * c)
+    return ax + rx, ay + ry
 
 
 def build_hair_rig(segments: list[dict[str, Any]], rest: np.ndarray) -> HairRig | None:
     cx, cy = mesh_center(rest)
-    parts: list[tuple[str, np.ndarray]] = []
+    parts: list[HairPart] = []
     origin = np.array([cx, cy], dtype=np.float64)
+    hairline = _hairline_local(rest, origin)
     for seg in segments:
         cls = str(seg.get("class") or "")
         pts = np.asarray(seg.get("polygon") or [], dtype=np.float64)
         if cls not in HAIR_CLASSES or pts.ndim != 2 or len(pts) < 3:
             continue
-        parts.append((cls, pts[:, :2] - origin))
+        local = pts[:, :2] - origin
+        if cls == "hair_middle":
+            # Parent bangs / crown to the scalp, not the hanging tips.
+            anchor = hairline.copy()
+        else:
+            idx = int(np.argmin(np.sum(local * local, axis=1)))
+            anchor = local[idx].copy()
+        parts.append(HairPart(cls=cls, local=local, anchor=anchor, offsets=local - anchor))
     if not parts:
         return None
+    rest_ms = float(_mesh_scale(rest))
     return HairRig(
         parts,
         rest_cx=float(cx),
         rest_cy=float(cy),
-        rest_ms=float(_mesh_scale(rest)),
+        rest_ms=rest_ms,
+        welds=_build_welds(parts, rest_ms),
     )
 
 
@@ -362,36 +511,66 @@ def follow_hair(
     live: np.ndarray | None,
     face_rig: FaceRig | None = None,
 ) -> list[dict[str, Any]]:
+    del live
     if rig is None or not rig.parts:
         return []
     use_head = face_rig is not None and face_rig.locked
     pin = feel.hair_pin() if use_head else 0.0
+    gain = feel.hair_width() if use_head else 1.0
     max_turn = _MAX_HAIR_TURN if pin > 1e-6 else None
     rest_ms = max(float(rig.rest_ms), 1.0)
-    out: list[dict[str, Any]] = []
-    for cls, local in rig.parts:
+    posed: list[tuple[np.ndarray, np.ndarray, float, str]] = []
+    for part in rig.parts:
+        width = 1.0
         if use_head and face_rig is not None:
-            xs_loc = local[:, 0]
-            ys_loc = local[:, 1]
-            xs, ys = face_rig.map_local(xs_loc, ys_loc, max_turn=max_turn)
+            ax, ay, width, scale, roll = _part_pose(part, face_rig, rest_ms, max_turn, gain)
+            xs, ys = face_rig.map_plane(part.local[:, 0], part.local[:, 1], max_turn=max_turn)
+            # Left / right visibility applies in both modes; pin only picks
+            # card (0) vs rigid part (1).
+            xs, ys = _widen(xs, ys, ax, ay, width, roll)
             if pin > 1e-6:
-                flat_x, flat_y = face_rig.map_flat(xs_loc, ys_loc)
-                weight = _smoothstep(_HAIR_PIN_INNER, _HAIR_PIN_OUTER, np.hypot(xs_loc, ys_loc) / rest_ms)
-                blend = weight * pin
-                xs = xs + (flat_x - xs) * blend
-                ys = ys + (flat_y - ys) * blend
+                rigid_x, rigid_y = _rigid_part(part, ax, ay, width, scale, roll)
+                xs = xs + (rigid_x - xs) * pin
+                ys = ys + (rigid_y - ys) * pin
         else:
-            xs = local[:, 0] + rig.rest_cx
-            ys = local[:, 1] + rig.rest_cy
-        out.append(_hair_poly(cls, xs, ys))
+            xs = part.local[:, 0] + rig.rest_cx
+            ys = part.local[:, 1] + rig.rest_cy
+        posed.append((xs, ys, width, _part_side(part.cls, part.anchor, rest_ms)))
+    if getattr(rig, "welds", None):
+        touched = {weld.mid_part for weld in rig.welds}
+        for index in touched:
+            xs, ys, width, side = posed[index]
+            posed[index] = (np.array(xs, copy=True), np.array(ys, copy=True), width, side)
+        for weld in rig.welds:
+            xs, ys, width, side = posed[weld.mid_part]
+            src_x, src_y, _, _ = posed[weld.src_part]
+            xs[weld.mid_vert] = float(src_x[weld.src_vert])
+            ys[weld.mid_vert] = float(src_y[weld.src_vert])
+    out: list[dict[str, Any]] = []
+    for part, (xs, ys, width, side) in zip(rig.parts, posed):
+        rec = _hair_poly(part.cls, xs, ys)
+        rec["side"] = side
+        rec["width"] = round(float(width), 3)
+        rec["pin"] = round(float(pin), 3)
+        out.append(rec)
     return out
+
+
+def rig_rest_hair(rig: HairRig | None) -> list[dict[str, Any]]:
+    """Rest polygons exactly as the rig was built. No welds, no follow."""
+    if rig is None:
+        return []
+    return [
+        _hair_poly(part.cls, part.local[:, 0] + rig.rest_cx, part.local[:, 1] + rig.rest_cy)
+        for part in rig.parts
+    ]
 
 
 def detect_hair(
     image_bgr: np.ndarray,
     face_pts: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
-    """Hair-part polygons from the hair model. Face mesh is not a keepout."""
+    """Hair-part polygons from animeseg_hair3.pt. Face mesh is not a keepout."""
     del face_pts
     if image_bgr is None or image_bgr.size == 0:
         return []
@@ -399,66 +578,5 @@ def detect_hair(
         segs = _detect_hair3(image_bgr)
         return refine_hair(image_bgr, segs)
     except Exception as exc:
-        print(f"animeseg_hair3 failed ({exc}) — falling back to hair_seg.pt")
-    h, w = image_bgr.shape[:2]
-    model = _model_yolo()
-    model.predictor = None
-    results = model.predict(
-        source=image_bgr,
-        conf=0.12,
-        iou=0.7,
-        verbose=False,
-        device=_yolo_device(),
-        retina_masks=True,
-        imgsz=640,
-    )
-    if not results or results[0].masks is None or results[0].boxes is None:
+        print(f"animeseg_hair3 failed ({exc})")
         return []
-    r0 = results[0]
-    names = r0.names
-    clss = r0.boxes.cls.cpu().numpy().astype(int)
-    confs = r0.boxes.conf.cpu().numpy()
-    orig_h, orig_w = (r0.orig_shape[:2] if getattr(r0, "orig_shape", None) else (h, w))
-    best: dict[str, dict[str, Any]] = {}
-    for i, cls_id in enumerate(clss):
-        cid = int(cls_id)
-        if isinstance(names, dict):
-            cls_name = names.get(cid)
-        elif isinstance(names, (list, tuple)) and 0 <= cid < len(names):
-            cls_name = names[cid]
-        else:
-            cls_name = None
-        if cls_name not in HAIR_CLASSES:
-            if 0 <= cid < len(HAIR_CLASSES):
-                cls_name = HAIR_CLASSES[cid]
-            else:
-                continue
-        try:
-            xyn = r0.masks.xyn[i]
-        except Exception:
-            xyn = None
-        if xyn is not None and len(xyn) >= 3:
-            xy = np.asarray(xyn, dtype=np.float32)
-            xy = np.stack([xy[:, 0] * orig_w, xy[:, 1] * orig_h], axis=1)
-        else:
-            raw = r0.masks.xy[i]
-            if raw is None or len(raw) < 3:
-                continue
-            xy = np.asarray(raw, dtype=np.float32)
-        pts = xy.reshape(-1, 1, 2)
-        peri = cv2.arcLength(pts, True)
-        approx = cv2.approxPolyDP(pts, max(0.8, APPROX * peri), True)
-        if len(approx) < 3:
-            continue
-        poly = [
-            [round(float(np.clip(p[0][0], 0, orig_w - 1)), 1), round(float(np.clip(p[0][1], 0, orig_h - 1)), 1)]
-            for p in approx
-        ]
-        area = float(cv2.contourArea(approx))
-        if area < MIN_AREA:
-            continue
-        rec = {"class": cls_name, "polygon": poly, "area": round(area, 1), "score": round(float(confs[i]), 3)}
-        prev = best.get(cls_name)
-        if prev is None or area > float(prev.get("area") or 0):
-            best[cls_name] = rec
-    return refine_hair(image_bgr, [best[c] for c in HAIR_CLASSES if c in best])

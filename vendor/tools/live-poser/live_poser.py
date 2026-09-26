@@ -405,7 +405,7 @@ class LivePoserUI:
         self._mirror_prev = bool(self.args.mirror)
         self._iris_tracker: CustomIrisTracker | None = None
         self._skel_tracker: SkeletonLiteTracker | None = None
-        self._hair_tracker: HairSegTracker | None = None
+        self._hair_tracker = None
         self._smoother = MotionSmoother()
         self._skel_hold = SkeletonHold()
         self._hair_hold = HairHold()
@@ -1266,12 +1266,12 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='(compat) Prefer YOLO .pt backend',
     )
-    p.add_argument('--no-hair', action='store_true', help='Disable hair_seg.pt tracker')
+    p.add_argument('--no-hair', action='store_true', help='Disable animeseg_hair3.pt tracker')
     p.add_argument(
         '--hair-weights',
         type=Path,
         default=None,
-        help='Path to hair_seg.pt (default: models/trackers/hair_seg.pt)',
+        help='Path to animeseg_hair3.pt (default: models/trackers/animeseg_hair3.pt)',
     )
     p.add_argument('--mirror', action='store_true')
     p.add_argument('--osf-dir', type=Path, default=None)

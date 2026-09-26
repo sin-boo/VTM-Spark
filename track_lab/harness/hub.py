@@ -42,6 +42,47 @@ class LatestSlot:
         return item
 
 
+class PacketMailbox:
+    """Latest status and latest frame, delivered independently.
+
+    Live frames collapse to the newest packet so a slow reader never replays
+    stale motion. A frame must not erase an unsent status — that is how the
+    desk lost iFacialMocap and snapped the input tab back to camera.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._status: dict[str, Any] | None = None
+        self._frame: dict[str, Any] | None = None
+        self._has = threading.Event()
+
+    def put(self, item: dict[str, Any]) -> None:
+        inner = item.get("packet") if isinstance(item.get("packet"), dict) else item
+        kind = str(inner.get("type") or "")
+        with self._lock:
+            if kind == "status":
+                self._status = item
+            else:
+                self._frame = item
+            self._has.set()
+
+    def take(self, timeout: float | None = None) -> list[dict[str, Any]]:
+        if not self._has.wait(timeout):
+            return []
+        with self._lock:
+            status = self._status
+            frame = self._frame
+            self._status = None
+            self._frame = None
+            self._has.clear()
+        out: list[dict[str, Any]] = []
+        if status is not None:
+            out.append(status)
+        if frame is not None:
+            out.append(frame)
+        return out
+
+
 class HarnessHub:
     def __init__(self) -> None:
         self._lock = threading.Lock()

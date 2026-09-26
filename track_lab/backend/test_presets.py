@@ -244,6 +244,57 @@ def test_set_source_keeps_book_when_still_matches(tmp_path, monkeypatch) -> None
     assert bench.rest_pts is not None
 
 
+def _hair_bench(tmp_path, monkeypatch, still):
+    from backend import face as face_mod
+    from backend.face import FaceBench
+
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    monkeypatch.setattr(face_mod, "INPUT_DIR", tmp_path)
+    monkeypatch.setattr(face_mod, "PARTS_PATH", tmp_path / "overlay_parts.json")
+    book = MouthBook()
+    monkeypatch.setattr(face_mod, "book", book)
+    monkeypatch.setattr(FaceBench, "_load_parts", lambda self: None)
+    monkeypatch.setattr(FaceBench, "_load_ifm", lambda self: None)
+    monkeypatch.setattr(FaceBench, "_save_ifm", lambda self: None)
+    monkeypatch.setattr(FaceBench, "_ensure_source", lambda self, **k: None)
+    monkeypatch.setattr(FaceBench, "_paint", lambda self, pts: None)
+    monkeypatch.setattr(FaceBench, "_publish", lambda self, *a, **k: None)
+    monkeypatch.setattr(FaceBench, "_camera_fields", lambda self: {"camera_index": 0, "cameras": []})
+    rest = _rest()
+    book.seed_rest(rest)
+    return FaceBench(rest_pts=rest.copy(), source_bgr=still.copy())
+
+
+def test_same_still_keeps_painted_hair_over_green(tmp_path, monkeypatch) -> None:
+    """A green prop inside painted hair is not green screen. Re-push must not carve it."""
+    import cv2
+
+    still = np.zeros((64, 64, 3), dtype=np.uint8)
+    still[:] = (0, 255, 0)
+    bench = _hair_bench(tmp_path, monkeypatch, still)
+    painted = [{"class": "hair_left", "polygon": [[4.0, 4.0], [40.0, 4.0], [40.0, 40.0], [4.0, 40.0]]}]
+    bench.set_hair({"hair": painted})
+    ok, buf = cv2.imencode(".png", still)
+    assert ok
+    bench.set_source(bytes(buf), "source.png")
+    assert [seg["polygon"] for seg in bench._hair] == [painted[0]["polygon"]]
+
+
+def test_save_parts_writes_rest_hair_while_posed(tmp_path, monkeypatch) -> None:
+    import json
+
+    from backend import face as face_mod
+
+    still = np.zeros((64, 64, 3), dtype=np.uint8)
+    bench = _hair_bench(tmp_path, monkeypatch, still)
+    painted = [{"class": "hair_middle", "polygon": [[10.0, 5.0], [30.0, 5.0], [30.0, 25.0], [10.0, 25.0]]}]
+    bench.set_hair({"hair": painted})
+    bench._hair = [{"class": "hair_middle", "polygon": [[22.0, 9.0], [42.0, 9.0], [42.0, 29.0], [22.0, 29.0]]}]
+    bench._save_parts()
+    saved = json.loads(face_mod.PARTS_PATH.read_text(encoding="utf-8"))
+    assert saved["hair"][0]["polygon"] == painted[0]["polygon"]
+
+
 def test_set_source_clears_book_on_new_still(tmp_path, monkeypatch) -> None:
     import cv2
 
@@ -333,3 +384,89 @@ def test_mix_ignores_rest_leftover_vowels(tmp_path, monkeypatch) -> None:
     mixed = book.mix(weights)
     assert mixed is not None
     assert abs(_mouth_gap(mixed) - _mouth_gap(rest)) < 0.5
+
+
+def test_pair_ids_cover_every_mouth_combination() -> None:
+    from itertools import combinations
+
+    from .presets import pair_ends, pair_id
+
+    pairs = [pair_id(a, b) for a, b in combinations(PRESET_IDS, 2)]
+    assert len(pairs) == 28
+    assert len(set(pairs)) == 28
+    assert pair_id("smile", "rest") == "rest+smile"
+    assert pair_ends("smile+rest") is None
+    assert pair_ends("rest+smile") == ("rest", "smile")
+
+
+def test_saved_midpoint_bends_the_rest_blend(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _rest()
+    book.seed_rest(rest)
+    smile = {
+        str(i): [float(rest[i, 0]), float(rest[i, 1] + (10.0 if i == 21 else 0.0)), 1.0]
+        for i in range(20, 28)
+    }
+    book.set_mouth("smile", smile, rest)
+    mid = {
+        str(i): [float(rest[i, 0]), float(rest[i, 1] + (8.0 if i == 21 else 0.0)), 1.0]
+        for i in range(20, 28)
+    }
+    book.set_mouth("rest+smile", mid, rest)
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "plain.json")
+    straight = MouthBook()
+    straight.seed_rest(rest)
+    straight.set_mouth("smile", smile, rest)
+    bent = book.mix({"smile": 0.55})
+    line = straight.mix({"smile": 0.55})
+    assert bent is not None and line is not None
+    assert abs(float(bent[21, 1]) - (float(rest[21, 1]) + 8.0)) < 0.05
+    assert abs(float(line[21, 1]) - (float(rest[21, 1]) + 5.0)) < 0.2
+    assert "rest+smile" in book.payload(rest)["mids"]
+
+
+def test_several_stops_bend_the_blend_and_can_slide(tmp_path, monkeypatch) -> None:
+    from .presets import key_id, key_t, pair_ends
+
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _rest()
+    book.seed_rest(rest)
+    smile = {
+        str(i): [float(rest[i, 0]), float(rest[i, 1] + (10.0 if i == 21 else 0.0)), 1.0]
+        for i in range(20, 28)
+    }
+    book.set_mouth("smile", smile, rest)
+    early = {
+        str(i): [float(rest[i, 0]), float(rest[i, 1] + (8.0 if i == 21 else 0.0)), 1.0]
+        for i in range(20, 28)
+    }
+    late = {
+        str(i): [float(rest[i, 0]), float(rest[i, 1] + (2.0 if i == 21 else 0.0)), 1.0]
+        for i in range(20, 28)
+    }
+    book.set_mouth(key_id("rest", "smile", 0.25), early, rest)
+    book.set_mouth(key_id("smile", "rest", 0.75), late, rest)
+    assert pair_ends("rest+smile@250") == ("rest", "smile")
+    assert pair_ends("rest+smile@0") is None
+    assert key_t("rest+smile") == 0.5
+    assert key_t("rest+smile@250") == 0.25
+    assert key_id("rest", "smile", 0.5) == "rest+smile"
+    # weight 0.325 -> amount 0.25, which lands on the early stop (+8)
+    at_early = book.mix({"smile": 0.325})
+    # weight 0.55 -> amount 0.5, halfway from +8 to +2
+    at_mid = book.mix({"smile": 0.55})
+    assert at_early is not None and at_mid is not None
+    assert abs(float(at_early[21, 1]) - (float(rest[21, 1]) + 8.0)) < 0.05
+    assert abs(float(at_mid[21, 1]) - (float(rest[21, 1]) + 5.0)) < 0.05
+    moved = book.move_key("rest+smile@250", 0.4)
+    assert moved == "rest+smile@400"
+    assert "rest+smile@250" not in book.shapes
+    assert "rest+smile@750" in book.payload(rest)["mids"]
+    again = MouthBook()
+    assert "rest+smile@400" in again.shapes
+    assert "rest+smile@750" in again.shapes
+    book.drop_key("rest+smile@400")
+    assert "rest+smile@400" not in book.shapes
+    assert "rest+smile@750" in book.shapes

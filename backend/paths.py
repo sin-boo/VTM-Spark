@@ -8,9 +8,9 @@ from pathlib import Path
 
 
 def package_root() -> Path:
-    """Directory that contains `backend/`, `ui/`, `vendor/`, and `models/`.
+    """Directory that contains `backend/`, `ui/`, `vendor/`, `models/`, and `characters/`.
 
-    - Dev / GitHub tree: VTM-Noble /
+    - Dev / GitHub tree: VTM Noble /
     - Packaged thin-launcher layout: dist/VTMNoble/
     - Legacy PyInstaller onedir: exe folder or `_internal`
     """
@@ -63,12 +63,45 @@ def display_path(path: Path | str) -> str:
         return resolved.as_posix().replace("\\", "/")
 
 
+def _posix_rel(path: Path | str) -> str:
+    return Path(path).as_posix().replace("\\", "/")
+
+
+def _legacy_character_rel(path: Path | str) -> Path | None:
+    """Map old ``models/characters/...`` stores onto ``characters/...``."""
+    raw = Path(str(path))
+    posix = _posix_rel(raw)
+    prefix = "models/characters/"
+    if posix.startswith(prefix):
+        rest = posix[len(prefix) :]
+        return Path("characters") / rest if rest else Path("characters")
+    if posix == "models/characters":
+        return Path("characters")
+    root = package_root().resolve()
+    try:
+        abs_path = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+        rel = abs_path.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    rel_posix = rel.as_posix()
+    if rel_posix.startswith(prefix):
+        rest = rel_posix[len(prefix) :]
+        return Path("characters") / rest if rest else Path("characters")
+    if rel_posix == "models/characters":
+        return Path("characters")
+    return None
+
+
 def resolve_user_path(path: Path | str) -> Path:
     """Resolve an absolute or package-relative path from the UI/API."""
     p = Path(path)
-    if p.is_absolute():
-        return p
-    return (package_root() / p).resolve()
+    candidate = p if p.is_absolute() else (package_root() / p).resolve()
+    if candidate.exists():
+        return candidate
+    remapped = _legacy_character_rel(p)
+    if remapped is not None:
+        return (package_root() / remapped).resolve()
+    return candidate
 
 
 def ensure_under_models(path: Path | str) -> Path:
@@ -85,7 +118,7 @@ def ensure_under_models(path: Path | str) -> Path:
 
 
 def data_dir() -> Path:
-    """App JSON / refs / lock — kept under ``models/`` so the repo stays 4 folders."""
+    """App JSON / refs / lock — kept under ``models/``."""
     return models_root()
 
 
@@ -147,10 +180,49 @@ def refs_dir() -> Path:
     return d
 
 
+def _migrate_legacy_characters(dest: Path) -> None:
+    """Move leftover packs from ``models/characters`` into ``characters/``."""
+    legacy = package_root() / "models" / "characters"
+    if not legacy.is_dir():
+        return
+    try:
+        if legacy.resolve() == dest.resolve():
+            return
+        entries = list(legacy.iterdir())
+    except OSError:
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for src in entries:
+        if src.name == ".gitkeep":
+            continue
+        target = dest / src.name
+        if target.exists():
+            continue
+        try:
+            src.replace(target)
+        except OSError:
+            pass
+    leftover = []
+    try:
+        leftover = [p for p in legacy.iterdir() if p.name != ".gitkeep"]
+    except OSError:
+        return
+    if leftover:
+        return
+    try:
+        gitkeep = legacy / ".gitkeep"
+        if gitkeep.is_file():
+            gitkeep.unlink()
+        legacy.rmdir()
+    except OSError:
+        pass
+
+
 def characters_dir() -> Path:
-    """User character packs (``.vtm``) — portable encoded references."""
-    d = models_root() / "characters"
+    """User character packs (``.vtm``) — package-relative ``characters/``."""
+    d = package_root() / "characters"
     d.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_characters(d)
     return d
 
 

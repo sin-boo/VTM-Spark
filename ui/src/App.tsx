@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api,
+  holdLabInput,
   labSourceOf,
   mergeLabStatus,
+  type LabInputHold,
   ZERO_LAB_FEEL,
   openAppSocket,
   type AppStatus,
@@ -42,6 +44,8 @@ export default function App() {
   const cameraPicked = useRef(false)
   const labRetryAt = useRef(0)
   const frameQueue = useRef<string[]>([])
+  const labGen = useRef(0)
+  const inputHold = useRef<LabInputHold | null>(null)
   const deskReady = Boolean(boot?.ready)
 
   const applyStatus = useCallback((s: AppStatus) => {
@@ -68,21 +72,36 @@ export default function App() {
     }
   }, [])
 
+  const noteLab = useCallback(
+    (next: LabStatus | ((cur: LabStatus | null) => LabStatus), seen: number) => {
+      setLab((cur) => {
+        const packet = typeof next === 'function' ? next(cur) : next
+        const hold = inputHold.current
+        const painted = holdLabInput(cur, packet, hold, seen)
+        if (painted.release && inputHold.current === hold) inputHold.current = null
+        return painted.lab
+      })
+    },
+    [],
+  )
+
   const refreshLab = useCallback(async () => {
+    const seen = labGen.current
     try {
       const next = await api.labStatus()
-      setLab((cur) => mergeLabStatus(cur, next))
+      noteLab(next, seen)
       return next
     } catch {
-      setLab((cur) =>
-        mergeLabStatus(cur, {
+      noteLab(
+        (cur) => ({
           online: false,
           error: cur?.error || 'Track Lab is not running',
         }),
+        seen,
       )
       return null
     }
-  }, [])
+  }, [noteLab])
 
   const refreshCharacters = useCallback(async () => {
     try {
@@ -220,9 +239,10 @@ export default function App() {
           const now = Date.now()
           if (now - labRetryAt.current < 5000) return
           labRetryAt.current = now
+          const seen = labGen.current
           return api
             .labConnect()
-            .then((packet) => setLab((cur) => mergeLabStatus(cur, packet)))
+            .then((packet) => noteLab(packet, seen))
             .catch(() => {
               /* keep last lab snapshot */
             })
@@ -232,7 +252,7 @@ export default function App() {
         })
     }, ms)
     return () => window.clearInterval(id)
-  }, [deskReady, lab?.live, lab?.online, refreshLab])
+  }, [deskReady, lab?.live, lab?.online, noteLab, refreshLab])
 
   async function run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
     setError('')
@@ -246,7 +266,7 @@ export default function App() {
 
   function applyLabReply(reply: LabCommandReply) {
     if (reply.status) {
-      setLab((cur) => mergeLabStatus(cur, { ...reply.status, online: true }))
+      noteLab({ ...reply.status, online: true }, labGen.current)
     }
     if (reply.ok === false && reply.error) {
       throw new Error(reply.error)
@@ -323,7 +343,6 @@ export default function App() {
         onLoadCharacter={(id, opts) =>
           run('Character', async () => {
             const res = await api.loadCharacter(id, opts)
-            if (res.incompatible) return res
             if (res.status) applyStatus(res.status)
             if (res.frame?.image) setFrame(res.frame.image)
             const listed = await api.characters()
@@ -426,6 +445,8 @@ export default function App() {
           })
         }
         onLabSource={(source) => {
+          const gen = ++labGen.current
+          inputHold.current = { source, gen, settled: false }
           setLab((cur) =>
             mergeLabStatus(cur, {
               ...(cur ?? { online: false }),
@@ -439,6 +460,9 @@ export default function App() {
               const live = Boolean(status?.tracking) || Boolean(lab?.live)
               if (source === 'ifm' && live) {
                 await sendLab('start', { source: 'ifm' })
+              }
+              if (inputHold.current?.gen === gen) {
+                inputHold.current = { source, gen: ++labGen.current, settled: true }
               }
             } catch (e) {
               const message = String(e).replace(/^Error:\s*/, '')

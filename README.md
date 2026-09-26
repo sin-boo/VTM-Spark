@@ -33,6 +33,7 @@ Rebuild runs a **model checklist**. If DiT weights are still missing, Start will
 - `ui/` — Vite/React operator UI
 - `vendor/` — inference + LivePoser + OpenSeeFace + virtual cam
 - `models/` — DiT, trackers, download map, refs
+- `characters/` — user VTM packs (package-relative; lives next to the app root)
 
 Regression tests (optional): `python -m pytest backend/tests`
 
@@ -48,5 +49,6 @@ Vendor code is committed under `vendor/`. Only pass `-SyncVendor` if you are dev
 
 **License**
 
-Apache License 2.0 — see [LICENSE](LICENSE).  
-Third-party notices for OpenSeeFace binaries live under `vendor/tools/openseeface/Licenses/`.
+Apache License 2.0 covers VTM Noble source and **our** original / fine-tune training work — see [LICENSE](LICENSE). That grant does **not** cover third-party model weights, and it does not apply to models added later.
+
+Third-party weights keep the official license of the publisher who released them. Inventory and source URLs: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenSeeFace binary library notices: `vendor/tools/openseeface/Licenses/`.

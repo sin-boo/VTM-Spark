@@ -6,7 +6,7 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-CHARS = ROOT / "models" / "characters"
+CHARS = ROOT / "characters"
 DIT = ROOT / "models" / "dit"
 _MIN_CKPT = 1_000_000
 _CKPT_SUFFIX = {".pt", ".pth", ".ckpt"}
@@ -109,7 +109,7 @@ def _cards() -> list[dict]:
             {
                 "id": ident,
                 "name": str(raw.get("name") or ident),
-                "path": f"models/characters/{path.name}",
+                "path": f"characters/{path.name}",
                 "preview_url": f"/api/characters/{ident}/preview",
             }
         )
@@ -154,15 +154,15 @@ _settings: dict = {
     "interpolate": True,
     "hold_last": True,
     "compile_model": False,
-    "show_mesh": True,
-    "show_hair": True,
-    "show_outline": True,
-    "show_brows": True,
-    "show_eyes": True,
-    "show_nose": True,
-    "show_mouth": True,
-    "show_iris_overlay": True,
-    "show_skeleton": True,
+    "show_mesh": False,
+    "show_hair": False,
+    "show_outline": False,
+    "show_brows": False,
+    "show_eyes": False,
+    "show_nose": False,
+    "show_mouth": False,
+    "show_iris_overlay": False,
+    "show_skeleton": False,
     "mirror": True,
     "travel_box": {},
 }
@@ -198,15 +198,15 @@ def status() -> dict:
         "hold_last": True,
         "track_fps": 2,
         "drive_pose": True,
-        "show_mesh": True,
-        "show_hair": True,
-        "show_outline": True,
-        "show_brows": True,
-        "show_eyes": True,
-        "show_nose": True,
-        "show_mouth": True,
-        "show_iris_overlay": True,
-        "show_skeleton": True,
+        "show_mesh": False,
+        "show_hair": False,
+        "show_outline": False,
+        "show_brows": False,
+        "show_eyes": False,
+        "show_nose": False,
+        "show_mouth": False,
+        "show_iris_overlay": False,
+        "show_skeleton": False,
         "mirror": True,
         "use_iris": True,
         "use_body": True,
@@ -218,7 +218,7 @@ def status() -> dict:
         "show_fps": 0,
         "timing": "",
         "reference_name": name,
-        "reference_path": f"models/characters/{cur.name}" if cur else "",
+        "reference_path": f"characters/{cur.name}" if cur else "",
         "character_id": ident,
         "character_name": name,
         "camera_index": 0,
@@ -233,6 +233,8 @@ def status() -> dict:
         "virtual_cam": False,
         "virtual_cam_device": "VTM Noble Cam",
         "virtual_cam_error": "",
+        "virtual_cam_width": 0,
+        "virtual_cam_height": 0,
         "pose_frozen": False,
         **_settings,
     }

@@ -1,0 +1,14 @@
+Official Creative Commons Attribution-NonCommercial 4.0 International
+Public License, published by Creative Commons Corporation (the eligible
+steward of this license text):
+
+  https://creativecommons.org/licenses/by-nc/4.0/legalcode.txt
+  https://creativecommons.org/licenses/by-nc/4.0/
+
+Meta / Facebook Research applies this license to Mask2Former model-zoo
+weights (see https://github.com/facebookresearch/Mask2Former/blob/main/MODEL_ZOO.md).
+The Hugging Face conversion facebook/mask2former-swin-base-ade-semantic
+is tagged license: other and points at that same research repo.
+
+Keep this pointer next to animeseg_hair3.pt. Do not treat Apache-2.0 as
+covering those weights.

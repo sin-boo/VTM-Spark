@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .hub import hub
-from .pack import status_from_bench
+from .pack import frame_from_bench, status_from_bench
 from .protocol import ack
 
 
@@ -25,14 +25,16 @@ def handle(bench: Any, msg: dict[str, Any]) -> dict[str, Any]:
         return ack(ident=ident, ok=False, error=str(exc))
     payload = result if isinstance(result, dict) else bench.status()
     status = status_from_bench(bench, payload, clients=hub.clients)
+    frame = frame_from_bench(bench, clients=hub.clients)
     hub.publish(status)
+    hub.publish(frame)
     error = str(payload.get("error") or "") if isinstance(payload, dict) else ""
     print(
         f"[harness] op={op} ok={not error} error={error or '—'} "
         f"source={status.get('source') or '—'} live={bool(status.get('live'))}",
         flush=True,
     )
-    return ack(ident=ident, ok=not error, error=error, status=status)
+    return ack(ident=ident, ok=not error, error=error, status=status, frame=frame)
 
 
 def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
@@ -73,6 +75,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.set_mirror(bool(on))
     if op == "set_feel":
         return bench.set_feel(body)
+    if op == "set_travel":
+        return bench.set_travel(body)
     if op == "calibrate":
         return bench.start_calibrate(str(body.get("id", "")))
     if op == "reset_calibrate":
@@ -81,12 +85,18 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.apply_preset(str(body.get("id", "")))
     if op == "set_mouth":
         return bench.set_mouth(str(body.get("id", "")), body.get("mouth"))
+    if op == "move_key":
+        return bench.move_key(str(body.get("id", "")), body.get("t"))
+    if op == "drop_key":
+        return bench.drop_key(str(body.get("id", "")))
     if op == "set_mouth_point":
         return bench.set_mouth_point(body)
     if op == "set_eye_point":
         return bench.set_eye_point(body)
     if op == "set_skeleton_point":
         return bench.set_skeleton_point(body)
+    if op == "set_hair":
+        return bench.set_hair(body)
     if op == "set_point":
         return bench.set_point(body)
     if op == "reset_points":
@@ -95,4 +105,6 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         from backend.vtm_gen import generate as run_generate
 
         return run_generate(bench, body)
+    if op == "record":
+        return bench.record_movement(bool(body.get("on")))
     raise ValueError(f"unknown op '{op}'")

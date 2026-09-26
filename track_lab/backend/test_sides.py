@@ -226,7 +226,10 @@ def test_rig_selfie_negates_yaw_roll_slide_not_pitch() -> None:
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     head = {"pitch": 12.0, "yaw": 20.0, "roll": 8.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0})
+    # Full caps: the saved limiter must not decide whether a 12 deg nod shows.
+    feel.update(
+        {"smoothing": 0.0, "max_yaw": 1.0, "max_roll": 1.0, "max_pitch_up": 1.0, "max_pitch_down": 1.0}
+    )
     try:
         rig = FaceRig()
         rig.apply(rest, rest, head0, origin)

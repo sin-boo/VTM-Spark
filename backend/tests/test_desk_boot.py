@@ -10,7 +10,7 @@ from backend.desk_boot import (
 
 def test_previous_load_target_character_pack() -> None:
     kind, ident = previous_load_target(
-        {"character_path": "models/characters/Gigi-Mood.vtm", "reference_path": "x.png"}
+        {"character_path": "characters/Gigi-Mood.vtm", "reference_path": "x.png"}
     )
     assert kind == "character"
     assert ident == "Gigi-Mood"

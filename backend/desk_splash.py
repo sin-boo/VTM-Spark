@@ -1909,15 +1909,24 @@ def early_splash_html(
       flex: 0 0 min(34vw, 268px);
       display: flex;
       flex-direction: column;
-      padding: 28px 20px 20px;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 22px;
       background: #333;
       border-left: 1px solid #1c1c1c;
+    }}
+    .krita-splash-plate {{
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
     }}
     .mark {{
       display: block;
       width: 72px;
       height: 72px;
-      margin: 4px auto 16px;
+      margin: 0 auto 12px;
       object-fit: contain;
       background: transparent;
     }}
@@ -1938,13 +1947,14 @@ def early_splash_html(
       color: #cfcfcf;
     }}
     .ver {{
-      margin: 8px 0 0;
+      margin: 6px 0 0;
       color: #8d8d8d;
       font-size: 11px;
       text-align: center;
     }}
     .status {{
-      margin: auto 0 0;
+      width: 100%;
+      margin: 0;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -1953,6 +1963,7 @@ def early_splash_html(
       margin: 0;
       font-size: 12px;
       color: #8d8d8d;
+      text-align: center;
     }}
     .bar {{
       height: 4px;
@@ -1994,13 +2005,15 @@ def early_splash_html(
       margin: 8px 0 0;
       color: #d08080;
       font-size: 12px;
+      text-align: center;
     }}
   </style>
 </head>
 <body>
   <div class="krita-splash" role="status">
     <div class="krita-splash-art" aria-hidden="true"></div>
-    <aside class="krita-splash-panel">
+      <aside class="krita-splash-panel">
+      <div class="krita-splash-plate">
       <header>
         {mark_html}
         <p class="kicker">VTM</p>
@@ -2013,6 +2026,7 @@ def early_splash_html(
           <b id="fill"><i></i></b>
         </div>
         {notice_html}
+      </div>
       </div>
     </aside>
   </div>

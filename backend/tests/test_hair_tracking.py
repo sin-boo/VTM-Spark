@@ -26,7 +26,7 @@ def test_pose_channels_include_hair() -> None:
 
 def test_hair3_weights_name() -> None:
     assert _is_hair3_weights(Path("models/trackers/animeseg_hair3.pt"))
-    assert not _is_hair3_weights(Path("models/trackers/hair_seg.pt"))
+    assert not _is_hair3_weights(Path("models/trackers/other.pt"))
 
 
 def test_hair_crop_flip_and_pose_channels() -> None:

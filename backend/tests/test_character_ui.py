@@ -20,6 +20,16 @@ def test_toon_preview_opens_library() -> None:
     assert "pickFile()" not in lib.split("function openDock")[1].split("async function beginCreate")[0]
     assert "                    Create" in lib
     assert "                    Add" in lib
+    ctx = lib.split('className="char-ctx"')[1]
+    assert "Repair" in ctx
+    assert "shapes_compatible === false" in ctx
+    assert ctx.index("Edit") < ctx.index("Repair")
+    assert ctx.index("Repair") < ctx.index("Rename")
+    assert ctx.index("Rename") < ctx.index("Remove")
+    assert "beginEdit" in lib
+    assert "chooseCard" in lib
+    assert "onDoubleClick" not in lib
+    assert "props.onRefresh?.()" in lib
     assert "char-empty-well" in lib
     assert "pickRef" not in lib
     assert "libraryOpen" not in rail
@@ -37,6 +47,12 @@ def test_toon_preview_opens_library() -> None:
     assert "object-fit: contain" in img
     assert "100cqh" not in css
     assert "container-type" not in css
+    assert "@media (min-height: 880px)" in css
+    tall = css.split("@media (min-height: 880px)")[1].split("@media")[0]
+    assert "space-evenly" in tall
+    assert "max-height: 28px" in tall
+    assert "--rail-width: 336px" in css
+    assert "--rail-width: 380px" in css
 
 
 def test_desk_settings_has_no_lab_overlay_flags() -> None:
@@ -59,3 +75,24 @@ def test_cel_stage_resets_zoom_when_character_changes() -> None:
     assert "stillId?: string" in stage
     assert "[stillId]" in stage
     assert "stillId={String(status?.character_id || status?.reference_path || '')}" in app
+
+
+def test_virtual_cam_has_no_obs_hint() -> None:
+    rail = _ui("components", "ControlRail.tsx")
+    assert "set Resolution to Custom" not in rail
+    assert "OBS → Video Capture Device" not in rail
+
+
+def test_character_fit_screen() -> None:
+    lib = _ui("components", "CharacterLibrary.tsx")
+    fit = _ui("components", "CharacterFit.tsx")
+    css = _ui("App.css")
+    assert "CharacterFit" in lib
+    assert "from './CharacterFit'" in lib
+    assert "is-fit" in lib
+    assert "Hair" in fit
+    assert "Skeleton" in fit
+    assert "Limiters" in fit
+    assert ".char-create.is-fit" in css
+    assert ".char-fit" in css
+    assert ".fit-frame" in css

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, frameUrl, type FeelSettings, type LabStatus } from './api'
+import { useEffect, useRef, useState, type JSX } from 'react'
+import { api, frameUrl, type FeelSettings, type LabStatus, type TravelBox } from './api'
 import { Side } from './components/Side'
 import { DEFAULT_PRESETS, ZERO_FEEL, ZERO_WEIGHTS, type Busy } from './constants'
-import { camRefOf, camShortOf, draftMouth, refOf } from './points'
+import { camRefOf, camShortOf, blendMouth, draftMouth, keyId, keyT, keysOn, pairId, sampleMouth, refOf } from './points'
 
 type View = { scale: number; x: number; y: number }
 
@@ -60,6 +60,25 @@ function mouthMap(pts: number[][]): Record<string, [number, number, number]> {
     out[String(i)] = [row[0], row[1], row[2] ?? 1]
   }
   return out
+}
+
+function mouthMesh(
+  id: string,
+  shapes: Record<string, number[][]> | undefined,
+  rest: number[][] | null,
+): number[][] | null {
+  const stored = shapes?.[id]
+  if (stored && stored.length >= 28) return stored.map((row) => row.slice())
+  const ends = id.split('+')
+  if (ends.length === 2 && pairId(ends[0], ends[1]) === id) {
+    const left = mouthMesh(ends[0], shapes, rest)
+    const right = mouthMesh(ends[1], shapes, rest)
+    if (!left || !right) return null
+    return blendMouth(left, right)
+  }
+  if (!rest || rest.length < 28) return null
+  if (id === 'rest') return rest.map((row) => row.slice())
+  return draftMouth(id, rest)
 }
 
 function pasteMouthOnto(base: number[][], clip: number[][]): number[][] {
@@ -149,13 +168,19 @@ export default function App() {
   const [view, setView] = useState<View>({ scale: 1, x: 0, y: 0 })
   const [panning, setPanning] = useState(false)
   const [selected, setSelected] = useState('rest')
+  const [panel, setPanel] = useState<'desk' | 'limiters' | 'blend'>('desk')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [travelFocus, setTravelFocus] = useState<'head' | 'body' | null>(null)
   const [points, setPoints] = useState<number[][]>([])
   const [clip, setClip] = useState<number[][] | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [sourceMenu, setSourceMenu] = useState(false)
   const [nat, setNat] = useState({ w: 0, h: 0 })
   const [wellBox, setWellBox] = useState({ w: 1, h: 1 })
   const [camBust, setCamBust] = useState(0)
   const camBusy = useRef(false)
+  const lastCamAt = useRef(0)
   const [camZoom, setCamZoom] = useState(false)
   const [ifmPort, setIfmPort] = useState('49983')
   const [copied, setCopied] = useState('')
@@ -259,9 +284,11 @@ export default function App() {
         const next = await api.live()
         if (!alive || mine <= applied) return
         applied = mine
-        if (!camBusy.current) {
-          camBusy.current = true
-          setCamBust(Date.now())
+        const camNow = Date.now()
+        if (camNow - lastCamAt.current >= 40) {
+          lastCamAt.current = camNow
+          camBusy.current = false
+          setCamBust(camNow)
         }
         setStatus((s) =>
           s
@@ -303,6 +330,11 @@ export default function App() {
                 iris_method: next.iris_method ?? s.iris_method,
                 point_offsets: next.point_offsets ?? s.point_offsets,
                 feel: next.feel ?? s.feel,
+                recording: next.recording ?? s.recording,
+                record_frames: next.record_frames ?? s.record_frames,
+                record_seconds: next.record_seconds ?? s.record_seconds,
+                record_path: next.recording ? next.record_path || '' : next.record_path || s.record_path,
+                record_error: next.record_error ?? s.record_error,
               }
             : s,
         )
@@ -318,7 +350,7 @@ export default function App() {
       }
     }
     void tick()
-    const id = window.setInterval(() => void tick(), 66)
+    const id = window.setInterval(() => void tick(), 32)
     return () => {
       alive = false
       window.clearInterval(id)
@@ -335,6 +367,20 @@ export default function App() {
       window.removeEventListener('scroll', close, true)
     }
   }, [menu])
+
+  useEffect(() => {
+    if (!sourceMenu) return
+    const close = () => setSourceMenu(false)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSourceMenu(false)
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [sourceMenu])
 
   useEffect(() => {
     if (ifmSynced.current || !status?.ifm) return
@@ -443,6 +489,18 @@ export default function App() {
     }
   }
 
+  const runRecord = async () => {
+    setError('')
+    try {
+      const next = await api.record(!status?.recording)
+      apply(next, false, false, true)
+      if (next.record_error) setError(next.record_error)
+      else if (next.record_path) setError('')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
   const runGen = async () => {
     setBusy('gen')
     setError('')
@@ -527,6 +585,25 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (e: PointerEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [menuOpen])
+
+  const openPanel = (next: 'camera' | 'ifm' | 'limiters' | 'blend') => {
+    setMenuOpen(false)
+    if (next === 'limiters' || next === 'blend') {
+      setPanel(next)
+      return
+    }
+    setPanel('desk')
+    void setInput(next)
+  }
+
   const setInput = async (next: 'camera' | 'ifm') => {
     if ((status?.source ?? 'camera') === next) return
     setStatus((s) => (s ? { ...s, source: next } : s))
@@ -568,22 +645,144 @@ export default function App() {
     setShowGen(false)
     setSelected(id)
     const shapes = statusRef.current?.shapes
-    const stored = shapes?.[id]
     const rest =
       shapes?.rest && shapes.rest.length >= 28
         ? shapes.rest
         : pointsRef.current.length >= 28
           ? pointsRef.current
           : null
-    const src =
-      stored && stored.length >= 28 ? stored : rest && rest.length >= 28 ? draftMouth(id, rest) : null
+    const src = mouthMesh(id, shapes, rest)
     if (!src) return
     const next = src.map((row) => row.slice())
     pointsRef.current = next
     setPoints(next)
   }
 
+  const pairMesh = (a: string, b: string, t: number, skip?: string) => {
+    const shapes = statusRef.current?.shapes
+    const rest =
+      shapes?.rest && shapes.rest.length >= 28
+        ? shapes.rest
+        : pointsRef.current.length >= 28
+          ? pointsRef.current
+          : null
+    const left = mouthMesh(a, shapes, rest)
+    const right = mouthMesh(b, shapes, rest)
+    if (!left || !right) return null
+    const stops = keysOn(Object.keys(shapes ?? {}), a, b)
+      .filter((key) => key.id !== skip)
+      .map((key) => {
+        const pts = shapes?.[key.id]
+        return pts && pts.length >= 28 ? { t: key.t, pts } : null
+      })
+      .filter((key): key is { t: number; pts: number[][] } => key != null)
+    return sampleMouth(left, right, stops, t)
+  }
+
+  const scrubPair = (a: string, b: string, t: number) => {
+    const mesh = pairMesh(a, b, t)
+    if (!mesh) return
+    setSelected('')
+    const next = mesh.map((row) => row.slice())
+    pointsRef.current = next
+    setPoints(next)
+  }
+
+  const addMid = async (a: string, b: string, t = 0.5) => {
+    const id = keyId(a, b, t)
+    if (!id) return
+    const shapes = statusRef.current?.shapes
+    if ((shapes?.[id]?.length ?? 0) >= 28) {
+      previewPreset(id)
+      return
+    }
+    const sampled = pairMesh(a, b, t)
+    const mid =
+      selected === '' && pointsRef.current.length >= 28 ? pointsRef.current.map((row) => row.slice()) : sampled
+    if (!mid) return
+    setSelected(id)
+    setBusy('apply')
+    setError('')
+    try {
+      const next = await api.setMouth(id, mouthMap(mid))
+      if (next.error) {
+        setError(next.error)
+        return
+      }
+      const saved = next.shapes?.[id]?.length >= 28 ? next.shapes[id].map((row) => row.slice()) : mid
+      apply(next, true, false, true)
+      pointsRef.current = saved
+      setPoints(saved)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const moveKey = async (id: string, t: number) => {
+    const at = id.lastIndexOf('@')
+    const base = at < 0 ? id : id.slice(0, at)
+    const parts = base.split('+')
+    if (parts.length !== 2) return
+    const nextId = keyId(parts[0], parts[1], t)
+    if (!nextId || nextId === id) return
+    setError('')
+    try {
+      const next = await api.moveMouth(id, t)
+      if (next.error) {
+        setError(next.error)
+        return
+      }
+      apply(next, true, false, true)
+      setSelected((cur) => (cur === id ? nextId : cur))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const resetKey = async (id: string) => {
+    const t = keyT(id)
+    const base = id.split('@')[0]
+    const parts = base.split('+')
+    if (t == null || parts.length !== 2) return
+    const mesh = pairMesh(parts[0], parts[1], t, id)
+    if (!mesh) return
+    setError('')
+    try {
+      const next = await api.setMouth(id, mouthMap(mesh))
+      if (next.error) {
+        setError(next.error)
+        return
+      }
+      const saved = next.shapes?.[id]?.length >= 28 ? next.shapes[id].map((row) => row.slice()) : mesh
+      apply(next, true, false, true)
+      if (selected === id) {
+        pointsRef.current = saved
+        setPoints(saved)
+      }
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const deleteKey = async (id: string) => {
+    const viewing = selected === id
+    setError('')
+    try {
+      const next = await api.dropMouth(id)
+      if (next.error) {
+        setError(next.error)
+        return
+      }
+      apply(next, true, false, !viewing)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
   const commitPreset = async (id = selected) => {
+    if (!id) return
     setSelected(id)
     setBusy('apply')
     setError('')
@@ -931,9 +1130,51 @@ export default function App() {
     void api.setFeel({ [key]: value }).catch((e) => setError(String(e)))
   }
 
+  const putTravel = (patch: Partial<TravelBox>) => {
+    setStatus((s) =>
+      s
+        ? {
+            ...s,
+            travel_box: { ...(s.travel_box ?? {}), ...patch } as TravelBox,
+          }
+        : s,
+    )
+    void api
+      .setTravel(patch)
+      .then((next) => apply(next, false, false))
+      .catch((e) => setError(String(e)))
+  }
+
   const putMirror = (on: boolean) => {
     setStatus((s) => (s ? { ...s, mirror: on } : s))
     void api.setMirror(on).then((next) => apply(next, false, false)).catch((e) => setError(String(e)))
+  }
+
+  const travelOn = status?.travel_box?.enabled !== false
+  const travelRects = status?.travel_rects
+  const limitRect = (rect: number[] | null | undefined, color: string, dashed: boolean, key: string) => {
+    if (!rect || rect.length < 4) return null
+    const a = toScreen(rect[0], rect[1])
+    const b = toScreen(rect[2], rect[3])
+    const x = Math.min(a.x, b.x)
+    const y = Math.min(a.y, b.y)
+    const w = Math.abs(b.x - a.x)
+    const h = Math.abs(b.y - a.y)
+    if (w < 1 || h < 1) return null
+    return (
+      <rect
+        key={key}
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeDasharray={dashed ? '6 4' : undefined}
+        pointerEvents="none"
+      />
+    )
   }
 
   return (
@@ -941,14 +1182,40 @@ export default function App() {
       <header className="mast">
         <p className="eyebrow">track lab</p>
         <h1>Face bench</h1>
-        <nav className="source-tabs">
-          <button type="button" className={source === 'camera' ? 'on' : ''} onClick={() => void setInput('camera')}>
-            Camera
+        <div className="mast-menu" ref={menuRef}>
+          <button
+            type="button"
+            className="mast-menu-btn"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            {panel === 'blend' ? 'Blend' : panel === 'limiters' ? 'Limiters' : source === 'ifm' ? 'iFacialMocap' : 'Camera'}
           </button>
-          <button type="button" className={source === 'ifm' ? 'on' : ''} onClick={() => void setInput('ifm')}>
-            iFacialMocap
-          </button>
-        </nav>
+          {menuOpen ? (
+            <ul>
+              <li>
+                <button type="button" className={panel === 'desk' && source === 'camera' ? 'on' : ''} onClick={() => openPanel('camera')}>
+                  Camera
+                </button>
+              </li>
+              <li>
+                <button type="button" className={panel === 'desk' && source === 'ifm' ? 'on' : ''} onClick={() => openPanel('ifm')}>
+                  iFacialMocap
+                </button>
+              </li>
+              <li>
+                <button type="button" className={panel === 'limiters' ? 'on' : ''} onClick={() => openPanel('limiters')}>
+                  Limiters
+                </button>
+              </li>
+              <li>
+                <button type="button" className={panel === 'blend' ? 'on' : ''} onClick={() => openPanel('blend')}>
+                  Blend
+                </button>
+              </li>
+            </ul>
+          ) : null}
+        </div>
       </header>
 
       <figure
@@ -1080,6 +1347,22 @@ export default function App() {
             ) : null}
             {showMesh ? (
               <svg className={`mesh${live ? ' live' : ''}`} viewBox={`0 0 ${wellBox.w} ${wellBox.h}`}>
+                {travelOn
+                  ? [
+                      travelFocus === null || travelFocus === 'head'
+                        ? limitRect(travelRects?.head, '#f45b69', false, 'lim-head')
+                        : null,
+                      travelFocus === null || travelFocus === 'head'
+                        ? limitRect(travelRects?.head_wall, '#f45b69', true, 'lim-head-wall')
+                        : null,
+                      travelFocus === null || travelFocus === 'body'
+                        ? limitRect(travelRects?.body, '#5ba4f4', false, 'lim-body')
+                        : null,
+                      travelFocus === null || travelFocus === 'body'
+                        ? limitRect(travelRects?.body_wall, '#5ba4f4', true, 'lim-body-wall')
+                        : null,
+                    ]
+                  : null}
                 {showHair
                   ? (status?.hair ?? []).map((part, i) => {
                       const d = part.polygon
@@ -1089,14 +1372,29 @@ export default function App() {
                         })
                         .join(' ')
                       if (!d) return null
+                      let label: JSX.Element | null = null
+                      if (showIds && part.polygon.length) {
+                        const cx = part.polygon.reduce((s, xy) => s + xy[0], 0) / part.polygon.length
+                        const cy = part.polygon.reduce((s, xy) => s + xy[1], 0) / part.polygon.length
+                        const p = toScreen(cx, cy)
+                        const w = part.width ?? 1
+                        const tag = part.side === 'mid' ? 'M' : part.side === 'l' ? 'L' : part.side === 'r' ? 'R' : ''
+                        label = (
+                          <text x={p.x} y={p.y} fill="#ffe14a" fontSize="10" textAnchor="middle" pointerEvents="none">
+                            {`${tag} ×${w.toFixed(2)}`}
+                          </text>
+                        )
+                      }
                       return (
-                        <polygon
-                          key={`${part.class}-${i}`}
-                          points={d}
-                          fill={HAIR_FILL[part.class] ?? 'rgba(200,200,200,0.2)'}
-                          stroke="none"
-                          pointerEvents="none"
-                        />
+                        <g key={`${part.class}-${i}`}>
+                          <polygon
+                            points={d}
+                            fill={HAIR_FILL[part.class] ?? 'rgba(200,200,200,0.2)'}
+                            stroke="none"
+                            pointerEvents="none"
+                          />
+                          {label}
+                        </g>
                       )
                     })
                   : null}
@@ -1284,20 +1582,29 @@ export default function App() {
       <Side
         live={live}
         busy={busy}
+        panel={panel}
         source={source}
         selected={selected}
         status={status}
         presets={presets}
         feel={feelVals}
+        travel={status?.travel_box ?? null}
         weights={weights}
         ifmPort={ifmPort}
         copied={copied}
         localIps={localIps}
         onSelectPreset={previewPreset}
         onApply={() => void commitPreset(selected)}
+        onAddMid={(a, b, t) => void addMid(a, b, t)}
+        onScrub={scrubPair}
+        onMoveKey={(id, t) => void moveKey(id, t)}
+        onResetKey={(id) => void resetKey(id)}
+        onDeleteKey={(id) => void deleteKey(id)}
         onPresetMenu={(id, x, y) => setMenu({ id, x, y })}
         onCalibrate={(id) => void runCalibrate(id)}
         onFeel={putFeel}
+        onTravel={putTravel}
+        onTravelFocus={setTravelFocus}
         onMirror={putMirror}
         onResetPoints={() => {
           void api.resetPoints().then((next) => apply(next, false, false)).catch((e) => setError(String(e)))
@@ -1313,7 +1620,7 @@ export default function App() {
           {busy === 'load' ? 'Loading…' : 'Load'}
         </button>
         <button className="act" type="button" disabled={busy !== ''} onClick={() => void run('track')}>
-          {busy === 'track' ? 'Tracking…' : 'Track'}
+          {busy === 'track' ? 'Overlay…' : 'Overlay'}
         </button>
         <button
           className="act"
@@ -1324,30 +1631,95 @@ export default function App() {
         >
           {busy === 'gen' ? 'Generating…' : 'Gen'}
         </button>
-        <button
-          className={live ? 'act' : 'ghost'}
-          type="button"
-          disabled={busy !== '' || (!live && !status?.ready)}
-          onClick={() => void runOsf()}
+        <span
+          className="osf-pick"
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setSourceMenu(true)
+          }}
         >
-          {busy === 'osf'
-            ? source === 'ifm'
-              ? 'Listen…'
-              : 'OSF…'
-            : live
+          <button
+            className={live ? 'act' : 'ghost'}
+            type="button"
+            disabled={busy !== '' || (!live && !status?.ready)}
+            title="Right-click to choose Camera or iFacialMocap"
+            onClick={() => void runOsf()}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setSourceMenu(true)
+            }}
+          >
+            {busy === 'osf'
               ? source === 'ifm'
-                ? 'Stop'
-                : 'Stop OSF'
-              : source === 'ifm'
-                ? 'Listen'
-                : 'OSF'}
-        </button>
+                ? 'Listen…'
+                : 'Stake…'
+              : live
+                ? source === 'ifm'
+                  ? 'Stop'
+                  : 'Stop Stake'
+                : source === 'ifm'
+                  ? 'Listen'
+                  : 'Stake'}
+          </button>
+          {sourceMenu ? (
+            <div
+              className="menu osf-menu"
+              role="menu"
+              aria-label="Tracking source"
+              onClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={source === 'camera'}
+                className={source === 'camera' ? 'on' : ''}
+                onClick={() => {
+                  setSourceMenu(false)
+                  void setInput('camera')
+                }}
+              >
+                Camera
+              </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={source === 'ifm'}
+                className={source === 'ifm' ? 'on' : ''}
+                onClick={() => {
+                  setSourceMenu(false)
+                  void setInput('ifm')
+                }}
+              >
+                iFacialMocap
+              </button>
+            </div>
+          ) : null}
+        </span>
         <button className="ghost" type="button" disabled={busy !== ''} onClick={() => void run('reset')}>
           {busy === 'reset' ? 'Resetting…' : 'Reset'}
+        </button>
+        <button
+          className={status?.recording ? 'act' : 'ghost'}
+          type="button"
+          disabled={busy !== '' || (!status?.recording && (!live || !status?.has_source))}
+          title={
+            status?.record_path
+              ? `Saved ${status.record_frames ?? 0} frames to ${status.record_path}`
+              : 'Record the tracked character for the benchmark'
+          }
+          onClick={() => void runRecord()}
+        >
+          {status?.recording
+            ? `Stop ${Math.max(0, status.record_seconds ?? 0).toFixed(1)}s`
+            : 'Record movement'}
         </button>
       </footer>
 
       {error ? <p className="err">{error}</p> : null}
+      {!status?.recording && status?.record_path ? (
+        <p className="hint">Saved {status.record_frames ?? 0} frames · {status.record_path}</p>
+      ) : null}
 
       {menu ? (
         <div className="menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>

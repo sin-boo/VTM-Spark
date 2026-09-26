@@ -111,6 +111,20 @@ async def set_mouth(request: Request) -> dict:
     )
 
 
+@app.post("/api/preset/move")
+async def move_key(request: Request) -> dict:
+    body = await request.json()
+    return await asyncio.to_thread(
+        _command, "move_key", {"id": str(body.get("id", "")), "t": body.get("t")}
+    )
+
+
+@app.post("/api/preset/drop")
+async def drop_key(request: Request) -> dict:
+    body = await request.json()
+    return await asyncio.to_thread(_command, "drop_key", {"id": str(body.get("id", ""))})
+
+
 @app.post("/api/osf/start")
 async def osf_start(request: Request) -> dict:
     camera = None
@@ -176,6 +190,12 @@ async def set_feel(request: Request) -> dict:
     return await asyncio.to_thread(_command, "set_feel", body if isinstance(body, dict) else {})
 
 
+@app.post("/api/travel")
+async def set_travel(request: Request) -> dict:
+    body = await request.json()
+    return await asyncio.to_thread(_command, "set_travel", body if isinstance(body, dict) else {})
+
+
 @app.post("/api/mirror")
 async def set_mirror(request: Request) -> dict:
     body = await request.json()
@@ -231,6 +251,12 @@ async def reset_overlay_points(request: Request) -> dict:
     except Exception:
         body = {}
     return await asyncio.to_thread(_command, "reset_points", body)
+
+
+@app.post("/api/record")
+async def record_movement(request: Request) -> dict:
+    body = await request.json()
+    return await asyncio.to_thread(_command, "record", {"on": bool(body.get("on"))})
 
 
 @app.post("/api/calibrate")

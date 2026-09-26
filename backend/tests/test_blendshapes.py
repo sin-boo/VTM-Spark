@@ -11,6 +11,7 @@ from backend.blendshapes import (
     load_current,
     normalize_shapes,
     plan_card_fields,
+    refresh_current_from_lab,
     save_character,
     save_current,
 )
@@ -70,11 +71,59 @@ def test_matching_snapshot_is_compatible(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "Gigi.json").is_file()
 
 
+def test_rounding_noise_stays_compatible(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    plan = _shapes(("rest", 0.0), ("smile", 365.949))
+    drifted = _shapes(("rest", 0.0), ("smile", 365.95))
+    save_current(plan)
+    save_character("hi", drifted)
+    info = compatibility("hi")
+    assert info["compatible"] is True
+    assert info["current_fingerprint"] != info["character_fingerprint"]
+    assert fingerprint(plan) != fingerprint(drifted)
+
+
+def test_authored_nudge_is_incompatible(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    save_current(_shapes(("smile", 10.0)))
+    save_character("hi", _shapes(("smile", 10.002)))
+    assert compatibility("hi")["compatible"] is False
+
+
+def test_refresh_ignores_rounding_noise(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    save_current(_shapes(("smile", 365.949)))
+    before = (tmp_path / "current.json").read_bytes()
+    refresh_current_from_lab({"shapes": _shapes(("smile", 365.95))})
+    assert (tmp_path / "current.json").read_bytes() == before
+    refresh_current_from_lab({"shapes": _shapes(("smile", 400.0))})
+    assert load_current()["shapes"]["smile"][0][1] == 400.0
+
+
 def test_mismatched_snapshot_is_incompatible(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
-    save_current(_shapes(("rest", 0.0)))
-    save_character("Gigi", _shapes(("rest", 8.0)))
+    save_current(_shapes(("rest", 0.0), ("smile", 1.0)))
+    save_character("Gigi", _shapes(("rest", 0.0), ("smile", 1.5)))
     assert compatibility("Gigi")["compatible"] is False
+
+
+def _rebased(shapes: dict[str, list[list[float]]], dx: float, dy: float, s: float) -> dict:
+    return {
+        name: [[p[0] * s + dx, p[1] * s + dy, p[2]] for p in rows]
+        for name, rows in shapes.items()
+    }
+
+
+def test_plan_rebased_onto_another_face_stays_compatible(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    plan = _shapes(("rest", 0.0), ("smile", 1.0), ("A", 2.5))
+    save_character("Goblin", plan)
+    save_current(_rebased(plan, 40.0, -12.0, 1.7))
+    assert compatibility("Goblin")["compatible"] is True
+    moved = _rebased(plan, 40.0, -12.0, 1.7)
+    moved["A"] = [[p[0], p[1] + 2.0, p[2]] for p in moved["A"]]
+    save_current(moved)
+    assert compatibility("Goblin")["compatible"] is False
 
 
 def test_repair_copies_current_plan(tmp_path: Path, monkeypatch) -> None:
@@ -98,8 +147,8 @@ def test_create_snapshots_current_plan(tmp_path: Path, monkeypatch) -> None:
 
 def test_shape_gate_blocks_then_repairs(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
-    save_current(_shapes(("rest", 0.0)))
-    save_character("Gigi", _shapes(("rest", 6.0)))
+    save_current(_shapes(("rest", 0.0), ("smile", 1.0)))
+    save_character("Gigi", _shapes(("rest", 6.0), ("smile", 9.0)))
     fake = tmp_path / "Gigi.vtm"
     fake.write_bytes(b"x")
     monkeypatch.setattr(
@@ -126,10 +175,140 @@ def test_shape_gate_blocks_then_repairs(tmp_path: Path, monkeypatch) -> None:
     assert compatibility("Gigi")["compatible"] is True
 
 
+def test_apply_reference_loads_vtm_instead_of_opening_it(tmp_path: Path, monkeypatch) -> None:
+    pack = tmp_path / "hi.vtm"
+    pack.write_bytes(b"not an image")
+    monkeypatch.setattr("backend.stream.resolve_user_path", lambda _path: pack)
+    rt = object.__new__(StreamRuntime)
+    seen: dict[str, str] = {}
+
+    def load(ident: str, **_kwargs: object) -> dict[str, object]:
+        seen["ident"] = ident
+        return {"frame": {"type": "frame", "image": "ok"}}
+
+    rt.load_character = load
+    frame = StreamRuntime.apply_reference(rt, pack)
+    assert seen["ident"] == "hi"
+    assert frame["type"] == "frame"
+
+
+def test_socket_replays_the_loaded_still() -> None:
+    from pathlib import Path
+
+    from PIL import Image
+
+    rt = object.__new__(StreamRuntime)
+    rt._last_image = Image.new("RGB", (4, 4), (9, 8, 7))
+    rt._last_overlay_kps = None
+    rt._frame_payload = lambda image, _kps: {
+        "image": "still",
+        "width": image.size[0],
+        "height": image.size[1],
+    }
+    event = StreamRuntime.current_frame_event(rt)
+    assert event is not None
+    assert event["type"] == "frame"
+    assert event["image"] == "still"
+    api = Path(__file__).resolve().parents[1].joinpath("api.py").read_text(encoding="utf-8")
+    assert "current_frame_event()" in api
+
+
 def test_load_character_does_not_replace_lab_shapes_by_default() -> None:
     import inspect
 
     src = inspect.getsource(StreamRuntime.load_character)
     assert "replace_lab: bool = False" in src
     assert "require_compatible: bool = True" in src
+    assert "return blocked" not in src
     assert "_cel_still(" in src
+
+
+def test_load_character_repairs_after_lab_holds_the_still() -> None:
+    import inspect
+
+    src = inspect.getsource(StreamRuntime.load_character)
+    assert src.index("_sync_lab_character(") < src.index("_character_shape_gate(")
+
+
+def test_start_tracking_restores_painted_fit() -> None:
+    import inspect
+
+    src = inspect.getsource(StreamRuntime._start_lab_tracking)
+    assert src.index("_sync_lab_character()") < src.index("_restore_character_fit()")
+    assert "_restore_character_fit()" in inspect.getsource(StreamRuntime._boot_lab_source)
+
+
+def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, monkeypatch) -> None:
+    import threading
+
+    from backend.engine import StreamEngine
+
+    pack = tmp_path / "ChatGPT-Image.vtm"
+    pack.write_bytes(b"not an image")
+    ckpt = tmp_path / "next.pt"
+    ckpt.write_bytes(b"weights")
+    previous = tmp_path / "old.pt"
+    previous.write_bytes(b"old")
+
+    eng = object.__new__(StreamEngine)
+    eng._cuda_lock = threading.Lock()
+    eng.checkpoint = previous
+    eng._ready = True
+    eng.model = object()
+    eng._ref_path = pack
+    eng._ref_keypoints = object()
+    eng._compile_failed = False
+    opened: list[str] = []
+    eng._release_dit_weights = lambda: None
+    eng.load = lambda: None
+    eng._set_reference_locked = lambda *_a, **_k: opened.append("image")
+    assert StreamEngine.set_checkpoint(eng, ckpt) == ckpt
+    assert opened == []
+
+    order: list[str] = []
+    rt = object.__new__(StreamRuntime)
+    rt._ref_path = pack
+    rt._model_load_lock = threading.Lock()
+    rt._fast_warmed = True
+    rt._batch2_auto_tried = True
+    rt._set_status = lambda **_k: None
+    rt._clear_progress = lambda **_k: order.append("ready")
+    rt._run_with_ram_progress = lambda fn, **_k: fn()
+
+    class _Engine:
+        checkpoint = ckpt
+        image_size = 768
+
+        def set_checkpoint(self, _path: Path) -> None:
+            order.append("model")
+
+        def set_stream_batch_size(self, _n: int) -> None:
+            return None
+
+        def load_encoded_reference(self, **_kwargs: object) -> None:
+            order.append("character")
+
+    rt.engine = _Engine()
+    monkeypatch.setattr("backend.stream.resolve_user_path", lambda path: Path(path))
+    monkeypatch.setattr("backend.stream.is_stream_checkpoint_file", lambda _path: True)
+    monkeypatch.setattr("backend.stream.remember_checkpoint_location", lambda _path: None)
+    monkeypatch.setattr("backend.stream.checkpoint_label", lambda _path: "next")
+    monkeypatch.setattr("backend.stream.display_path", lambda path: str(path))
+    monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **_k: None)
+    monkeypatch.setattr(
+        "backend.character_pack.read_character_pack",
+        lambda _path: type(
+            "Pack",
+            (),
+            {
+                "image_size": 768,
+                "keypoints": None,
+                "ref_latent": None,
+                "ref_face_latent": None,
+                "skip_crop": True,
+            },
+        )(),
+    )
+
+    StreamRuntime.set_checkpoint(rt, ckpt)
+    assert order == ["model", "character", "ready"]

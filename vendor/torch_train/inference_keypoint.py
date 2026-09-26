@@ -34,7 +34,11 @@ def is_keypoint_checkpoint(checkpoint: dict[str, Any] | Path | str) -> bool:
     return bool(cfg.get("use_keypoint_conditioning"))
 
 
-def build_keypoint_model(checkpoint_path: str | Path, device: torch.device) -> tuple[i1DiT, dict]:
+def build_keypoint_model(
+    checkpoint_path: str | Path,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[i1DiT, dict]:
     ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
     cfg_dict = dict(ckpt["config"])
     use_ref_face = bool(cfg_dict.get("use_ref_face_tokens", False))
@@ -71,12 +75,12 @@ def build_keypoint_model(checkpoint_path: str | Path, device: torch.device) -> t
         rope_theta=float(cfg_dict.get("rope_theta", 10000.0)),
         use_repa=False,
     )
-    model = i1DiT(ds_cfg).to(device=device, dtype=torch.bfloat16).eval()
+    model = i1DiT(ds_cfg).to(device=device, dtype=dtype).eval()
     state = ckpt.get("ema") or ckpt.get("model")
     if isinstance(state, dict) and "shadow" in state:
         state = state["shadow"]
     model.load_state_dict(state, strict=False)
-    model = model.to(device=device, dtype=torch.bfloat16).eval()
+    model = model.to(device=device, dtype=dtype).eval()
     return model, cfg_dict
 
 
@@ -466,8 +470,8 @@ def _latents_to_uint8(decoded: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def decode_sd_vae(vae, latents: torch.Tensor) -> np.ndarray:
-    # Keep reverse-scale + decode in the VAE's runtime dtype (bf16/fp16 on CUDA).
-    # Forcing float32 here was leaving ~half the frame time on the table.
+    # Stay in the VAE's runtime dtype. Live path is float32 so TF32 matmul
+    # applies without a half-precision cast on every frame.
     vae_dtype = next(vae.parameters()).dtype
     latents = reverse_scale_latents(latents.to(dtype=vae_dtype), "sd")
     decoded = vae.decode(latents).sample
@@ -475,12 +479,14 @@ def decode_sd_vae(vae, latents: torch.Tensor) -> np.ndarray:
 
 
 def preferred_sd_vae_dtype(device: torch.device) -> torch.dtype:
-    """Half precision on CUDA for faster decode; float32 on CPU."""
-    if device.type != "cuda":
-        return torch.float32
-    if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
-        return torch.bfloat16
-    return torch.float16
+    """Float32 for encode and decode.
+
+    CUDA float32 matmul runs as TF32 when the engine enables it, which is
+    faster here than bfloat16: the DiT is small, and half precision adds a
+    cast on every latent without a faster kernel.
+    """
+    del device
+    return torch.float32
 
 
 def load_sd_vae(device: torch.device, dtype: torch.dtype | None = None):

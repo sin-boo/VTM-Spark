@@ -9,14 +9,14 @@ def test_session_roundtrip(tmp_path, monkeypatch) -> None:
     save_ui_session(
         checkpoint="models/dit/VTM-1.5.1.pt",
         reference_path="models/refs/upload.png",
-        character_path="models/characters/gigi.vtm",
+        character_path="characters/gigi.vtm",
         hub_files=["VTM-ELF.pt"],
     )
     assert session_path() == tmp_path / "session.json"
     st = load_ui_session()
     assert st["checkpoint"] == "models/dit/VTM-1.5.1.pt"
     assert st["reference_path"] == "models/refs/upload.png"
-    assert st["character_path"] == "models/characters/gigi.vtm"
+    assert st["character_path"] == "characters/gigi.vtm"
     assert st["hub_files"] == ["VTM-ELF.pt"]
 
 

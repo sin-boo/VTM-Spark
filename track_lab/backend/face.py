@@ -12,10 +12,40 @@ import cv2
 import numpy as np
 
 from .anime import AnimeMeshError, draw_label28, fit_mesh, reset_anime_mesh, rest_too_small
-from .cameras import list_cameras, load_camera_index, pick_default, save_camera_index
+from .cameras import list_cameras, load_camera_choice, pick_default, save_camera_index
+
+
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        payload = {
+            "sessionId": "286628",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(
+            r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def _camera_name(cameras: list[dict[str, object]], index: int) -> str:
+    for cam in cameras:
+        try:
+            if int(cam["index"]) == int(index):
+                return str(cam.get("name") or "").strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+    return ""
 from .calibrate import calibrator
 from .feel import feel
-from .hair import build_hair_rig, detect_hair, follow_hair, refine_hair
+from .hair import HAIR_CLASSES, build_hair_rig, detect_hair, follow_hair, rig_rest_hair
 from .eye_bits import bits as eye_bits
 from .mouth_bits import bits as mouth_bits
 from .ifm import DEFAULT_PORT, drive_ifm, look_quiet
@@ -31,6 +61,16 @@ from .offsets import nudge as nudge_offset
 from .offsets import parse as parse_offsets
 from .osf_cam import OsfCam, OsfFrame
 from .skeleton import follow_skeleton, skeleton_from_face, skeleton_from_still
+from .travel_box import (
+    apply_limits,
+    lab_feel_caps,
+    limiter_rects_px,
+    pack_overlay,
+    travel,
+    unpack_face,
+    unpack_iris,
+    unpack_skeleton,
+)
 from harness.hub import hub
 from harness.pack import frame_from_bench, status_from_bench
 
@@ -40,6 +80,7 @@ from .presets import (
     empty_weights,
     pts_to_json,
 )
+from .record import MovementRecorder
 from .retarget import FaceExpr
 from .rig import FaceRig
 from .sides import ifm_canonical, ifm_look_canonical, selfie_of, to_screen
@@ -132,6 +173,9 @@ class FaceBench:
         self._expr = FaceExpr()
         self._live_pts: np.ndarray | None = None
         self._smooth_pts: np.ndarray | None = None
+        self._snap_smooth = False
+        self._finishing = False
+        self._live_pose: tuple[str, object, np.ndarray | None, np.ndarray | None] | None = None
         self._smooth_hair: list[dict[str, object]] = []
         self._smooth_skeleton: list[dict[str, object]] = []
         self._iris: list[dict[str, object]] = []
@@ -155,16 +199,20 @@ class FaceBench:
         self.camera_bgr: bytes | None = None
         self._cameras: list[dict[str, object]] = []
         self.camera_index = 0
-        self._saved_camera = load_camera_index()
+        self._saved_camera, self._saved_camera_name = load_camera_choice()
         if self._saved_camera is not None:
             self.camera_index = self._saved_camera
         if self.rest_pts is None:
             self.rest_pts = book.template(None)
         if self.rest_pts is not None:
             self.last_faces = 1
+        self._recorder = MovementRecorder()
         self._load_parts()
         self._load_ifm()
         self._apply_mirror(self._mirror)
+        # Feel caps follow the persisted travel box (same as set_travel).
+        feel.update(lab_feel_caps(travel.payload()))
+        self._ensure_source()
 
     def _camera_fields(self) -> dict[str, object]:
         if not self._cameras:
@@ -172,7 +220,11 @@ class FaceBench:
                 self._cameras = list_cameras()
             except Exception:
                 self._cameras = []
-            self.camera_index = pick_default(self._cameras, self._saved_camera)
+            self.camera_index = pick_default(
+                self._cameras,
+                self._saved_camera,
+                saved_name=self._saved_camera_name,
+            )
         return {
             "camera_index": int(self.camera_index),
             "cameras": self._cameras,
@@ -224,9 +276,46 @@ class FaceBench:
             "iris_cam": debug["iris_cam"],
             "look": debug["look"],
             "point_offsets": dump_offsets(offsets),
+            "travel_box": travel.payload(),
+            "travel_rects": self._travel_rects(),
+            **self._recorder.payload(),
             **mouth_bits.payload(),
             **eye_bits.payload(),
         }
+
+    def _rest_overlay(self) -> np.ndarray | None:
+        if self.rest_pts is None:
+            return None
+        return pack_overlay(self.rest_pts, self._skeleton_rest, self._iris_rest)
+
+    def _travel_rects(self) -> dict[str, object]:
+        return limiter_rects_px(self._rest_overlay(), travel.payload())
+
+    def _apply_travel_limits(
+        self,
+        posed: np.ndarray | None,
+        skeleton: list[dict[str, object]],
+        iris: list[dict[str, object]],
+        hair: list[dict[str, object]],
+    ) -> tuple[
+        np.ndarray | None,
+        list[dict[str, object]],
+        list[dict[str, object]],
+        list[dict[str, object]],
+    ]:
+        if posed is None:
+            return posed, skeleton, iris, hair
+        rest = self._rest_overlay()
+        if rest is None:
+            return posed, skeleton, iris, hair
+        live = pack_overlay(posed, skeleton, iris)
+        limited, hair_out = apply_limits(live, rest, travel.payload(), hair=hair)
+        return (
+            unpack_face(limited, posed),
+            unpack_skeleton(limited, skeleton),
+            unpack_iris(limited, iris),
+            list(hair_out) if hair_out is not None else [],
+        )
 
     def _publish(self, payload: dict[str, object] | None = None, *, frame: bool = False) -> None:
         try:
@@ -266,6 +355,8 @@ class FaceBench:
             **live,
             **self._camera_fields(),
             "feel": feel.payload(),
+            "travel_box": travel.payload(),
+            "travel_rects": self._travel_rects(),
             "source": self._live_source(),
             "ifm": self._ifm.payload(),
             "mirror": bool(self._mirror),
@@ -295,6 +386,7 @@ class FaceBench:
             ),
             "weights": live["weights"],
             "head": live["head"],
+            "turn": self._rig.debug(),
             "blink": live["blink"],
             "camera_index": int(self.camera_index),
             "source": self._live_source(),
@@ -313,6 +405,9 @@ class FaceBench:
             "look": live.get("look"),
             "point_offsets": live.get("point_offsets") or [],
             "feel": feel.payload(),
+            "travel_box": travel.payload(),
+            "travel_rects": self._travel_rects(),
+            **self._recorder.payload(),
         }
 
     def source_jpeg(self) -> bytes | None:
@@ -351,9 +446,8 @@ class FaceBench:
         self.last_tracker = "anime"
         self.generation += 1
         if keep:
-            if self._hair and self.rest_pts is not None:
-                self._hair = refine_hair(image, self._hair)
-                self._hair_rig = build_hair_rig(self._hair, self.rest_pts)
+            # Hair was cleaned when detected, or painted on the desk. Cleaning it
+            # again carves green props out and erodes a pixel every re-push.
             if self.rest_pts is not None:
                 self._paint(self.rest_pts)
             return self.status(publish=True)
@@ -465,6 +559,30 @@ class FaceBench:
         self._paint(pts)
         return self._authored_status(pts)
 
+    def move_key(self, name: str, t: object) -> dict[str, object]:
+        if self._osf.running:
+            self.last_error = "Stop OSF before editing mouth shapes"
+            return self.status(publish=True)
+        try:
+            book.move_key(name, t)
+        except ValueError as exc:
+            self.last_error = str(exc)
+            return self.status(publish=True)
+        self.last_error = ""
+        return self.status(publish=True)
+
+    def drop_key(self, name: str) -> dict[str, object]:
+        if self._osf.running:
+            self.last_error = "Stop OSF before editing mouth shapes"
+            return self.status(publish=True)
+        try:
+            book.drop_key(name)
+        except ValueError as exc:
+            self.last_error = str(exc)
+            return self.status(publish=True)
+        self.last_error = ""
+        return self.status(publish=True)
+
     def start_live(
         self,
         camera: int | None = None,
@@ -519,6 +637,7 @@ class FaceBench:
         if self._ifm.running:
             self._ifm.stop()
         if self._osf.running:
+            self.last_error = ""
             return self.status(publish=True)
         self._rig.reset()
         self._expr.reset()
@@ -539,7 +658,14 @@ class FaceBench:
             return self.status(publish=True)
         self.camera_index = int(index)
         self._saved_camera = self.camera_index
-        save_camera_index(self.camera_index)
+        name = _camera_name(self._cameras, self.camera_index)
+        if not name:
+            try:
+                name = _camera_name(list_cameras(), self.camera_index)
+            except Exception:
+                name = ""
+        self._saved_camera_name = name
+        save_camera_index(self.camera_index, name)
         self.last_error = ""
         return self.status(publish=True)
 
@@ -594,6 +720,35 @@ class FaceBench:
         feel.update(body)
         self.last_error = ""
         return self.status(publish=True)
+
+    def set_travel(self, body: object) -> dict[str, object]:
+        box, changed = travel.update(body if isinstance(body, dict) else {})
+        if changed:
+            feel.update(lab_feel_caps(box))
+            # Held head pose: re-clip now, so the slider moves the overlay
+            # without waiting for the next camera sample to ease in.
+            self._snap_smooth = True
+            self._replay_live_pose()
+        self.last_error = ""
+        # Dispatch always publishes the ack. Skip a second storm on no-op.
+        return self.status(publish=changed)
+
+    def _replay_live_pose(self) -> None:
+        snap = self._live_pose
+        if snap is None or self._finishing:
+            return
+        kind, frame, mixed, _stored_rest = snap
+        rest = self.rest_pts
+        if mixed is None or rest is None or not hasattr(frame, "head"):
+            return
+        head = frame.head
+        pose = frame.pose
+        if kind == "osf":
+            posed = self._rig.apply(mixed, rest, head, pose)
+            posed = self._expr.place_brows(posed, rest, self._rig)
+        else:
+            posed = self._rig.apply(mixed, rest, head, pose)
+        self._finish_live(frame, posed)
 
     def set_mouth_point(self, body: object) -> dict[str, object]:
         if not isinstance(body, dict):
@@ -666,6 +821,41 @@ class FaceBench:
             self.last_error = ""
         return self.status(publish=True)
 
+    def set_hair(self, body: object) -> dict[str, object]:
+        """Replace rest hair polygons. Points are character pixels."""
+        if not isinstance(body, dict):
+            return self.status(publish=True)
+        raw = body.get("hair")
+        if not isinstance(raw, list):
+            self.last_error = "Hair list missing"
+            return self.status(publish=True)
+        cleaned: list[dict[str, object]] = []
+        for seg in raw:
+            if not isinstance(seg, dict):
+                continue
+            cls = str(seg.get("class") or "")
+            poly = seg.get("polygon") or []
+            if cls not in HAIR_CLASSES or not isinstance(poly, list):
+                continue
+            pts: list[list[float]] = []
+            for vertex in poly:
+                if not isinstance(vertex, (list, tuple)) or len(vertex) < 2:
+                    continue
+                try:
+                    pts.append([round(float(vertex[0]), 1), round(float(vertex[1]), 1)])
+                except (TypeError, ValueError):
+                    continue
+            if len(pts) >= 3:
+                cleaned.append({"class": cls, "polygon": pts, "score": 1.0})
+        rig = build_hair_rig(cleaned, self.rest_pts) if self.rest_pts is not None else None
+        with self._lock:
+            self._hair = cleaned
+            self._hair_rig = rig
+            self._smooth_hair = []
+        self._save_parts()
+        self.last_error = ""
+        return self.status(publish=True)
+
     def set_point(self, body: object) -> dict[str, object]:
         if not isinstance(body, dict):
             return self.status(publish=True)
@@ -724,7 +914,33 @@ class FaceBench:
         self.last_error = ""
         return self.status(publish=True)
 
+    def record_movement(self, on: bool) -> dict[str, object]:
+        """Start or stop a benchmark take of the live character overlay."""
+        live = self._osf.running or self._ifm.running
+        if on:
+            if not live:
+                self.last_error = "Start tracking before recording movement"
+                return self.status(publish=True)
+            if self.source_bgr is None:
+                self.last_error = "Load a reference image before recording movement"
+                return self.status(publish=True)
+            try:
+                self._recorder.start(self.source_bgr, str(source_path()))
+            except ValueError as exc:
+                self.last_error = str(exc)
+                return self.status(publish=True)
+            self.last_error = ""
+            return self.status(publish=True)
+        saved = self._recorder.stop()
+        if saved.get("record_error"):
+            self.last_error = str(saved["record_error"])
+        else:
+            self.last_error = ""
+        return self.status(publish=True)
+
     def stop_live(self) -> dict[str, object]:
+        if self._recorder.recording:
+            self._recorder.stop()
         self._osf.stop()
         self._ifm.stop()
         self._save_ifm()
@@ -801,6 +1017,7 @@ class FaceBench:
             to_screen(getattr(frame, "brow", None), selfie),
             mixed=mixed,
         )
+        self._live_pose = ("ifm", frame, None if driven is None else driven.copy(), self.rest_pts)
         posed = self._rig.apply(driven, self.rest_pts, frame.head, frame.pose)
         return posed
 
@@ -817,12 +1034,25 @@ class FaceBench:
             mouth_pts=frame.mouth_2d,
             keep_mouth=use_visemes,
         )
+        self._live_pose = ("osf", frame, None if mixed is None else mixed.copy(), self.rest_pts)
         posed = self._rig.apply(mixed, self.rest_pts, frame.head, frame.pose)
         posed = self._expr.place_brows(posed, self.rest_pts, self._rig)
         return posed
 
     def _finish_live(self, frame: OsfFrame, posed: np.ndarray | None) -> None:
-        alpha = feel.alpha()
+        if self._finishing:
+            self._snap_smooth = True
+            return
+        self._finishing = True
+        try:
+            self._finish_live_body(frame, posed)
+        finally:
+            self._finishing = False
+
+    def _finish_live_body(self, frame: OsfFrame, posed: np.ndarray | None) -> None:
+        snap = self._snap_smooth
+        self._snap_smooth = False
+        alpha = 1.0 if snap else feel.alpha()
         if posed is not None:
             if self._smooth_pts is None or self._smooth_pts.shape != posed.shape:
                 self._smooth_pts = posed.copy()
@@ -887,6 +1117,7 @@ class FaceBench:
                             "roll": float(np.degrees(self._rig._roll_r)),
                         },
                         place=self._rig.place(),
+                        rig=self._rig,
                     )
                     self._skeleton = self._smooth_records(
                         self._smooth_skeleton, skeleton, alpha
@@ -902,6 +1133,14 @@ class FaceBench:
                 self._iris = []
                 self._smooth_iris = []
                 self._iris_method = "none"
+            # Clamp after pose / skeleton / hair / iris are built, before publish.
+            posed, self._skeleton, self._iris, self._hair = self._apply_travel_limits(
+                posed,
+                list(self._skeleton),
+                list(self._iris),
+                list(self._hair),
+            )
+            self._live_pts = posed
             debug = raw_debug(frame.iris_cam, look)
             self._iris_cam = list(debug["iris_cam"])
             packed_look = debug["look"]
@@ -915,8 +1154,50 @@ class FaceBench:
             self.last_ms = frame.ms
             if frame.error:
                 self.last_error = frame.error
-            else:
+            elif not self._recorder.recording:
                 self.last_error = str(calibrator.payload().get("error") or "")
+            # #region agent log
+            _now = time.perf_counter()
+            if _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
+                self._dbg_t = _now
+                _prev = getattr(self, "_dbg_pts", None)
+                _motion = 0.0
+                if posed is not None and _prev is not None and getattr(_prev, "shape", None) == posed.shape:
+                    _motion = float(np.max(np.abs(posed[:, :2] - _prev[:, :2])))
+                if posed is not None:
+                    self._dbg_pts = posed.copy()
+                _head = frame.head if isinstance(frame.head, dict) else {}
+                _pose = frame.pose if isinstance(frame.pose, dict) else {}
+                _agent_log(
+                    "E",
+                    "face.py:_finish_live_body",
+                    "overlay",
+                    {
+                        "faces": int(frame.faces or 0),
+                        "ms": round(float(frame.ms or 0.0), 1),
+                        "yaw": _head.get("yaw"),
+                        "pitch": _head.get("pitch"),
+                        "pose_ok": _pose.get("ok"),
+                        "cx": _pose.get("cx"),
+                        "cy": _pose.get("cy"),
+                        "motion": round(_motion, 2),
+                        "error": str(frame.error or ""),
+                    },
+                )
+            # #endregion
+            if self._recorder.recording and posed is not None and self.source_bgr is not None:
+                offsets = dict(self._point_offsets)
+                h, w = int(self.source_bgr.shape[0]), int(self.source_bgr.shape[1])
+                points = offset_points(pts_to_json(posed), offsets)
+                self._recorder.note(
+                    points,
+                    offset_rows(list(self._skeleton), offsets),
+                    offset_rows(list(self._iris), offsets),
+                    list(self._hair),
+                    dict(self._weights),
+                    w,
+                    h,
+                )
         self._publish(frame=True)
 
     @staticmethod
@@ -940,6 +1221,7 @@ class FaceBench:
                     isinstance(old_poly, list)
                     and isinstance(new_poly, list)
                     and len(old_poly) == len(new_poly)
+                    and old.get("class") == new.get("class")
                 ):
                     record["polygon"] = [
                         [
@@ -1058,7 +1340,8 @@ class FaceBench:
             PARTS_PATH.write_text(
                 json.dumps(
                     {
-                        "hair": list(self._hair),
+                        # _hair is the followed pose while live. Save rest.
+                        "hair": rig_rest_hair(self._hair_rig) or list(self._hair),
                         "skeleton": list(self._skeleton_rest),
                         "iris": list(self._iris_rest),
                         "iris_method": self._iris_rest_method,
@@ -1084,8 +1367,6 @@ class FaceBench:
         hair = data.get("hair")
         body = data.get("skeleton")
         if isinstance(hair, list) and hair and not self._hair:
-            frame = self.source_bgr if self.source_bgr is not None else _read_bgr(source_path())
-            hair = refine_hair(frame, hair)
             self._hair = hair
             if self.rest_pts is not None:
                 self._hair_rig = build_hair_rig(hair, self.rest_pts)

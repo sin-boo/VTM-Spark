@@ -6,7 +6,7 @@ tracking/
   merger.py     combine face + iris + body + hair → (37,4) + hair
   face/         OpenSeeFace landmarks → Label28 (incl. mouth map)
   iris/         iris_pose.pt + OpenSeeFace gaze
-  hair/         animeseg_hair3 / hair_seg
+  hair/         animeseg_hair3
   body/         MediaPipe / YOLO / face-synth upper body
 """
 

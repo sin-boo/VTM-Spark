@@ -1131,10 +1131,27 @@ def test_motion_caps_limit_yaw() -> None:
         origin,
         rig,
         head_yaw_deg=40.0,
-        motion={"yaw": 8.0, "roll": 80.0, "pitch_up": 50.0, "pitch_down": 32.0},
+        motion={
+            "turn_left": 8.0, "turn_right": 8.0, "tilt_left": 80.0, "tilt_right": 80.0,
+            "pitch_up": 50.0, "pitch_down": 32.0,
+        },
     )
     assert abs(free.head_yaw_deg) > abs(tight.head_yaw_deg) + 10
     assert abs(tight.head_yaw_deg) <= 8.0 + 1e-5
+
+
+def test_motion_caps_stop_each_side_on_its_own() -> None:
+    """Right is positive: a closed right turn / tilt must not hold the left."""
+    ref = neutral_keypoints()
+    rig = build_reference_rig(ref)
+    motion = {
+        "turn_left": 20.0, "turn_right": 0.0, "tilt_left": 0.0, "tilt_right": 20.0,
+        "pitch_up": 50.0, "pitch_down": 32.0,
+    }
+    right = extract_controls(ref, ref, rig, head_yaw_deg=15.0, head_roll_deg=-15.0, motion=motion)
+    left = extract_controls(ref, ref, rig, head_yaw_deg=-15.0, head_roll_deg=15.0, motion=motion)
+    assert abs(right.head_yaw_deg) < 1e-5 and abs(right.head_roll_deg) < 1e-5
+    assert left.head_yaw_deg < -10.0 and left.head_roll_deg > 10.0
 
 
 def test_sanitize_per_region_travel_limits() -> None:

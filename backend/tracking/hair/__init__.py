@@ -1,4 +1,4 @@
-"""Hair-part tracker (animeseg_hair3 / hair_seg)."""
+"""Hair-part tracker (animeseg_hair3)."""
 
 from .tracker import (
     HairTrack,

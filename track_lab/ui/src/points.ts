@@ -148,3 +148,88 @@ export function draftMouth(name: string, rest: number[][]): number[][] {
   move(26, alongX * spreadPx - downX * liftPx, alongY * spreadPx - downY * liftPx)
   return out
 }
+
+export const MOUTH_ENDS = ['rest', 'smile', 'sad', 'A', 'I', 'U', 'E'] as const
+
+export const MOUTH_LABEL: Record<(typeof MOUTH_ENDS)[number], string> = {
+  rest: 'Rest',
+  smile: 'Smile',
+  sad: 'Sad',
+  A: 'A',
+  I: 'I',
+  U: 'U',
+  E: 'E',
+}
+
+export function pairId(a: string, b: string): string {
+  const i = MOUTH_ENDS.indexOf(a as (typeof MOUTH_ENDS)[number])
+  const j = MOUTH_ENDS.indexOf(b as (typeof MOUTH_ENDS)[number])
+  if (i < 0 || j < 0 || i === j) return ''
+  return i < j ? `${a}+${b}` : `${b}+${a}`
+}
+
+/** Saved stop at t. 0.5 keeps the legacy `rest+smile` id. */
+export function keyId(a: string, b: string, t: number): string {
+  const pair = pairId(a, b)
+  if (!pair) return ''
+  const n = Math.round(Math.min(0.999, Math.max(0.001, t)) * 1000)
+  if (n === 500) return pair
+  return `${pair}@${n}`
+}
+
+export function keyT(id: string): number | null {
+  const at = id.lastIndexOf('@')
+  const base = at < 0 ? id : id.slice(0, at)
+  const parts = base.split('+')
+  if (parts.length !== 2 || pairId(parts[0], parts[1]) !== base) return null
+  if (at < 0) return 0.5
+  const n = Number(id.slice(at + 1))
+  if (!Number.isInteger(n) || n <= 0 || n >= 1000) return null
+  return n / 1000
+}
+
+export function keysOn(ids: string[], a: string, b: string): { id: string; t: number }[] {
+  const pair = pairId(a, b)
+  if (!pair) return []
+  const seen = new Map<string, { id: string; t: number }>()
+  for (const id of ids) {
+    if (id !== pair && !id.startsWith(`${pair}@`)) continue
+    const t = keyT(id)
+    if (t == null) continue
+    seen.set(id, { id, t })
+  }
+  return [...seen.values()].sort((x, y) => x.t - y.t)
+}
+
+export function sampleMouth(
+  left: number[][],
+  right: number[][],
+  keys: { t: number; pts: number[][] }[],
+  t: number,
+): number[][] {
+  const knots = [
+    { t: 0, pts: left },
+    ...keys.filter((key) => key.pts.length >= 28 && key.t > 0 && key.t < 1),
+    { t: 1, pts: right },
+  ].sort((a, b) => a.t - b.t)
+  const u = Math.min(1, Math.max(0, t))
+  let lo = knots[0]
+  let hi = knots[knots.length - 1]
+  for (let i = 0; i < knots.length - 1; i++) {
+    if (u <= knots[i + 1].t || i === knots.length - 2) {
+      lo = knots[i]
+      hi = knots[i + 1]
+      break
+    }
+  }
+  const span = hi.t <= lo.t ? 0 : (u - lo.t) / (hi.t - lo.t)
+  return blendMouth(lo.pts, hi.pts, span)
+}
+
+export function blendMouth(a: number[][], b: number[][], t = 0.5): number[][] {
+  const u = 1 - t
+  return a.map((row, i) => {
+    const other = b[i] ?? row
+    return [row[0] * u + other[0] * t, row[1] * u + other[1] * t, row[2] ?? 1]
+  })
+}

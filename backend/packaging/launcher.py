@@ -117,7 +117,7 @@ def _package_root() -> Path:
 
     Supports two layouts:
       - Shipped folder:  <dir>/VTMNoble.exe + <dir>/runtime/...
-      - Repo convenience: real_stream/VTMNoble.exe → uses real_stream/dist/VTMNoble/
+      - Repo convenience: VTM Noble/VTMNoble.exe → uses VTM Noble/dist/VTMNoble/
     """
     if getattr(sys, "frozen", False):
         here = Path(sys.executable).resolve().parent

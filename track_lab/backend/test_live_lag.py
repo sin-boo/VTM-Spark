@@ -29,6 +29,31 @@ def test_recv_latest_keeps_newest_datagram() -> None:
         send.close()
 
 
+def test_tracker_is_built_before_the_camera_opens(monkeypatch) -> None:
+    order: list[str] = []
+
+    class FakeTracker:
+        def close(self) -> None:
+            return None
+
+    def make_tracker(w: int, h: int) -> FakeTracker:
+        order.append(f"tracker:{w}x{h}")
+        return FakeTracker()
+
+    def open_camera(index: int):
+        order.append(f"open:{index}")
+        return None
+
+    monkeypatch.setattr(osf_cam_mod, "_make_tracker", make_tracker)
+    monkeypatch.setattr(osf_cam_mod, "_open_camera", open_camera)
+    cam = OsfCam()
+    try:
+        cam.start(index=3)
+    except RuntimeError:
+        pass
+    assert order == ["tracker:640x480", "open:3"]
+
+
 def test_osf_processes_latest_frame_not_backlog(monkeypatch) -> None:
     produced = {"n": 0}
     processed: list[int] = []

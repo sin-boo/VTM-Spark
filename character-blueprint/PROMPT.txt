@@ -1,0 +1,56 @@
+VTuber character still — use this with two images
+
+Send this to your image AI together with:
+  1) character-blueprint.png   (layout / camera / pose — NOT the character to copy)
+  2) your character            (the person you actually want: face, hair, outfit, art style)
+
+If you have several pictures of your character, attach those too. Identity always comes from YOUR images, never from the blue-hair girl in the blueprint.
+
+
+WHAT THIS IS
+
+The first image is a format blueprint for a VTuber reference still.
+Copy its framing, pose, and background. Replace the character with yours.
+
+
+COPY FROM THE BLUEPRINT (image 1)
+
+- Aspect ratio: square 1:1 (not portrait 9:16, not landscape 16:9)
+- Size: 768 x 768 pixels if the model lets you set resolution
+- Background: solid flat chroma-key green, #00FF00, edge to edge
+  no gradient, no shadows on the backdrop, no room, no props
+- Crop: bust-up / chest-up only (head, neck, shoulders, upper chest)
+- Camera: character centered, face large and easy to read
+- Pose: facing the camera straight-on, chin level, no head tilt
+- Eyes: both fully open, looking at the viewer
+- Mouth: small closed-mouth smile, lips closed
+- No hands, no arms in frame, no extra people, no animals
+- No text, labels, watermarks, logos, or UI
+
+
+COPY FROM THE USER'S CHARACTER (image 2+)
+
+- Face, body, hair length/color/style
+- Eyes, skin, outfit, accessories
+- Art style (anime, painterly, chibi, etc.)
+Keep that identity. Do not turn them into the blueprint girl.
+
+
+PROMPT TO PASTE
+
+Using image 1 as a layout blueprint only, draw the character from image 2.
+
+Match image 1 exactly for: square 1:1 still, 768x768, solid chroma-key green background #00FF00, bust-up chest-up crop, character centered, facing the camera, chin level, no head tilt, both eyes open looking at the viewer, small closed-mouth smile, no hands, no props, no text.
+
+Match image 2 for: the actual character identity, face, hair, clothes, colors, and art style.
+
+Do not copy the blue-hair girl from the blueprint. One character only.
+
+
+QUICK CHECK BEFORE YOU USE THE RESULT
+
+- Square image, green screen, not a bedroom or white void
+- Face is the character you sent, not the blueprint girl
+- Small smile, both eyes open, looking at you
+- Shoulders in frame, hands not in frame
+- Nothing written on the picture

@@ -1,6 +1,6 @@
 """HTTP client for the Track Lab harness.
 
-Use this from another process (real_stream) to read tracking packets and
+Use this from another process (VTM Noble) to read tracking packets and
 change settings. Live push is `ws://127.0.0.1:8780/harness/ws`.
 """
 
@@ -35,6 +35,9 @@ class HarnessClient:
 
     def set_feel(self, **values: object) -> dict[str, Any]:
         return self.command("set_feel", dict(values))
+
+    def set_travel(self, **values: object) -> dict[str, Any]:
+        return self.command("set_travel", dict(values))
 
     def start(self, **opts: object) -> dict[str, Any]:
         return self.command("start", dict(opts))

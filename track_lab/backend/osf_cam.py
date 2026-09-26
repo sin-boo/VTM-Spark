@@ -7,12 +7,12 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .cameras import open_capture
+from .cameras import _ensure_com, open_capture
+from .paths import LAB_ROOT, OSF_MODELS
 from .presets import empty_weights
 from .eye_bits import LID_MID_L, LID_MID_R, bits as eye_bits
 from .mouth_bits import bits as mouth_bits
@@ -21,9 +21,9 @@ from .iris import hits_payload, merge_hits, osf_gaze_hits, track_camera
 from .retarget import FACE_TRACK
 from .visemes import reset_visemes, viseme_weights
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = LAB_ROOT
 OSF_DIR = ROOT / "osf"
-MODELS_DIR = ROOT / "models"
+MODELS_DIR = OSF_MODELS
 CAM_W = 640
 CAM_H = 480
 
@@ -75,7 +75,9 @@ def _open_camera(index: int) -> cv2.VideoCapture | None:
 
 def _make_tracker(width: int, height: int) -> object:
     if not (MODELS_DIR / "lm_model3_opt.onnx").is_file():
-        raise FileNotFoundError(f"Face models missing in {MODELS_DIR}. Run track_lab/setup.ps1 or track_lab/start.bat")
+        raise FileNotFoundError(
+            f"Face models missing in {MODELS_DIR}. Run start.bat -> [1] Smart Build."
+        )
     from tracker import Tracker  # noqa: E402
 
     return Tracker(
@@ -226,6 +228,59 @@ def _draw_lid_mids(
         _stamp_id(vis, px, py, f"{mid_id}*", color, font, pad=size + 2)
 
 
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        import json
+
+        payload = {
+            "sessionId": "286628",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open(
+            r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def _drain_queued(cap: object, frame: np.ndarray) -> tuple[np.ndarray, int]:
+    """Drop frames already waiting in DirectShow so the preview is not a backlog."""
+    reader = getattr(cap, "_reader", None)
+    if reader is None or not hasattr(reader, "timeout"):
+        return frame, 0
+    old = reader.timeout
+    extra = 0
+    try:
+        # 0 often means "wait forever" in this capture DLL.
+        reader.timeout = 1
+        for _ in range(4):
+            started = time.perf_counter()
+            try:
+                ok, nxt = cap.read()  # type: ignore[attr-defined]
+            except Exception:
+                break
+            waited = time.perf_counter() - started
+            if not ok or nxt is None:
+                break
+            frame = nxt
+            extra += 1
+            if waited > 0.012:
+                break
+    finally:
+        try:
+            reader.timeout = old
+        except Exception:
+            pass
+    return frame, extra
+
+
 def _encode_jpeg(bgr: np.ndarray) -> bytes:
     h, w = bgr.shape[:2]
     longest = float(max(h, w, 1))
@@ -275,9 +330,48 @@ def _face_pose(face: object | None) -> dict[str, float]:
         vals = np.asarray(translation, dtype=np.float32).reshape(-1)
         if vals.size >= 3 and np.isfinite(vals[2]) and abs(float(vals[2])) > 1e-3:
             out["tz"] = abs(float(vals[2]))
-    out["tilt"] = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
+    # The eye line still frames the mouth: it slants with the mouth on a turn.
+    eyes = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
+    turn = _pnp_head(face)
+    out["tilt"] = eyes if turn is None else turn["roll"]
+    out["tilt_eyes"] = eyes
     out["ok"] = 1.0
     return out
+
+
+# OSF runs PnP on (y, x) landmarks with a face model that looks down +z, so its
+# rotation is -SWAP @ H, where H is the head turn in the image frame (x right,
+# y down, z away) and H = identity when facing the camera.
+_SWAP = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _pnp_head(face: object | None) -> dict[str, float] | None:
+    """Turn, nod, and tilt from OSF's solved rotation, in the rig's signs.
+
+    OSF's own euler is taken on that swapped frame and sits near gimbal lock
+    (pitch ~180, roll ~90 when facing the camera). A plain turn there leaked
+    into roll by +-25 deg and into pitch, so the drawn head tipped over
+    instead of turning. H = Rz(roll) @ Rx(pitch) @ Ry(turn) keeps them apart:
+    a turn spins around the head's own up axis and leaves tilt alone.
+    """
+    # Not gated on face.success: the last solved rotation beats switching to
+    # OSF's euler, whose zero is somewhere else entirely.
+    if face is None:
+        return None
+    rvec = getattr(face, "rotation", None)
+    if rvec is None:
+        return None
+    vals = np.asarray(rvec, dtype=np.float64).reshape(-1)
+    if vals.size != 3 or not np.all(np.isfinite(vals)):
+        return None
+    rmat, _ = cv2.Rodrigues(vals)
+    h = -_SWAP @ rmat
+    pitch = float(np.degrees(np.arcsin(np.clip(h[2, 1], -1.0, 1.0))))
+    turn = float(np.degrees(np.arctan2(-h[2, 0], h[2, 2])))
+    roll = float(np.degrees(np.arctan2(-h[0, 1], h[1, 1])))
+    # Rig signs: pitch+ = look down, roll+ = clockwise on screen (same as the
+    # eye line), yaw = -turn (what OSF's yaw read while it was near zero).
+    return {"pitch": pitch, "yaw": -turn, "roll": roll}
 
 
 def _face_local_2d(
@@ -298,7 +392,7 @@ def _face_local_2d(
     if len(pts) < 66:
         return None
     scale = max(float(pose["scale"]), 1.0)
-    angle = np.deg2rad(-float(pose.get("tilt", 0.0)))
+    angle = np.deg2rad(-float(pose.get("tilt_eyes", pose.get("tilt", 0.0))))
     c, s = float(np.cos(angle)), float(np.sin(angle))
     xy = pts[:, :2] - np.array([pose["cx"], pose["cy"]], dtype=np.float32)
     out = pts.copy()
@@ -316,6 +410,9 @@ def _head(face: object | None) -> dict[str, float]:
     out = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     if face is None:
         return out
+    solved = _pnp_head(face)
+    if solved is not None:
+        return {key: round(value, 2) for key, value in solved.items()}
     euler = getattr(face, "euler", None)
     if euler is None:
         return out
@@ -359,17 +456,30 @@ class _LatestFrame:
         self._lock = threading.Lock()
         self._item: np.ndarray | None = None
         self._has = threading.Event()
+        self.seq = 0
+        self.dropped = 0
+        self.age_ms = 0.0
+        self.read_ms = 0.0
+        self._put_t = 0.0
 
-    def put(self, item: np.ndarray) -> None:
+    def put(self, item: np.ndarray, read_ms: float = 0.0) -> None:
+        now = time.perf_counter()
         with self._lock:
+            if self._item is not None:
+                self.dropped += 1
             self._item = item
+            self.seq += 1
+            self._put_t = now
+            self.read_ms = float(read_ms)
             self._has.set()
 
     def take(self, timeout: float | None = None) -> np.ndarray | None:
         if not self._has.wait(timeout):
             return None
+        now = time.perf_counter()
         with self._lock:
             item = self._item
+            self.age_ms = (now - self._put_t) * 1000.0 if self._put_t else 0.0
             self._item = None
             self._has.clear()
         return item
@@ -386,6 +496,7 @@ class OsfCam:
         self.camera_index = 0
         # Flip the preview JPEG like a selfie. Landmarks stay raw.
         self.preview_flip = False
+        self._preview_jpeg = b""
         self.latest = OsfFrame()
 
     @property
@@ -397,14 +508,22 @@ class OsfCam:
         on_frame: Callable[[OsfFrame], None] | None = None,
         index: int = 0,
     ) -> None:
-        if self._running:
+        if self._running and self._thread is not None and self._thread.is_alive():
             return
         if self._thread is not None and self._thread.is_alive():
-            raise RuntimeError("Camera tracker is still stopping")
+            self.stop()
+        self._thread = None
+        self._grab_thread = None
+        # Model load can take seconds. Do it before the device is capturing,
+        # or DirectShow keeps that unread backlog for the rest of the session.
+        if self._tracker is None:
+            self._tracker = _make_tracker(CAM_W, CAM_H)
         cap = _open_camera(index)
         if cap is None:
+            self._drop_tracker()
             raise RuntimeError(
-                f"Could not open camera {index}. Close the app using it, or pick another."
+                f"Could not open camera {index}. "
+                "Check that it is connected and streaming, or pick another."
             )
         self.camera_index = int(index)
         self._cap = cap
@@ -421,21 +540,35 @@ class OsfCam:
 
     def stop(self) -> None:
         self._running = False
+        self._poke_reader()
         thread = self._thread
         grab = self._grab_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=0.5)
         if grab is not None and grab.is_alive():
-            grab.join(timeout=0.2)
+            grab.join(timeout=0.4)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.4)
         self._release()
         if grab is not None and grab.is_alive():
-            grab.join(timeout=2.0)
+            grab.join(timeout=1.0)
         if thread is not None and thread.is_alive():
-            thread.join(timeout=8.0)
-        if grab is None or not grab.is_alive():
+            thread.join(timeout=1.0)
+        # A native read can outlive release. Forget the handle so the next
+        # Stake is not refused with "still stopping".
+        if self._grab_thread is grab:
             self._grab_thread = None
-        if thread is None or not thread.is_alive():
+        if self._thread is thread:
             self._thread = None
+
+    def _poke_reader(self) -> None:
+        """Ask an in-flight DirectShow read to return so stop can finish."""
+        cap = self._cap
+        reader = getattr(cap, "_reader", None) if cap is not None else None
+        if reader is None:
+            return
+        try:
+            reader.timeout = 1
+        except Exception:
+            pass
 
     def _release(self) -> None:
         with self._lock:
@@ -456,31 +589,135 @@ class OsfCam:
                 except Exception:
                     pass
 
+    def _drop_tracker(self) -> None:
+        with self._lock:
+            tracker = self._tracker
+            self._tracker = None
+        if tracker is None:
+            return
+        closer = getattr(tracker, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+
+    def _publish_preview(self, raw: np.ndarray) -> None:
+        """Newest grab, without landmark drawing or the 2× upscale."""
+        try:
+            if int(raw.shape[1]) != CAM_W or int(raw.shape[0]) != CAM_H:
+                shown = cv2.resize(raw, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
+            else:
+                shown = raw
+            jpeg = _encode_jpeg(apply_mirror(shown, self.preview_flip))
+        except Exception:
+            return
+        with self._lock:
+            self._preview_jpeg = jpeg
+
+    def _latest_preview(self) -> bytes:
+        with self._lock:
+            return self._preview_jpeg
+
     def _grab_loop(self, cap: cv2.VideoCapture, pending: _LatestFrame) -> None:
         """Keep eating camera frames so DirectShow never queues a delay."""
+        me = threading.current_thread()
+        _ensure_com()
+        reader = getattr(cap, "_reader", None)
+        if reader is not None:
+            try:
+                reader.timeout = 150
+            except Exception:
+                pass
+        last_log = 0.0
+        fails = 0
         try:
             while self._running:
-                ok, raw = cap.read()
+                started = time.perf_counter()
+                try:
+                    ok, raw = cap.read()
+                except Exception as exc:
+                    fails += 1
+                    # #region agent log
+                    if time.perf_counter() - last_log >= 0.5:
+                        last_log = time.perf_counter()
+                        _agent_log(
+                            "A",
+                            "osf_cam.py:_grab_loop",
+                            "read raised",
+                            {"error": str(exc), "fails": fails},
+                        )
+                    # #endregion
+                    time.sleep(0.02)
+                    continue
+                read_ms = (time.perf_counter() - started) * 1000.0
+                queued = 0
+                if ok and raw is not None:
+                    raw, queued = _drain_queued(cap, raw)
                 if not ok or raw is None:
+                    fails += 1
+                    # #region agent log
+                    if time.perf_counter() - last_log >= 0.5:
+                        last_log = time.perf_counter()
+                        _agent_log(
+                            "A",
+                            "osf_cam.py:_grab_loop",
+                            "read empty",
+                            {"fails": fails, "read_ms": round(read_ms, 1)},
+                        )
+                    # #endregion
                     time.sleep(0.02)
                     continue
                 # OpenCV reuses the capture buffer; copy before the next read.
-                pending.put(raw.copy())
+                fresh = raw.copy()
+                pending.put(fresh, read_ms)
+                self._publish_preview(fresh)
+                now = time.perf_counter()
+                if now - last_log >= 0.5:
+                    last_log = now
+                    shape = [0, 0]
+                    std = 0.0
+                    try:
+                        shape = [int(raw.shape[1]), int(raw.shape[0])]
+                        step = max(1, min(int(raw.shape[0]), int(raw.shape[1])) // 16, 1)
+                        std = round(float(np.std(raw[::step, ::step])), 2)
+                    except Exception:
+                        pass
+                    # #region agent log
+                    _agent_log(
+                        "A",
+                        "osf_cam.py:_grab_loop",
+                        "grab",
+                        {
+                            "read_ms": round(read_ms, 1),
+                            "shape": shape,
+                            "std": std,
+                            "seq": pending.seq,
+                            "dropped": pending.dropped,
+                            "queued": queued,
+                            "fails": fails,
+                        },
+                    )
+                    # #endregion
+        except Exception as exc:
+            # #region agent log
+            _agent_log("A", "osf_cam.py:_grab_loop", "grab died", {"error": str(exc)})
+            # #endregion
         finally:
-            self._grab_thread = None
+            if self._grab_thread is me:
+                self._grab_thread = None
 
     def _loop(self, on_frame: Callable[[OsfFrame], None] | None) -> None:
+        me = threading.current_thread()
+        _ensure_com()
         cap = self._cap
         smoothed = empty_weights()
         pending = _LatestFrame()
         try:
             if cap is None:
                 raise RuntimeError("Camera closed")
-            ok, probe = cap.read()
-            if not ok or probe is None:
-                raise RuntimeError("Camera produced no frames")
-            frame0 = cv2.resize(probe, (CAM_W, CAM_H))
-            self._tracker = _make_tracker(frame0.shape[1], frame0.shape[0])
+            if self._tracker is None:
+                self._tracker = _make_tracker(CAM_W, CAM_H)
             grab = threading.Thread(
                 target=self._grab_loop,
                 args=(cap, pending),
@@ -489,13 +726,55 @@ class OsfCam:
             )
             self._grab_thread = grab
             grab.start()
+            last_log = 0.0
+            stalls = 0
+            last_seq = 0
+            saw_frame = False
             while self._running:
                 raw = pending.take(timeout=0.05)
                 if raw is None:
+                    stalls += 1
+                    if not saw_frame and stalls >= 30:
+                        raise RuntimeError("Camera produced no frames")
+                    # #region agent log
+                    if time.perf_counter() - last_log >= 0.5:
+                        last_log = time.perf_counter()
+                        _agent_log(
+                            "A",
+                            "osf_cam.py:_loop",
+                            "tracker waiting",
+                            {"stalls": stalls, "grab_alive": bool(grab.is_alive())},
+                        )
+                    # #endregion
                     continue
+                saw_frame = True
+                raw_wh = [int(raw.shape[1]), int(raw.shape[0])]
                 frame = cv2.resize(raw, (CAM_W, CAM_H))
                 started = time.perf_counter()
                 faces = self._tracker.predict(frame)
+                predict_ms = (time.perf_counter() - started) * 1000.0
+                # #region agent log
+                now_log = time.perf_counter()
+                if now_log - last_log >= 0.5:
+                    last_log = now_log
+                    skipped = max(0, pending.seq - last_seq - 1)
+                    last_seq = pending.seq
+                    _agent_log(
+                        "B",
+                        "osf_cam.py:_loop",
+                        "track",
+                        {
+                            "predict_ms": round(predict_ms, 1),
+                            "age_ms": round(pending.age_ms, 1),
+                            "read_ms": round(pending.read_ms, 1),
+                            "faces": len(faces) if faces else 0,
+                            "raw_wh": raw_wh,
+                            "squashed": raw_wh != [CAM_W, CAM_H],
+                            "skipped": skipped,
+                            "dropped": pending.dropped,
+                        },
+                    )
+                # #endregion
                 face = faces[0] if faces else None
                 pose = _face_pose(face)
                 head = _head(face)
@@ -527,11 +806,7 @@ class OsfCam:
                     pose=pose,
                     faces=1 if face is not None else 0,
                     ms=(time.perf_counter() - started) * 1000.0,
-                    camera_jpeg=_encode_jpeg(
-                        apply_mirror(
-                            _draw_camera(frame, face, pose, iris_cam), self.preview_flip
-                        )
-                    ),
+                    camera_jpeg=self._latest_preview(),
                     pts_3d=pts_3d,
                     mouth_2d=mouth_2d,
                     lms_xy=lms_xy,
@@ -548,5 +823,7 @@ class OsfCam:
                 on_frame(snap)
             self._running = False
         finally:
-            self._release()
-            self._thread = None
+            if self._cap is cap:
+                self._release()
+            if self._thread is me:
+                self._thread = None

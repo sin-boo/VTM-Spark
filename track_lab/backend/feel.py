@@ -19,10 +19,14 @@ DEFAULTS = {
     "show_hair": 1.0,
     "show_ids": 0.0,
     "hair_pin": 0.7,
-    "max_yaw": 1.0,
-    "max_roll": 1.0,
+    "hair_width": 1.0,
+    "max_yaw_left": 1.0,
+    "max_yaw_right": 1.0,
+    "max_roll_left": 1.0,
+    "max_roll_right": 1.0,
     "max_pitch_up": 1.0,
     "max_pitch_down": 1.0,
+    "max_size": 1.0,
     "max_look_x": 1.0,
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
@@ -31,6 +35,22 @@ DEFAULTS = {
 _LIMITS = {key: 1.0 for key in DEFAULTS}
 _LIMITS["mouth"] = 2.0
 _LIMITS["gaze_gain"] = 2.0
+_LIMITS["hair_width"] = 2.0
+# One number used to cap both sides of a turn / tilt; it still sets both.
+_BOTH_SIDES = {
+    "max_yaw": ("max_yaw_left", "max_yaw_right"),
+    "max_roll": ("max_roll_left", "max_roll_right"),
+}
+
+
+def _sided(body: dict) -> dict:
+    out = dict(body)
+    for key, sides in _BOTH_SIDES.items():
+        if key in out:
+            value = out.pop(key)
+            for side in sides:
+                out.setdefault(side, value)
+    return out
 
 
 def _clip(value: float, hi: float) -> float:
@@ -52,6 +72,7 @@ class Feel:
             return
         if not isinstance(data, dict):
             return
+        data = _sided(data)
         for key in DEFAULTS:
             if key in data:
                 try:
@@ -70,6 +91,7 @@ class Feel:
     def update(self, body: object) -> dict[str, float | bool]:
         if not isinstance(body, dict):
             return self.payload()
+        body = _sided(body)
         with self._lock:
             for key in DEFAULTS:
                 if key not in body:
@@ -114,20 +136,29 @@ class Feel:
         return self._get("show_ids") >= 0.5
 
     def hair_pin(self) -> float:
-        """0 = full 2.5D hair follow, 1 = outer silhouette stays put."""
+        """0 = full 2.5D hair follow, 1 = rigid parts anchored at the root."""
         return self._get("hair_pin")
 
-    def max_yaw(self) -> float:
-        return self._get("max_yaw")
+    def hair_width(self) -> float:
+        """Left / right lock width gain on a turn. 0 = none, 1 = default, 2 = double."""
+        return self._get("hair_width")
 
-    def max_roll(self) -> float:
-        return self._get("max_roll")
+    def max_yaw(self) -> tuple[float, float]:
+        """(left, right) turn stop fractions; right is positive yaw."""
+        return self._get("max_yaw_left"), self._get("max_yaw_right")
+
+    def max_roll(self) -> tuple[float, float]:
+        """(left, right) tilt stop fractions; right is positive roll."""
+        return self._get("max_roll_left"), self._get("max_roll_right")
 
     def max_pitch_up(self) -> float:
         return self._get("max_pitch_up")
 
     def max_pitch_down(self) -> float:
         return self._get("max_pitch_down")
+
+    def max_size(self) -> float:
+        return self._get("max_size")
 
     def max_look_x(self) -> float:
         return self._get("max_look_x")

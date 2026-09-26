@@ -129,6 +129,7 @@ class SettingsBody(BaseModel):
     show_mouth: bool | None = None
     show_iris_overlay: bool | None = None
     show_skeleton: bool | None = None
+    show_limiters: bool | None = None
     mirror: bool | None = None
     use_iris: bool | None = None
     use_body: bool | None = None
@@ -155,6 +156,19 @@ class CharacterRenameBody(BaseModel):
 
 
 class MeshBody(BaseModel):
+    x: float
+    y: float
+
+
+class HairStrokeBody(BaseModel):
+    part: str = "hair_middle"
+    points: list[list[float]]
+    radius: float = 16
+    erase: bool = False
+
+
+class SkeletonMoveBody(BaseModel):
+    id: int
     x: float
     y: float
 
@@ -391,6 +405,37 @@ def characters_list() -> dict[str, Any]:
     return {"characters": get_runtime().list_characters()}
 
 
+@app.get("/api/characters/fit")
+def character_fit() -> dict[str, Any]:
+    try:
+        return get_runtime().character_fit()
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/characters/fit/hair")
+def character_fit_hair(body: HairStrokeBody) -> dict[str, Any]:
+    try:
+        view = get_runtime().paint_character_hair(
+            body.points,
+            radius=body.radius,
+            part=body.part,
+            erase=body.erase,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "fit": view}
+
+
+@app.post("/api/characters/fit/skeleton")
+def character_fit_skeleton(body: SkeletonMoveBody) -> dict[str, Any]:
+    try:
+        view = get_runtime().move_character_skeleton(body.id, body.x, body.y)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "fit": view}
+
+
 @app.get("/api/characters/{ident}/preview")
 def character_preview(ident: str) -> Response:
     from .character_pack import (
@@ -570,6 +615,7 @@ def lab_status() -> dict[str, Any]:
     try:
         if packet.get("online"):
             rt = get_runtime()
+            rt.adopt_lab_travel_box(packet)
             # Live overlay is copied on the track thread. Doing it here too
             # stacks harness GETs on the desk API and makes the face lag.
             if not bool(getattr(rt, "_tracking", False)):
@@ -583,7 +629,13 @@ def lab_status() -> dict[str, Any]:
 def lab_connect() -> dict[str, Any]:
     from .lab_process import CONNECT_WAIT, connect_lab
 
-    return connect_lab(timeout=CONNECT_WAIT)
+    packet = connect_lab(timeout=CONNECT_WAIT)
+    try:
+        if packet.get("online"):
+            get_runtime().adopt_lab_travel_box(packet)
+    except Exception:
+        pass
+    return packet
 
 
 @app.post("/api/lab/command")
@@ -703,7 +755,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     with _ws_lock:
         _ws_clients.append(ws)
     try:
-        await ws.send_json({"type": "status", "status": get_runtime().status()})
+        rt = get_runtime()
+        await ws.send_json({"type": "status", "status": rt.status()})
+        frame = rt.current_frame_event()
+        if frame is not None:
+            await ws.send_json(frame)
         while True:
             msg = await ws.receive_text()
             if msg == "ping":

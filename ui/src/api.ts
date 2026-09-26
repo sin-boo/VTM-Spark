@@ -55,6 +55,7 @@ export type AppStatus = {
   show_mouth?: boolean
   show_iris_overlay?: boolean
   show_skeleton?: boolean
+  show_limiters?: boolean
   mirror: boolean
   use_iris: boolean
   use_body: boolean
@@ -81,6 +82,8 @@ export type AppStatus = {
   virtual_cam: boolean
   virtual_cam_device: string
   virtual_cam_error: string
+  virtual_cam_width?: number
+  virtual_cam_height?: number
   pose_frozen?: boolean
   pose_key_count?: number
   travel_box?: TravelBox
@@ -88,14 +91,8 @@ export type AppStatus = {
 }
 
 export type TravelBox = {
+  version?: number
   enabled: boolean
-  side: boolean
-  rotate: boolean
-  look_up: boolean
-  look_down: boolean
-  body: boolean
-  body_rotate: boolean
-  eyes: boolean
   left: number
   right: number
   up: number
@@ -104,15 +101,17 @@ export type TravelBox = {
   body_right: number
   body_up: number
   body_down: number
-  yaw: number
-  roll: number
+  turn_left: number
+  turn_right: number
+  tilt_left: number
+  tilt_right: number
+  /** Saved before turn / tilt had sides: one cap for both. */
+  yaw?: number
+  roll?: number
   pitch_up: number
   pitch_down: number
-  body_yaw: number
-  body_roll: number
-  eye_x: number
-  eye_y: number
-  pad_px: number
+  eye: number
+  size: number
 }
 
 export type Checkpoint = { label: string; path: string; source?: string }
@@ -124,6 +123,22 @@ export type CatalogOffer = {
   published?: string
   badge: string
 }
+export type FitBox = [number, number, number, number] | null
+
+export type CharacterFit = {
+  width: number
+  height: number
+  face_height: number
+  hair: { class: string; polygon: number[][] }[]
+  skeleton: { id: number; label: string; x: number; y: number }[]
+  boxes: {
+    head_tight: FitBox
+    head: FitBox
+    body_tight: FitBox
+    body: FitBox
+  }
+}
+
 export type CharacterCard = {
   id: string
   name: string
@@ -174,10 +189,13 @@ export type LabFeel = {
   show_hair: number
   show_ids: number
   hair_pin: number
-  max_yaw: number
-  max_roll: number
+  max_yaw_left: number
+  max_yaw_right: number
+  max_roll_left: number
+  max_roll_right: number
   max_pitch_up: number
   max_pitch_down: number
+  max_size: number
   max_look_x: number
   max_look_y: number
   gaze_gain: number
@@ -245,10 +263,13 @@ export const ZERO_LAB_FEEL: LabFeel = {
   show_hair: 1,
   show_ids: 0,
   hair_pin: 0.7,
-  max_yaw: 1,
-  max_roll: 1,
+  max_yaw_left: 1,
+  max_yaw_right: 1,
+  max_roll_left: 1,
+  max_roll_right: 1,
   max_pitch_up: 1,
   max_pitch_down: 1,
+  max_size: 1,
   max_look_x: 1,
   max_look_y: 1,
   gaze_gain: 1,
@@ -283,6 +304,27 @@ export function mergeLabStatus(cur: LabStatus | null | undefined, next: LabStatu
     ? (server ?? local ?? 'camera')
     : (local ?? server ?? 'camera')
   return { ...cur, ...next, source }
+}
+
+export type LabInputHold = {
+  source: 'camera' | 'ifm'
+  gen: number
+  settled: boolean
+}
+
+/** Keep Camera / iFacialMocap on the click until a poll that started after the command agrees. */
+export function holdLabInput(
+  cur: LabStatus | null | undefined,
+  next: LabStatus,
+  hold: LabInputHold | null,
+  seen: number,
+): { lab: LabStatus; release: boolean } {
+  const merged = mergeLabStatus(cur, next)
+  if (!hold) return { lab: merged, release: false }
+  const agrees = merged.source === hold.source
+  const release = Boolean(hold.settled && seen >= hold.gen && agrees)
+  if (agrees) return { lab: merged, release }
+  return { lab: { ...merged, source: hold.source }, release: false }
 }
 
 export type LabCommandReply = {
@@ -403,6 +445,19 @@ export const api = {
     ),
   characters: () =>
     fetch('/api/characters').then((r) => json<{ characters: CharacterCard[] }>(r)),
+  characterFit: () => fetch('/api/characters/fit').then((r) => json<CharacterFit>(r)),
+  fitHair: (body: { part: string; points: number[][]; radius: number; erase: boolean }) =>
+    fetch('/api/characters/fit/hair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<{ ok: boolean; fit: CharacterFit }>(r)),
+  fitSkeleton: (id: number, x: number, y: number) =>
+    fetch('/api/characters/fit/skeleton', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, x, y }),
+    }).then((r) => json<{ ok: boolean; fit: CharacterFit }>(r)),
   createCharacter: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)

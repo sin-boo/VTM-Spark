@@ -8,16 +8,15 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .rig import project_xy
-
 # 31 neck, 32 R shoulder, 33 R elbow,
 # 34 L shoulder, 35 L elbow, 36 chest. Slot 30 (body nose) is unused.
 PARENT = {32: 31, 33: 32, 34: 31, 35: 34, 36: 31}
 CHAIN = (32, 34, 36, 33, 35)
 SKELETON_IDS = (31, 32, 33, 34, 35, 36)
-_TORSO_YAW = 0.75
-_TORSO_PITCH = 0.75
-_TORSO_ROLL = 0.80
+# The torso shares the face place: slide and size. The neck rides the head
+# (with a rig, through the head's turn); the rest hangs from the neck and takes
+# only part of a tilt. A head turn or nod never turns the torso.
+_TORSO_ROLL = 0.45
 _SHOULDER_FROM_MOUTH = 0.50
 _SHOULDER_HALF = 0.58
 _ELBOW_OUT = 0.08
@@ -28,7 +27,6 @@ _HSV_GREEN_LO = (35, 40, 40)
 _HSV_GREEN_HI = (90, 255, 255)
 _CHROMA_MIN = 0.12
 _CHROMA_MAX = 0.88
-_SHOULDER_SPAN = 2.55
 _SHOULDER_INSET = 0.08
 _ELBOW_ALONG = 0.82
 _ELBOW_INSET = 0.18
@@ -154,29 +152,18 @@ def _torso_from_chroma(pts: np.ndarray, bgr: np.ndarray) -> list[dict[str, Any]]
         spans.append((y, hit[0], hit[1], hit[2]))
     if len(spans) < 12:
         return None
-    search_hi = min(len(spans) - 1, max(6, int(0.28 * len(spans))))
-    neck_i = min(range(search_hi + 1), key=lambda i: spans[i][3])
+    # Neck is the narrowest row under the chin. Shoulders are the widest row
+    # of the upper torso. A 2.55× neck rule drops any character whose collar
+    # or hair is already wide, and the face-width fallback is then too small.
+    neck_end = min(len(spans) - 1, max(6, int(0.35 * len(spans))))
+    neck_i = min(range(neck_end + 1), key=lambda i: spans[i][3])
     neck_y, neck_x0, neck_x1, neck_span = spans[neck_i]
     if neck_span < 8:
         return None
-    need = _SHOULDER_SPAN * float(neck_span)
-    sh_i = None
-    for i in range(neck_i + 1, len(spans)):
-        if spans[i][3] >= need:
-            sh_i = i
-            break
-    if sh_i is None:
-        return None
-    while sh_i + 1 < len(spans):
-        dy = float(spans[sh_i + 1][0] - spans[sh_i][0])
-        if dy <= 0.0:
-            break
-        dspan = float(spans[sh_i + 1][3] - spans[sh_i][3])
-        if dspan / dy < 1.5:
-            break
-        sh_i += 1
+    bust_end = min(len(spans) - 1, max(neck_i + 1, int(0.55 * len(spans))))
+    sh_i = max(range(neck_i, bust_end + 1), key=lambda i: spans[i][3])
     sh_y, sh_x0, sh_x1, sh_span = spans[sh_i]
-    if sh_y <= neck_y or sh_span < neck_span * 1.35:
+    if sh_y <= neck_y or sh_span < 8:
         return None
     sh_half = 0.5 * float(sh_span)
     inset = _SHOULDER_INSET * sh_half
@@ -216,28 +203,74 @@ def skeleton_from_still(pts: np.ndarray, bgr: np.ndarray | None = None) -> list[
     return fitted if fitted else skeleton_from_face(pts)
 
 
-def _head_offset(off: np.ndarray, yaw: float, pitch: float, roll: float) -> np.ndarray:
-    """Same 2.5D + perspective as the face, around the neck."""
-    xs = np.asarray([float(off[0])], dtype=np.float64)
-    ys = np.asarray([float(off[1])], dtype=np.float64)
-    radius = max(float(np.hypot(float(off[0]), float(off[1]))) * 1.05, 1.0)
-    xr, yr = project_xy(xs, ys, yaw, pitch, roll, radius)
-    return np.array([float(xr[0]), float(yr[0])], dtype=np.float32)
+def _tilt_offset(off: np.ndarray, roll: float) -> np.ndarray:
+    """Rotate a joint around the neck in the picture. No yaw or pitch."""
+    if abs(roll) < 1e-8:
+        return np.asarray(off, dtype=np.float32)
+    c = math.cos(roll)
+    s = math.sin(roll)
+    x = float(off[0])
+    y = float(off[1])
+    return np.array([c * x - s * y, s * x + c * y], dtype=np.float32)
 
 
 def _face_xform(point: np.ndarray, place: dict[str, float] | None) -> np.ndarray:
-    """Move and size a rest joint with the face place. Skeleton does not write location."""
+    """Scale and slide the torso with the face."""
     if not place:
         return point
     cx = float(place.get("cx", 0.0))
     cy = float(place.get("cy", 0.0))
+    scale = float(place.get("scale", 1.0))
     dx = float(place.get("dx", 0.0))
     dy = float(place.get("dy", 0.0))
-    scale = float(place.get("scale", 1.0))
     return np.array(
-        [cx + dx + scale * (float(point[0]) - cx), cy + dy + scale * (float(point[1]) - cy)],
+        [
+            cx + dx + scale * (float(point[0]) - cx),
+            cy + dy + scale * (float(point[1]) - cy),
+        ],
         dtype=np.float32,
     )
+
+
+def _torso_roll(head_roll_deg: float) -> float:
+    """The share of a head tilt the shoulders take, in radians."""
+    return math.radians(float(np.clip(head_roll_deg, -25.0, 25.0))) * _TORSO_ROLL
+
+
+def _follow_with_rig(rest: list[dict[str, Any]], rig: Any) -> list[dict[str, Any]]:
+    """The neck rides the head; the torso hangs from it without the head's turn.
+
+    Mapping every joint through the face card turned the torso with the head:
+    a big look swung the shoulders round the nose and folded them into a line.
+    """
+    place = rig.place()
+    cx = float(place["cx"])
+    cy = float(place["cy"])
+    scale = float(place.get("scale", 1.0))
+    joints = [joint for joint in rest if int(joint["id"]) in SKELETON_IDS]
+    if not joints:
+        return []
+    rest_by = {int(joint["id"]): joint for joint in joints}
+    neck = rest_by.get(31)
+    if neck is None:
+        return [dict(joint) for joint in joints]
+    nx, ny = rig.map_local(
+        np.array([float(neck["x"]) - cx], dtype=np.float64),
+        np.array([float(neck["y"]) - cy], dtype=np.float64),
+    )
+    neck_rest = _xy(neck)
+    neck_xy = np.array([float(nx[0]), float(ny[0])], dtype=np.float32)
+    roll = _torso_roll(math.degrees(float(rig.turn()["roll"])))
+    out: list[dict[str, Any]] = []
+    for joint in joints:
+        point = neck_xy
+        if int(joint["id"]) != 31:
+            point = neck_xy + _tilt_offset((_xy(joint) - neck_rest) * scale, roll)
+        record = dict(joint)
+        record["x"] = round(float(point[0]), 1)
+        record["y"] = round(float(point[1]), 1)
+        out.append(record)
+    return out
 
 
 def follow_skeleton(
@@ -247,26 +280,25 @@ def follow_skeleton(
     cam_live: list[dict[str, Any]] | None = None,
     head: dict[str, float] | None = None,
     place: dict[str, float] | None = None,
+    rig: Any = None,
 ) -> list[dict[str, Any]]:
-    """Parent the manual skeleton to the face place; ignore camera body pose."""
+    """Parent the manual skeleton to the face. Ignore camera body pose."""
     del live_face, cam_rest, cam_live
     if not rest:
         return []
+    if rig is not None and getattr(rig, "locked", False):
+        return _follow_with_rig(rest, rig)
     rest_by = {int(joint["id"]): joint for joint in rest}
     neck = rest_by.get(31)
     if neck is None:
         return [dict(joint) for joint in rest]
     neck_xy = _face_xform(_xy(neck), place)
-    yaw = pitch = roll = 0.0
-    if head:
-        yaw = math.radians(float(np.clip(head.get("yaw", 0.0), -40.0, 40.0))) * _TORSO_YAW
-        pitch = math.radians(float(np.clip(head.get("pitch", 0.0), -32.0, 32.0))) * _TORSO_PITCH
-        roll = math.radians(float(np.clip(head.get("roll", 0.0), -25.0, 25.0))) * _TORSO_ROLL
+    roll = _torso_roll(head.get("roll", 0.0)) if head else 0.0
     posed = {31: neck_xy}
     for idx, joint in rest_by.items():
         if idx != 31:
-            posed[idx] = neck_xy + _head_offset(
-                _face_xform(_xy(joint), place) - neck_xy, yaw, pitch, roll
+            posed[idx] = neck_xy + _tilt_offset(
+                _face_xform(_xy(joint), place) - neck_xy, roll
             )
     placed = {31: neck_xy}
     for child in CHAIN:

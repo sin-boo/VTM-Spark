@@ -50,8 +50,57 @@ export type FeelSettings = {
   show_hair: number
   show_ids: number
   hair_pin: number
+  hair_width: number
   gaze_gain: number
   gaze_smooth: number
+  max_yaw_left?: number
+  max_yaw_right?: number
+  max_roll_left?: number
+  max_roll_right?: number
+  max_pitch_up?: number
+  max_pitch_down?: number
+  max_size?: number
+  max_look_x?: number
+  max_look_y?: number
+}
+
+export type TravelBox = {
+  version?: number
+  enabled: boolean
+  left: number
+  right: number
+  up: number
+  down: number
+  body_left: number
+  body_right: number
+  body_up: number
+  body_down: number
+  turn_left: number
+  turn_right: number
+  tilt_left: number
+  tilt_right: number
+  /** Saved before turn / tilt had sides: one cap for both. */
+  yaw?: number
+  roll?: number
+  pitch_up: number
+  pitch_down: number
+  eye: number
+  size: number
+}
+
+export type TravelRects = {
+  head?: number[] | null
+  head_wall?: number[] | null
+  body?: number[] | null
+  body_wall?: number[] | null
+}
+
+export type HairPart = {
+  class: string
+  polygon: number[][]
+  side?: 'l' | 'r' | 'mid'
+  width?: number
+  pin?: number
 }
 
 export type IrisCamHit = {
@@ -99,6 +148,7 @@ export type LabStatus = {
   presets: MouthPreset[]
   points: number[][]
   shapes: Record<string, number[][]>
+  mids?: string[]
   live?: boolean
   weights?: MixWeights
   head?: { pitch: number; yaw: number; roll: number }
@@ -109,9 +159,11 @@ export type LabStatus = {
   ifm?: IfmStatus
   calib?: CalibStatus
   feel?: FeelSettings
+  travel_box?: TravelBox
+  travel_rects?: TravelRects
   mouth_points?: { id: number; on: boolean; ring: 'in' | 'out'; to: number | null }[]
   eye_points?: { id: number; on: boolean; side: 'l' | 'r'; artificial?: boolean; to: number | null }[]
-  hair?: { class: string; polygon: number[][] }[]
+  hair?: HairPart[]
   skeleton?: { id: number; x: number; y: number; score: number }[]
   iris?: { id: number; x: number; y: number; score: number; visible?: boolean }[]
   iris_method?: string
@@ -122,6 +174,11 @@ export type LabStatus = {
   gen?: boolean
   gen_ms?: number
   message?: string
+  recording?: boolean
+  record_frames?: number
+  record_seconds?: number
+  record_path?: string
+  record_error?: string
 }
 
 export type LiveStatus = {
@@ -141,14 +198,21 @@ export type LiveStatus = {
   calib?: CalibStatus
   mouth_points?: { id: number; on: boolean; ring: 'in' | 'out'; to: number | null }[]
   eye_points?: { id: number; on: boolean; side: 'l' | 'r'; artificial?: boolean; to: number | null }[]
-  hair?: { class: string; polygon: number[][] }[]
+  hair?: HairPart[]
   skeleton?: { id: number; x: number; y: number; score: number }[]
   iris?: { id: number; x: number; y: number; score: number; visible?: boolean }[]
   iris_method?: string
   iris_cam?: IrisCamHit[]
   look?: { x: number; y: number } | null
   feel?: FeelSettings
+  travel_box?: TravelBox
+  travel_rects?: TravelRects
   point_offsets?: { id: number; dx: number; dy: number }[]
+  recording?: boolean
+  record_frames?: number
+  record_seconds?: number
+  record_path?: string
+  record_error?: string
 }
 
 async function read(res: Response): Promise<LabStatus> {
@@ -166,7 +230,7 @@ export const api = {
   track: () => fetch('/api/track', { method: 'POST' }).then(read),
   generate: (overlay?: {
     points?: number[][]
-    hair?: { class: string; polygon: number[][] }[]
+    hair?: HairPart[]
     skeleton?: { id: number; x: number; y: number; score: number }[]
     iris?: { id: number; x: number; y: number; score: number; visible?: boolean }[]
   }) =>
@@ -223,6 +287,24 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, mouth }),
     }).then(read),
+  moveMouth: (id: string, t: number) =>
+    fetch('/api/preset/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, t }),
+    }).then(read),
+  dropMouth: (id: string) =>
+    fetch('/api/preset/drop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then(read),
+  record: (on: boolean) =>
+    fetch('/api/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+    }).then(read),
   calibrate: (id: string) =>
     fetch('/api/calibrate', {
       method: 'POST',
@@ -234,6 +316,12 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(feel),
+    }).then(read),
+  setTravel: (travel: Partial<TravelBox>) =>
+    fetch('/api/travel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(travel),
     }).then(read),
   setMirror: (on: boolean) =>
     fetch('/api/mirror', {

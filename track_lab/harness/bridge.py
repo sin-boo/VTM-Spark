@@ -82,6 +82,22 @@ def publish_warming(*, clients: int | None = None) -> None:
     hub.publish(warming_frame(clients=n))
 
 
+def _publish_ack_status(msg: dict[str, Any]) -> None:
+    """Copy a command reply onto the host status slot.
+
+    The worker sends status and then a frame. The frame used to replace the
+    unsent status on the IPC mailbox, so GET /status kept saying camera after
+    set_input. The ack still carries the real snapshot — publish that here.
+    """
+    nested = msg.get("status")
+    if not isinstance(nested, dict):
+        return
+    status = dict(nested)
+    status["type"] = "status"
+    status.setdefault("loaded", True)
+    hub.publish(status)
+
+
 def lab_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -322,6 +338,7 @@ class WorkerBridge:
                     hub.publish(packet)
                 continue
             if kind == "ack":
+                _publish_ack_status(msg)
                 self._resolve(str(msg.get("id") or ""), {"ack": msg})
                 continue
             if kind == "jpeg_data":

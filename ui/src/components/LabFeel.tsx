@@ -8,9 +8,15 @@ import {
 } from '../api'
 import { Lamp } from './widgets'
 
-type FeelSlider = { key: keyof LabFeel; label: string; max: number }
+type FeelSlider = { key: keyof LabFeel; label: string; max: number; title?: string }
 
 const LIVE_FEEL: FeelSlider[] = [
+  {
+    key: 'smoothing',
+    label: 'Smooth',
+    max: 1,
+    title: 'Ease each new pose toward the last one. Higher is smoother. Eyes use the same ease.',
+  },
   { key: 'mouth', label: 'Mouth', max: 2 },
   { key: 'hair_pin', label: 'Hair pin', max: 1 },
 ]
@@ -39,18 +45,79 @@ function meterFill(name: string, value: number) {
   return `${Math.round(Math.min(1, Math.max(0, n)) * 100)}%`
 }
 
-function MixLane({ rows }: { rows: [string, number][] }) {
+// Status arrives every ~250 ms; ease the meters toward each sample per frame so
+// they glide instead of stepping. ~80 ms time constant keeps them responsive.
+const METER_TAU = 0.08
+
+type MeterEls = { bar: HTMLElement | null; num: HTMLElement | null }
+
+function useEasedMeters(rows: [string, number][]) {
+  const els = useRef(new Map<string, MeterEls>())
+  const shown = useRef(new Map<string, number>())
+  const target = useRef(new Map<string, number>())
+  const raf = useRef(0)
+  const last = useRef(0)
+
+  const paint = (name: string, value: number) => {
+    const el = els.current.get(name)
+    if (el?.bar) el.bar.style.width = meterFill(name, value)
+    if (el?.num) el.num.textContent = value.toFixed(2)
+  }
+
+  const step = (now: number) => {
+    const dt = last.current ? Math.min(0.1, (now - last.current) / 1000) : 1 / 60
+    last.current = now
+    const k = 1 - Math.exp(-dt / METER_TAU)
+    let moving = false
+    for (const [name, goal] of target.current) {
+      const cur = shown.current.get(name) ?? goal
+      let next = cur + (goal - cur) * k
+      if (Math.abs(goal - next) < 0.001) next = goal
+      else moving = true
+      shown.current.set(name, next)
+      paint(name, next)
+    }
+    raf.current = moving ? window.requestAnimationFrame(step) : 0
+    if (!moving) last.current = 0
+  }
+
+  useEffect(() => {
+    for (const [name, value] of rows) target.current.set(name, value)
+    if (!raf.current) raf.current = window.requestAnimationFrame(step)
+  })
+
+  useEffect(() => () => window.cancelAnimationFrame(raf.current), [])
+
+  const bind = (name: string, part: keyof MeterEls) => (node: HTMLElement | null) => {
+    const el = els.current.get(name) ?? { bar: null, num: null }
+    el[part] = node
+    els.current.set(name, el)
+  }
+  const initial = (name: string, value: number) => shown.current.get(name) ?? value
+  return { bind, initial }
+}
+
+function MixLane(props: {
+  rows: [string, number][]
+  meters: ReturnType<typeof useEasedMeters>
+}) {
+  const { rows, meters } = props
   return (
     <>
-      {rows.map(([name, value]) => (
-        <li key={name} className={name.startsWith('look') ? 'is-look' : undefined}>
-          <span>{name}</span>
-          <i>
-            <b style={{ width: meterFill(name, value) }} />
-          </i>
-          <em className="mono">{value.toFixed(2)}</em>
-        </li>
-      ))}
+      {rows.map(([name, value]) => {
+        const v = meters.initial(name, value)
+        return (
+          <li key={name} className={name.startsWith('look') ? 'is-look' : undefined}>
+            <span>{name}</span>
+            <i>
+              <b ref={meters.bind(name, 'bar')} style={{ width: meterFill(name, v) }} />
+            </i>
+            <em ref={meters.bind(name, 'num')} className="mono">
+              {v.toFixed(2)}
+            </em>
+          </li>
+        )
+      })}
     </>
   )
 }
@@ -58,6 +125,7 @@ function MixLane({ rows }: { rows: [string, number][] }) {
 export function MixMeters({ lab }: { lab: LabStatus | null }) {
   const live = Boolean(lab?.live)
   const rows = mixRows(lab)
+  const meters = useEasedMeters(rows)
   const eyes = rows.slice(0, 4)
   const mouth = rows.slice(4)
   return (
@@ -68,9 +136,9 @@ export function MixMeters({ lab }: { lab: LabStatus | null }) {
       </div>
       <ul className="lab-meters">
         <li className="meter-kicker">Eyes</li>
-        <MixLane rows={eyes} />
+        <MixLane rows={eyes} meters={meters} />
         <li className="meter-kicker">Mouth</li>
-        <MixLane rows={mouth} />
+        <MixLane rows={mouth} meters={meters} />
       </ul>
     </section>
   )
@@ -122,6 +190,7 @@ function FeelSliders(props: SliderProps) {
             max={row.max}
             step={0.01}
             value={draft[row.key] ?? ZERO_LAB_FEEL[row.key]}
+            title={row.title}
             disabled={!online || busy}
             onChange={(e) => {
               const value = Number(e.target.value)

@@ -6,6 +6,8 @@ from backend.lab_harness import (
     DEFAULT_FEEL,
     SLOW_OPS,
     hair_from_frame,
+    lab_packet_from_ack,
+    lab_packet_generation,
     looks_like_lab,
     merge_frame_into_status,
     occupied_error,
@@ -436,6 +438,8 @@ def _hair_runtime():
     rt._lock = threading.Lock()
     rt._lab_drive = False
     rt._lab_seen_online = False
+    rt._lab_overlay_gen = 0
+    rt._lab_seen_generation = 0
     rt._pose_frozen = False
     rt._mesh_edited = False
     rt._last_image = None
@@ -528,7 +532,7 @@ def test_lab_overlay_keeps_lab_look(monkeypatch) -> None:
     rt = _hair_runtime()
     rt._lab_drive = True
     rt._last_image = Image.new("RGB", (100, 100), (0, 0, 0))
-    rt._status = {"travel_box": {"enabled": True, "eyes": True, "eye_x": 0.05, "eye_y": 0.05}}
+    rt._status = {"travel_box": {"version": 2, "enabled": True, "eye": 0.05}}
     frame = {
         "image_wh": [100, 100],
         "keypoints": [
@@ -567,7 +571,6 @@ def test_lab_overlay_uses_lab_wh_when_desk_differs(monkeypatch) -> None:
     rt = _hair_runtime()
     rt._lab_drive = True
     rt._last_image = Image.new("RGB", (200, 200), (0, 0, 0))
-    rt._clamp_lab_walk = lambda driven, hair: (driven, hair)
     frame = {
         "image_wh": [100, 100],
         "keypoints": [
@@ -589,6 +592,7 @@ def test_lab_overlay_uses_lab_wh_when_desk_differs(monkeypatch) -> None:
 
 
 def test_lab_overlay_walk_stops_at_wall(monkeypatch) -> None:
+    """Desk no longer pulls lab walk back — the wall lives in Track Lab."""
     from PIL import Image
 
     from backend.engine import neutral_keypoints
@@ -601,7 +605,7 @@ def test_lab_overlay_walk_stops_at_wall(monkeypatch) -> None:
     rt = _hair_runtime()
     rt._lab_drive = True
     rt._last_image = Image.new("RGB", (100, 100), (0, 0, 0))
-    rt._status = {"travel_box": {"enabled": True, "side": True, "left": 0.0, "right": 0.0}}
+    rt._status = {"travel_box": {"version": 2, "enabled": True, "left": 0.0, "right": 0.0}}
     rt.engine._ref_keypoints = rest
     live = rest.copy()
     live[:, 0] += 0.7
@@ -636,8 +640,103 @@ def test_lab_overlay_walk_stops_at_wall(monkeypatch) -> None:
     )
     out = StreamRuntime._lab_overlay_keypoints(rt)
     assert out is not None
-    assert float(out[4, 0]) < float(live[4, 0]) - 0.2
+    assert abs(float(out[4, 0]) - float(live[4, 0])) < 1e-5
     assert abs(float(out[RIGHT_IRIS, 0] - out[13, 0]) - look) < 1e-5
+
+
+def test_update_settings_sends_set_travel_not_feel_caps(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from backend.stream import StreamRuntime
+    from backend.travel_box import normalize_travel_box
+
+    calls: list[tuple[str, dict]] = []
+
+    class _Lab:
+        def command(self, op, body=None):
+            calls.append((op, dict(body or {})))
+            return {"ok": True, "online": True, "status": {"travel_box": dict(body or {})}}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **_kw: None)
+    rt = StreamRuntime.__new__(StreamRuntime)
+    rt._lock = threading.Lock()
+    rt._status = {"travel_box": normalize_travel_box(None)}
+    rt._lab_drive = True
+    rt._lab_seen_online = True
+    rt._tracking = False
+    rt._listeners = []
+    rt._last_image = None
+    rt._travel_ref_rgb = None
+    rt._travel_preview_kps = None
+    rt._last_overlay_kps = None
+    rt.engine = SimpleNamespace(_ref_keypoints=None)
+    rt.tracker = SimpleNamespace(mirror=False)
+    StreamRuntime.update_settings(rt, travel_box={"turn_left": 40.0, "left": 0.12})
+    assert len(calls) == 1
+    assert calls[0][0] == "set_travel"
+    body = calls[0][1]
+    assert "max_yaw" not in body
+    assert "max_look_x" not in body
+    assert abs(float(body["turn_left"]) - 40.0) < 1e-6
+    assert abs(float(body["left"]) - 0.12) < 1e-6
+    assert body == normalize_travel_box(body)
+    assert rt._travel_from_desk is True
+    # A camera frame packed before the edit must not pull the slider back.
+    assert StreamRuntime.adopt_lab_travel_box(rt, {"travel_box": {"turn_left": 5.0}}) is False
+    assert abs(float(rt._status["travel_box"]["turn_left"]) - 40.0) < 1e-6
+    assert StreamRuntime.adopt_lab_travel_box(
+        rt, {"travel_box": {"version": 2, "turn_left": 40.0, "left": 0.2}}, user_edit=True
+    ) is True
+    assert abs(float(rt._status["travel_box"]["left"]) - 0.2) < 1e-6
+
+
+def test_adopt_lab_travel_box_updates_desk_without_set_travel(monkeypatch) -> None:
+    import threading
+
+    from backend.stream import StreamRuntime
+    from backend.travel_box import normalize_travel_box
+
+    calls: list[tuple[str, dict]] = []
+    saved: list[dict] = []
+
+    class _Lab:
+        def command(self, op, body=None):
+            calls.append((op, dict(body or {})))
+            return {"ok": True, "online": True}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    monkeypatch.setattr(
+        "backend.ui_session.save_ui_session",
+        lambda **kw: saved.append(dict(kw)),
+    )
+    rt = StreamRuntime.__new__(StreamRuntime)
+    rt._lock = threading.Lock()
+    rt._status = {"travel_box": normalize_travel_box({"turn_left": 80.0})}
+    rt._listeners = []
+    rt._travel_ref_rgb = None
+    changed = StreamRuntime.adopt_lab_travel_box(
+        rt, {"travel_box": {"turn_left": 35.0, "enabled": True}}
+    )
+    assert changed is True
+    assert abs(float(rt._status["travel_box"]["turn_left"]) - 35.0) < 1e-6
+    assert saved and abs(float(saved[-1]["travel_box"]["turn_left"]) - 35.0) < 1e-6
+    assert calls == []
+    # Identical echo must not loop
+    assert StreamRuntime.adopt_lab_travel_box(rt, {"travel_box": rt._status["travel_box"]}) is False
+    assert calls == []
+    StreamRuntime._push_lab_limiters(rt)  # no user_edit → no-op
+    assert calls == []
+
+
+def test_merge_frame_copies_travel_box() -> None:
+    payload = {"live": False}
+    merge_frame_into_status(
+        payload,
+        {"live": True, "travel_box": {"yaw": 22.0, "enabled": True}},
+    )
+    assert payload["travel_box"]["yaw"] == 22.0
 
 
 def test_lab_keeps_authored_end_shapes() -> None:
@@ -670,8 +769,8 @@ def test_sync_lab_character_keeps_authored_shapes(monkeypatch) -> None:
 
     monkeypatch.setattr("backend.lab_harness.lab", _Lab())
     rt._same_lab_still = lambda: True
-    rt._lab_ack = lambda op, body=None: calls.append(op)
-    rt._adopt_lab_hair = lambda: calls.append("hair")
+    rt._lab_ack = lambda op, body=None: calls.append(op) or {"ok": True, "generation": 1}
+    rt._adopt_lab_hair = lambda packet=None: calls.append("hair") or True
     rt.adopt_lab_overlay = lambda packet=None, emit=False: calls.append("overlay")
     StreamRuntime._sync_lab_character(rt)
     assert "put" not in "".join(calls)
@@ -701,8 +800,12 @@ def test_sync_lab_character_replaces_when_still_changes(monkeypatch) -> None:
     monkeypatch.setattr("backend.lab_harness.lab", _Lab())
     rt._same_lab_still = lambda: False
     rt._write_lab_source = lambda: "track_lab/input/source.png"
-    rt._lab_ack = lambda op, body=None: calls.append(op)
-    rt._adopt_lab_hair = lambda: calls.append("hair")
+    rt._lab_ack = lambda op, body=None: calls.append(op) or {
+        "ok": True,
+        "status": {"generation": 2},
+        "frame": {"generation": 2, "keypoints": [], "hair": []},
+    }
+    rt._adopt_lab_hair = lambda packet=None: calls.append("hair") or True
     rt.adopt_lab_overlay = lambda packet=None, emit=False: calls.append("overlay")
     StreamRuntime._sync_lab_character(rt)
     assert any(item.startswith("put:") for item in calls)
@@ -831,6 +934,20 @@ def test_apply_lab_calibrate_unfreezes_and_copies_overlay() -> None:
     assert seen and seen[0][1] is True
 
 
+def test_desk_smooth_slider_sends_feel() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    feel = (root / "ui" / "src" / "components" / "LabFeel.tsx").read_text(
+        encoding="utf-8"
+    )
+    app = (root / "ui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "key: 'smoothing'" in feel
+    assert "label: 'Smooth'" in feel
+    assert "smoothing: value, gaze_smooth: value" in feel
+    assert "sendLab('set_feel', patch)" in app
+
+
 def test_desk_calibrate_stays_above_mouth_slider() -> None:
     from pathlib import Path
 
@@ -920,3 +1037,187 @@ def test_update_settings_sends_set_mirror_when_lab_is_seen() -> None:
     assert calls == [("set_mirror", {"on": True})]
     assert rt.tracker.mirror is True
     assert rt._status["mirror"] is True
+
+
+def test_lab_packet_from_ack_prefers_command_frame() -> None:
+    ack = {
+        "ok": True,
+        "status": {"generation": 4, "width": 100, "height": 50},
+        "frame": {
+            "generation": 4,
+            "image_wh": [100, 50],
+            "keypoints": [{"i": 21, "x": 40.0, "y": 60.0, "score": 1.0, "visible": True}],
+            "hair": [],
+        },
+    }
+    packet = lab_packet_from_ack(ack)
+    assert packet is not None
+    assert packet["generation"] == 4
+    assert packet["keypoints"][0]["x"] == 40.0
+    assert lab_packet_generation(packet) == 4
+
+
+def test_merge_frame_copies_generation() -> None:
+    status = {"generation": 9, "online": True}
+    frame = {
+        "generation": 3,
+        "keypoints": [{"i": 0, "x": 1.0, "y": 2.0, "score": 1.0, "visible": True}],
+    }
+    merge_frame_into_status(status, frame)
+    assert status["generation"] == 3
+    assert status["keypoints"][0]["i"] == 0
+
+
+def test_generation_zero_still_drives_the_live_overlay(monkeypatch) -> None:
+    from PIL import Image
+
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    rt._lab_overlay_gen = None
+    rt._last_image = Image.new("RGB", (100, 100), (0, 0, 0))
+    live = {
+        "generation": 0,
+        "image_wh": [100, 100],
+        "keypoints": [
+            {"i": 21, "x": 40.0, "y": 60.0, "score": 1.0, "visible": True},
+        ],
+        "hair": [
+            {
+                "class": "hair_middle",
+                "polygon": [[10.0, 10.0], [20.0, 10.0], [15.0, 20.0]],
+            }
+        ],
+    }
+    StreamRuntime._accept_lab_overlay(rt, {"generation": 0, "online": True})
+    assert rt._lab_overlay_gen == 0
+    monkeypatch.setattr("backend.lab_harness.lab", type("L", (), {"frame": lambda self: live})())
+    assert StreamRuntime.adopt_lab_overlay(rt, live, emit=False) is True
+    assert rt._last_overlay_kps is not None
+    assert float(rt._last_overlay_kps[21, 0]) != 0.0
+
+
+def test_stale_lab_overlay_is_ignored_after_create_reset(monkeypatch) -> None:
+    from PIL import Image
+
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    rt._lab_overlay_gen = None
+    rt._last_image = Image.new("RGB", (100, 100), (0, 0, 0))
+    stale = {
+        "generation": 7,
+        "image_wh": [100, 100],
+        "keypoints": [
+            {"i": 21, "x": 10.0, "y": 10.0, "score": 1.0, "visible": True},
+        ],
+        "hair": [
+            {
+                "class": "hair_middle",
+                "polygon": [[10.0, 10.0], [20.0, 10.0], [15.0, 20.0]],
+            }
+        ],
+    }
+
+    class _Lab:
+        def frame(self):
+            return stale
+
+        def status(self, merge_frame=True):
+            return {"online": True, **stale}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    assert StreamRuntime.adopt_lab_overlay(rt, stale, emit=False) is False
+    assert rt._last_overlay_kps is None
+    assert StreamRuntime._adopt_lab_hair(rt, stale) is False
+    assert rt._last_lab_hair is None
+
+
+def test_new_lab_generation_replaces_overlay_after_create(monkeypatch) -> None:
+    from PIL import Image
+
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    rt._lab_overlay_gen = 8
+    rt._last_image = Image.new("RGB", (100, 100), (0, 0, 0))
+    fresh = {
+        "generation": 8,
+        "image_wh": [100, 100],
+        "keypoints": [
+            {"i": 21, "x": 50.0, "y": 50.0, "score": 1.0, "visible": True},
+        ],
+        "hair": [
+            {
+                "class": "hair_right",
+                "polygon": [[80.0, 10.0], [90.0, 10.0], [85.0, 20.0]],
+            }
+        ],
+    }
+    monkeypatch.setattr("backend.lab_harness.lab", type("L", (), {"frame": lambda self: fresh})())
+    assert StreamRuntime.adopt_lab_overlay(rt, fresh, emit=False) is True
+    assert rt._last_overlay_kps is not None
+    assert StreamRuntime._adopt_lab_hair(rt, fresh) is True
+    assert rt._last_lab_hair[0]["class"] == "hair_right"
+
+
+def test_create_captures_hair_when_lab_overlay_is_not_current(monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    rt._lab_overlay_gen = None
+    rt._lab_drive = False
+    captured = {"n": 0}
+
+    def capture(self, rest_keypoints=None):
+        captured["n"] += 1
+        self._hair_capture_done = True
+
+    monkeypatch.setattr(StreamRuntime, "_capture_character_hair_mesh", capture)
+    monkeypatch.setattr(StreamRuntime, "_lab_harness_online", lambda self: True)
+    StreamRuntime._maybe_capture_hair(rt)
+    assert captured["n"] == 1
+
+
+def test_sync_lab_character_uses_track_ack_frame(monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    seen: list[object] = []
+
+    class _Lab:
+        def status(self, merge_frame=False):
+            return {"online": True, "ready": True, "generation": 3, "shapes": {}}
+
+        def put_source(self, path):
+            return {
+                "ok": True,
+                "status": {"generation": 4},
+                "frame": {"generation": 4, "keypoints": [], "hair": []},
+            }
+
+        def frame(self):
+            raise AssertionError("desk must use the track ack, not GET /frame")
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    rt._same_lab_still = lambda: False
+    rt._write_lab_source = lambda: "track_lab/input/source.png"
+    rt._lab_ack = lambda op, body=None: {
+        "ok": True,
+        "status": {"generation": 4},
+        "frame": {
+            "generation": 4,
+            "image_wh": [10, 10],
+            "keypoints": [{"i": 0, "x": 1.0, "y": 1.0, "score": 1.0, "visible": True}],
+            "hair": [],
+        },
+    }
+    rt._adopt_lab_hair = lambda packet=None: seen.append(("hair", packet and packet.get("generation"))) or True
+    rt.adopt_lab_overlay = lambda packet=None, emit=False: seen.append(
+        ("overlay", packet and packet.get("generation"))
+    )
+    rt._maybe_capture_hair = lambda rest_keypoints=None: None
+    StreamRuntime._sync_lab_character(rt, replace=True)
+    assert ("hair", 4) in seen
+    assert ("overlay", 4) in seen
+    assert rt._lab_overlay_gen == 4

@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 import torch
 
 from .hrnet import HRNetV2
+from .paths import TRACKERS
 
-ROOT = Path(__file__).resolve().parents[1]
-ANIME_DIR = ROOT / "models" / "anime"
+ANIME_DIR = TRACKERS
 YOLO_NAME = "face_yolov8n.pt"
 HRNET_NAME = "mmpose_anime-face_hrnetv2.pth"
 INPUT_SIZE = 256
@@ -59,6 +57,9 @@ POINT_COLOR = {
 
 _NOSE_HALF_W = 0.14
 _NOSE_SIDE_LIFT = 0.04
+# A real nose stays between the eyes. Farther than this (fraction of the
+# eye distance) is a heatmap spike on the cheek, not a look to the side.
+_NOSE_OFF_X = 0.28
 
 _detector: "AnimeFaceMesh | None" = None
 
@@ -105,6 +106,10 @@ def hrnet_native_to_label28(pts: np.ndarray) -> np.ndarray:
     if cols < 3 or float(src[23, 2]) >= 0.05:
         tip_x, tip_y = float(src[23, 0]), float(src[23, 1])
         tip_sc = float(src[23, 2]) if cols > 2 else 1.0
+        if l_eye is not None and r_eye is not None:
+            mid_x = 0.5 * (float(l_eye[0]) + float(r_eye[0]))
+            if abs(tip_x - mid_x) > _NOSE_OFF_X * eye_dist:
+                tip_x = mid_x
         half_w = _NOSE_HALF_W * eye_dist
         lift = _NOSE_SIDE_LIFT * eye_dist
         for i, (x, y) in (
@@ -264,14 +269,16 @@ def drop_anime_chin(pts: np.ndarray) -> np.ndarray:
     """Slide a cropped-off chin down onto the round jaw. Eyes/mouth stay put.
 
     HRNet's contour-2 often sits on the lower lip when the crop clips the
-    jaw. Anime chins sit about one nose→mouth below the slit.
+    jaw. Anime chins sit about one nose→slit below the upper lip. The lower
+    lip drops on an open "woo" and must not lengthen that distance.
     """
     src = np.asarray(pts, dtype=np.float32)
     if src.ndim != 2 or src.shape[0] < 28 or src.shape[1] < 2:
         return src
     out = src.copy()
     nose = out[15, :2].astype(np.float64)
-    mouth_i = 25 if (src.shape[1] < 3 or float(src[25, 2]) >= 0.05) else 21
+    # Point 21 is the upper lip. Point 25 is the lower lip.
+    mouth_i = 21 if (src.shape[1] < 3 or float(src[21, 2]) >= 0.05) else 25
     mouth = out[mouth_i, :2].astype(np.float64)
     chin = out[2, :2].astype(np.float64)
     delta = mouth - nose
@@ -281,6 +288,9 @@ def drop_anime_chin(pts: np.ndarray) -> np.ndarray:
     down = delta / span
     if down[1] < 0.0:
         down = -down
+    # A cheek nose makes this vector point sideways and drags the chin off the jaw.
+    if abs(float(down[0])) > abs(float(down[1])):
+        down = np.array([0.0, 1.0], dtype=np.float64)
     have = float(np.dot(chin - mouth, down))
     want = CHIN_MOUTH_FRAC * span
     if have >= want * 0.92:

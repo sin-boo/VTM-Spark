@@ -100,6 +100,57 @@ def test_bridge_fake_worker_loaded_and_rpc() -> None:
         hub._frame = previous_frame
 
 
+def test_bridge_ack_publishes_input_source() -> None:
+    """set_input's reply is the status the desk polls, even if no status packet arrived."""
+    previous = hub._handler
+    previous_status = hub._status
+    previous_frame = hub._frame
+    hub._status = {"type": "status", "source": "camera", "loaded": True}
+    bridge = WorkerBridge()
+    port = bridge.listen()
+    bridge.install()
+
+    def worker() -> None:
+        sock = connect(port, timeout=2.0)
+        send(sock, {"type": "hello"})
+        send(
+            sock,
+            {
+                "type": "packet",
+                "packet": {"type": "frame", "protocol": PROTOCOL, "source": "camera", "live": False},
+            },
+        )
+        for msg in iter_messages(sock):
+            if msg.get("type") != "command":
+                continue
+            send(
+                sock,
+                {
+                    "type": "ack",
+                    "id": msg.get("id"),
+                    "ok": True,
+                    "error": "",
+                    "status": {"type": "status", "source": "ifm", "loaded": True, "live": False, "ok": True},
+                },
+            )
+            break
+
+    thread = threading.Thread(target=worker, daemon=True)
+    try:
+        thread.start()
+        assert bridge._ready.wait(3.0)
+        reply = bridge.handle_command({"op": "set_input", "body": {"source": "ifm"}})
+        assert reply["ok"] is True
+        assert hub.latest_status() is not None
+        assert hub.latest_status()["source"] == "ifm"
+        thread.join(timeout=3.0)
+    finally:
+        bridge.close()
+        hub.set_handler(previous)
+        hub._status = previous_status
+        hub._frame = previous_frame
+
+
 def test_jpeg_coalesces_inflight_requests(monkeypatch) -> None:
     bridge = WorkerBridge()
     sent: list[dict] = []

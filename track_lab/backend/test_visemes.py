@@ -299,7 +299,7 @@ def test_head_rig_yaws_in_place() -> None:
     }
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0})
+    feel.update({"smoothing": 0.0, "max_yaw": 1.0})
     try:
         rig.apply(pts, rest, head0, origin)
         # Nose slide from a look must not walk the character.
@@ -331,10 +331,11 @@ def test_head_rig_yaws_in_place() -> None:
         assert turned is not None
         assert abs(float(turned[15, 0]) - float(rest[15, 0])) < 1.5
         assert abs(float(turned[15, 1]) - float(rest[15, 1])) < 1.5
-        d_left = float(turned[11, 0]) - float(rest[11, 0])
-        d_right = float(turned[18, 0]) - float(rest[18, 0])
-        assert abs(d_left) > 1.0
-        assert abs(d_left - d_right) > 1.0
+        d_left = float(turned[0, 0]) - float(rest[0, 0])
+        d_right = float(turned[4, 0]) - float(rest[4, 0])
+        assert abs(d_left) > 4.0
+        assert abs(d_right) > 4.0
+        assert abs(d_left - d_right) > 0.5
         rest[21] = [50.0, 70.0, 1.0]
         rest[25] = [50.0, 78.0, 1.0]
         gap0 = abs(float(rest[25, 1] - rest[21, 1]))
@@ -399,6 +400,43 @@ def test_project_xy_hair_does_not_balloon() -> None:
     assert far < near
 
 
+def test_plane_xy_identity_at_rest() -> None:
+    from .rig import plane_xy
+
+    xs = np.array([-40.0, 0.0, 55.0, -90.0], dtype=np.float64)
+    ys = np.array([-12.0, 8.0, 20.0, -70.0], dtype=np.float64)
+    px, py = plane_xy(xs, ys, 0.0, 0.0, 0.0, 50.0)
+    np.testing.assert_allclose(px, xs, atol=1e-6)
+    np.testing.assert_allclose(py, ys, atol=1e-6)
+
+
+def test_plane_xy_does_not_fold_a_silhouette_bump() -> None:
+    from .rig import plane_xy, project_xy
+
+    # Tip sits farther from the nose than its neighbors. Sphere-projecting
+    # each vertex independently folds that bump into a needle.
+    xs = np.array([173.1, 194.1, 188.4], dtype=np.float64)
+    ys = np.array([56.2, 73.3, 22.1], dtype=np.float64)
+    spx, spy = project_xy(xs, ys, np.radians(25.0), 0.0, 0.0, 220.0)
+    sphere = np.stack([spx, spy], axis=1)
+
+    def _ang(p: np.ndarray) -> float:
+        v1 = p[0] - p[1]
+        v2 = p[2] - p[1]
+        e1 = float(np.linalg.norm(v1))
+        e2 = float(np.linalg.norm(v2))
+        return float(
+            np.degrees(np.arccos(np.clip(np.dot(v1, v2) / (e1 * e2), -1.0, 1.0)))
+        )
+
+    rest = np.stack([xs, ys], axis=1)
+    assert _ang(sphere) < 8.0
+    px, py = plane_xy(xs, ys, np.radians(25.0), 0.0, 0.0, 220.0)
+    card = np.stack([px, py], axis=1)
+    assert _ang(card) > _ang(rest) * 0.6
+    assert _ang(card) > 20.0
+
+
 def test_project_xy_look_up_chin_grows() -> None:
     from .rig import project_xy
 
@@ -411,6 +449,14 @@ def test_project_xy_look_up_chin_grows() -> None:
     _up_x, up_y = project_xy(xs, ys, 0.0, np.radians(-28.0), 0.0, 50.0)
     assert abs(float(up_y[1])) > 24.0
     assert abs(float(up_y[0])) < 20.0
+
+
+def _hold_distance(rig, pts, rest, head, pose, n: int = 12):
+    """Repeat one distance until the rig accepts it as rest size."""
+    out = pts
+    for _ in range(n):
+        out = rig.apply(pts, rest, head, pose)
+    return out
 
 
 def _drive_head(
@@ -436,7 +482,7 @@ def _drive_head(
     return out
 
 
-def test_head_rig_yaw_near_side_grows() -> None:
+def test_head_rig_yaw_keeps_both_eyes() -> None:
     rest = np.zeros((28, 3), dtype=np.float32)
     rest[:, 2] = 1.0
     rest[0] = [10.0, 32.0, 1.0]
@@ -454,12 +500,43 @@ def test_head_rig_yaw_near_side_grows() -> None:
     rest_right = abs(float(rest[18, 1] - rest[17, 1]))
     near = abs(float(turned[12, 1] - turned[11, 1]))
     far = abs(float(turned[18, 1] - turned[17, 1]))
-    assert near > rest_left
-    assert far < rest_right
+    # A turn may show which side is nearer. It must not resize an eye
+    # away from the drawing.
     assert near > far
+    assert abs(near - rest_left) < 0.25 * rest_left
+    assert abs(far - rest_right) < 0.25 * rest_right
 
 
-def test_head_rig_look_up_chin_grows() -> None:
+def test_ceiling_look_stops_at_the_look_up_cap() -> None:
+    """A look at the ceiling is a large euler. The look-up limiter holds it."""
+    import math
+
+    from .feel import feel
+    from .rig import FaceRig
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0, 0], rest[4, 0] = 0.0, 100.0
+    rest[5] = [50.0, 12.0, 1.0]
+    rest[15] = [50.0, 40.0, 1.0]
+    rest[2] = [50.0, 78.0, 1.0]
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "max_pitch_up": 12.0 / 50.0, "max_pitch_down": 1.0})
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        held = rest
+        for _ in range(8):
+            held = rig.apply(rest, rest, {"pitch": -70.0, "yaw": 0.0, "roll": 0.0}, origin)
+        assert held is not None
+        assert abs(abs(math.degrees(rig._pitch_r)) - 12.0) < 0.05
+        assert float(held[2, 1]) > float(held[15, 1])
+    finally:
+        feel.update(prev)
+
+
+def test_head_rig_look_keeps_the_jaw() -> None:
     rest = np.zeros((28, 3), dtype=np.float32)
     rest[:, 2] = 1.0
     rest[0, 0], rest[4, 0] = 0.0, 100.0
@@ -469,14 +546,90 @@ def test_head_rig_look_up_chin_grows() -> None:
     down = _drive_head(rest, {"pitch": 28.0, "yaw": 0.0, "roll": 0.0})
     rest_chin = abs(float(rest[2, 1] - rest[15, 1]))
     rest_brow = abs(float(rest[15, 1] - rest[5, 1]))
-    assert abs(float(down[2, 1] - down[15, 1])) < rest_chin
-    assert abs(float(down[15, 1] - down[5, 1])) > rest_brow
-    assert float(down[5, 1]) < float(down[15, 1]) - 6.0
+    chin_down = abs(float(down[2, 1] - down[15, 1]))
+    brow_down = abs(float(down[15, 1] - down[5, 1]))
+    # A nod foreshortens. It must not cave the chin into the mouth.
+    assert chin_down < rest_chin
+    assert chin_down > 0.75 * rest_chin
+    assert brow_down > 0.75 * rest_brow
+    assert float(down[5, 1]) < float(down[15, 1]) < float(down[2, 1])
     up = _drive_head(rest, {"pitch": -28.0, "yaw": 0.0, "roll": 0.0})
-    brow_up = abs(float(up[15, 1] - up[5, 1]))
     chin_up = abs(float(up[2, 1] - up[15, 1]))
-    assert abs(float(up[2, 1] - up[15, 1])) > rest_chin
-    assert chin_up / rest_chin > brow_up / rest_brow
+    brow_up = abs(float(up[15, 1] - up[5, 1]))
+    assert 0.75 * rest_chin < chin_up < 1.15 * rest_chin
+    assert 0.75 * rest_brow < brow_up < 1.15 * rest_brow
+    assert float(up[5, 1]) < float(up[15, 1]) < float(up[2, 1])
+
+
+def test_stepping_back_stops_at_the_size_limiter() -> None:
+    """Walking away from the camera shrank the face to 62% and off the art."""
+    from .feel import feel
+    from .rig import FaceRig
+    from .travel_box import lab_feel_caps
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0, 0], rest[4, 0] = 0.0, 100.0
+    rest[15] = [50.0, 40.0, 1.0]
+    near = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tz": 50.0, "tilt": 0.0, "ok": 1.0}
+    far = dict(near, tz=90.0, scale=55.0)
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, **lab_feel_caps({"size": 0.1, "enabled": True})})
+    try:
+        rig = FaceRig()
+        _hold_distance(rig, rest, rest, head0, near, n=20)
+        assert abs(rig._s - 1.0) < 1e-6
+        for _ in range(4):
+            rig.apply(rest, rest, head0, far)
+        held = rig._s
+        feel.update(lab_feel_caps({"enabled": False}))
+        rig.apply(rest, rest, head0, far)
+        free = rig._s
+    finally:
+        feel.update(prev)
+    assert held > 0.85
+    assert held < 0.9
+    assert free < 0.62 + 1e-6
+
+
+def test_look_down_does_not_fold_the_arm_into_the_head() -> None:
+    """The look-down limiter used to sphere-project the torso. The arm vanished."""
+    import math
+
+    from .feel import feel
+    from .rig import FaceRig
+    from .skeleton import follow_skeleton, skeleton_from_face
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0] = [10.0, 32.0, 1.0]
+    rest[2] = [50.0, 78.0, 1.0]
+    rest[4] = [90.0, 32.0, 1.0]
+    rest[15] = [50.0, 40.0, 1.0]
+    rest[21] = [50.0, 62.0, 1.0]
+    body = skeleton_from_face(rest)
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "max_pitch_down": 1.0})
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, head0, origin)
+        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        for _ in range(12):
+            rig.apply(rest, rest, {"pitch": 32.0, "yaw": 0.0, "roll": 0.0}, origin)
+        turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+    finally:
+        feel.update(prev)
+
+    def _len(pose: dict, a: int, b: int) -> float:
+        return math.hypot(pose[a]["x"] - pose[b]["x"], pose[a]["y"] - pose[b]["y"])
+
+    rest_arm = _len(parked, 32, 33)
+    live_arm = _len(turned, 32, 33)
+    assert rest_arm > 10.0
+    assert live_arm > 0.7 * rest_arm
 
 
 def test_selfie_flips_turn() -> None:
@@ -573,8 +726,52 @@ def test_feel_max_yaw_blocks_turn() -> None:
         feel.update(prev)
     free_span = abs(float(free[18, 0] - free[11, 0]) - 60.0)
     held_span = abs(float(held[18, 0] - held[11, 0]) - 60.0)
-    assert free_span > 4.0
-    assert held_span < 1.5
+    assert free_span > held_span
+    assert free_span > 0.5
+    assert held_span < 0.2
+
+
+def test_turn_and_tilt_stop_each_side_on_its_own() -> None:
+    """Right is positive yaw / roll: a closed right side must not hold the left."""
+    import math
+
+    from .feel import feel
+    from .rig import FaceRig
+    from .travel_box import lab_feel_caps
+
+    rest, _osf = _toy_face()
+    origin = {"cx": 200.0, "cy": 200.0, "bx": 200.0, "by": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    box = {"turn_left": 40.0, "turn_right": 0.0, "tilt_left": 0.0, "tilt_right": 40.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, **lab_feel_caps(box)})
+
+    def drive(yaw: float, roll: float) -> tuple[float, float]:
+        rig = FaceRig()
+        rig.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        moved = dict(origin, tilt=roll)
+        for _ in range(8):
+            rig.apply(rest, rest, {"pitch": 0.0, "yaw": yaw, "roll": roll}, moved)
+        return math.degrees(rig._yaw_r), math.degrees(rig._roll_r)
+
+    try:
+        right_yaw, left_roll = drive(20.0, -20.0)
+        left_yaw, right_roll = drive(-20.0, 20.0)
+    finally:
+        feel.update(prev)
+    assert abs(right_yaw) < 0.5 and abs(left_roll) < 0.5
+    assert abs(left_yaw + 20.0) < 1.0 and abs(right_roll - 20.0) < 1.0
+
+
+def test_old_max_yaw_sets_both_sides() -> None:
+    from .feel import feel
+
+    prev = feel.payload()
+    try:
+        feel.update({"max_yaw": 0.25, "max_roll": 0.5})
+        assert feel.max_yaw() == (0.25, 0.25)
+        assert feel.max_roll() == (0.5, 0.5)
+    finally:
+        feel.update(prev)
 
 
 def test_face_place_moves_and_scales_the_character() -> None:
@@ -598,7 +795,7 @@ def test_face_place_moves_and_scales_the_character() -> None:
     }
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0})
+    feel.update({"smoothing": 0.0, "max_size": 1.0})
     try:
         walk = FaceRig()
         walk.apply(pts, rest, head0, origin)
@@ -608,9 +805,16 @@ def test_face_place_moves_and_scales_the_character() -> None:
         for _ in range(12):
             out = walk.apply(pts, rest, head0, slid)
         assert out is not None
-        assert float(out[15, 0]) > float(rest[15, 0]) + 20.0
+        # A step in the camera carries the chin with the nose. The jaw stays one piece.
+        nose_dx = float(out[15, 0]) - float(rest[15, 0])
+        chin_dx = float(out[2, 0]) - float(rest[2, 0])
+        nose_dy = float(out[15, 1]) - float(rest[15, 1])
+        chin_dy = float(out[2, 1]) - float(rest[2, 1])
+        assert abs(nose_dx) > 5.0
+        assert abs(chin_dx - nose_dx) < 1.5
+        assert abs(chin_dy - nose_dy) < 1.5
         zoom = FaceRig()
-        zoom.apply(pts, rest, head0, origin)
+        _hold_distance(zoom, pts, rest, head0, origin)
         closer = dict(origin)
         closer["scale"] = 140.0
         grown = pts
@@ -624,7 +828,7 @@ def test_face_place_moves_and_scales_the_character() -> None:
         far = dict(origin)
         far["tz"] = 500.0
         steady = FaceRig()
-        steady.apply(pts, rest, head0, far)
+        _hold_distance(steady, pts, rest, head0, far)
         profile = dict(far)
         profile["scale"] = 60.0
         held = pts
@@ -639,6 +843,99 @@ def test_face_place_moves_and_scales_the_character() -> None:
         assert steady._s > 1.2
     finally:
         feel.update(prev)
+
+
+def test_opening_distance_does_not_inflate_the_overlay() -> None:
+    from .feel import feel
+    from .rig import FaceRig
+    from .visemes import _rest
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0, 0], rest[4, 0] = 0.0, 100.0
+    rest[15] = [50.0, 40.0, 1.0]
+    rest[2] = [50.0, 78.0, 1.0]
+    head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    far = {
+        "cx": 200.0,
+        "cy": 200.0,
+        "bx": 200.0,
+        "by": 200.0,
+        "scale": 40.0,
+        "tz": 900.0,
+        "tilt": 0.0,
+        "ok": 1.0,
+    }
+    home = dict(far)
+    home["scale"] = 100.0
+    home["tz"] = 500.0
+    prev = feel.payload()
+    saved = _rest.snapshot()
+    feel.update({"smoothing": 0.0, "max_size": 1.0})
+    _rest.reset()
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, head, far)
+        assert rig._s == 1.0
+        for _ in range(12):
+            rig.apply(rest, rest, head, home)
+        assert rig._size_ready
+        assert abs(rig._s - 1.0) < 0.02
+        closer = dict(home)
+        closer["tz"] = 500.0 / 1.4
+        for _ in range(4):
+            rig.apply(rest, rest, head, closer)
+        assert 1.2 < rig._s < 1.65
+    finally:
+        feel.update(prev)
+        _rest.reset()
+        if saved:
+            _rest.use_snapshot(saved)
+
+
+def test_set_rest_seals_size_on_the_face_in_hand() -> None:
+    from .feel import feel
+    from .rig import FaceRig
+    from .visemes import _rest
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0, 0], rest[4, 0] = 0.0, 100.0
+    rest[15] = [50.0, 40.0, 1.0]
+    rest[2] = [50.0, 78.0, 1.0]
+    head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    far = {
+        "cx": 200.0,
+        "cy": 200.0,
+        "bx": 200.0,
+        "by": 200.0,
+        "scale": 40.0,
+        "tilt": 0.0,
+        "ok": 1.0,
+    }
+    home = dict(far)
+    home["scale"] = 100.0
+    prev = feel.payload()
+    saved = _rest.snapshot()
+    feel.update({"smoothing": 0.0, "max_size": 1.0})
+    _rest.reset()
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, head, far)
+        assert not rig._size_ready
+        _rest.use_snapshot({"open": 0.12, "width": 0.4, "corner": 0.0})
+        rig.apply(rest, rest, head, home)
+        assert rig._size_ready
+        assert abs(rig._s - 1.0) < 0.02
+        closer = dict(home)
+        closer["scale"] = 140.0
+        rig.apply(rest, rest, head, closer)
+        assert rig._s > 1.2
+    finally:
+        feel.update(prev)
+        _rest.reset()
+        if saved:
+            _rest.use_snapshot(saved)
 
 
 def test_head_rig_look_down_keeps_hair_above_nose() -> None:
@@ -1627,7 +1924,7 @@ def test_head_rig_holds_when_camera_drops() -> None:
     origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
     lost = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 0.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0})
+    feel.update({"smoothing": 0.0, "max_yaw": 1.0})
     try:
         rig = FaceRig()
         rig.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
@@ -1636,33 +1933,87 @@ def test_head_rig_holds_when_camera_drops() -> None:
             turned = rig.apply(rest, rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}, origin)
         held = rig.apply(rest, rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}, lost)
         assert turned is not None and held is not None
-        assert abs(float(held[11, 0]) - float(turned[11, 0])) < 0.2
-        assert abs(float(held[11, 0]) - float(rest[11, 0])) > 1.0
+        assert abs(float(held[0, 0]) - float(turned[0, 0])) < 0.2
+        assert abs(float(held[0, 0]) - float(rest[0, 0])) > 4.0
     finally:
         feel.update(prev)
 
 
-def test_skeleton_yaws_with_the_head() -> None:
+def test_head_turn_moves_the_torso_with_the_face() -> None:
+    from .feel import feel
+    from .rig import FaceRig
     from .skeleton import follow_skeleton, skeleton_from_face
 
     rest, _osf = _toy_face()
     body = skeleton_from_face(rest)
-    parked = follow_skeleton(body, rest)
-    turned = follow_skeleton(body, rest, head={"yaw": 35.0, "pitch": 0.0, "roll": 0.0})
-    park_r = next(j for j in parked if j["id"] == 32)
-    turn_r = next(j for j in turned if j["id"] == 32)
-    park_l = next(j for j in parked if j["id"] == 34)
-    turn_l = next(j for j in turned if j["id"] == 34)
-    assert abs(float(turn_r["x"]) - float(park_r["x"])) > 1.0
-    assert abs((float(turn_r["x"]) - float(park_r["x"])) - (float(turn_l["x"]) - float(park_l["x"]))) > 1.0
-    neck_p = next(j for j in parked if j["id"] == 31)
-    neck_t = next(j for j in turned if j["id"] == 31)
-    rest_near = abs(float(park_r["y"]) - float(neck_p["y"]))
-    rest_far = abs(float(park_l["y"]) - float(neck_p["y"]))
-    near = abs(float(turn_r["y"]) - float(neck_t["y"]))
-    far = abs(float(turn_l["y"]) - float(neck_t["y"]))
-    assert near > rest_near
-    assert far < rest_far
+    origin = {
+        "cx": 200.0,
+        "cy": 200.0,
+        "bx": 200.0,
+        "by": 200.0,
+        "scale": 100.0,
+        "tilt": 0.0,
+        "ok": 1.0,
+    }
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "max_yaw": 1.0, "max_pitch_up": 1.0})
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, head0, origin)
+        parked_face = rig.apply(rest, rest, head0, origin)
+        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        turned_face = rest
+        for _ in range(12):
+            turned_face = rig.apply(
+                rest, rest, {"pitch": -24.0, "yaw": 35.0, "roll": 0.0}, origin
+            )
+        turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+    finally:
+        feel.update(prev)
+    assert parked_face is not None and turned_face is not None
+    chin_dx = float(turned_face[2, 0]) - float(parked_face[2, 0])
+    chin_dy = float(turned_face[2, 1]) - float(parked_face[2, 1])
+    assert abs(chin_dx) > 1.0 or abs(chin_dy) > 1.0
+    neck_dx = float(turned[31]["x"]) - float(parked[31]["x"])
+    neck_dy = float(turned[31]["y"]) - float(parked[31]["y"])
+    assert abs(neck_dx) > 1.0 or abs(neck_dy) > 1.0
+    assert abs(neck_dx - chin_dx) < 12.0
+    assert abs(neck_dy - chin_dy) < 12.0
+
+
+def test_big_head_turn_does_not_turn_the_torso() -> None:
+    """Turning the head folded the shoulders into a line and swung them round the nose."""
+    import math
+
+    from .feel import feel
+    from .rig import FaceRig
+    from .skeleton import follow_skeleton, skeleton_from_face
+
+    rest, _osf = _toy_face()
+    body = skeleton_from_face(rest)
+    origin = {"cx": 200.0, "cy": 200.0, "bx": 200.0, "by": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "max_yaw": 1.0, "max_pitch_up": 1.0, "max_roll": 1.0})
+    try:
+        rig = FaceRig()
+        rig.apply(rest, rest, head0, origin)
+        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        for _ in range(12):
+            rig.apply(rest, rest, {"pitch": -30.0, "yaw": 80.0, "roll": 0.0}, origin)
+        turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+    finally:
+        feel.update(prev)
+
+    def _vec(pose: dict, a: int, b: int) -> tuple[float, float]:
+        return pose[b]["x"] - pose[a]["x"], pose[b]["y"] - pose[a]["y"]
+
+    # Shoulders keep their width and the torso keeps its shape around the neck.
+    for a, b in ((32, 34), (31, 36), (31, 32), (32, 33)):
+        rx, ry = _vec(parked, a, b)
+        tx, ty = _vec(turned, a, b)
+        assert math.hypot(tx - rx, ty - ry) < 1.0, (a, b)
 
 
 def test_manual_skeleton_ignores_camera_body() -> None:
@@ -1749,8 +2100,28 @@ def test_chroma_torso_follows_the_bust_not_the_face() -> None:
     assert float(body[31]["y"]) < float(body[32]["y"])
 
 
+def test_wide_collar_still_uses_the_torso() -> None:
+    """A neck row already near the body width must not fall back to face size."""
+    from .skeleton import skeleton_from_face, skeleton_from_still
 
-def test_skeleton_follows_the_face_place() -> None:
+    rest, _osf = _toy_face()
+    rest[0] = [160.0, 70.0, 1.0]
+    rest[2] = [200.0, 120.0, 1.0]
+    rest[4] = [240.0, 70.0, 1.0]
+    rest[21] = [200.0, 100.0, 1.0]
+    still = np.zeros((400, 400, 3), dtype=np.uint8)
+    still[:] = (40, 220, 40)
+    still[130:400, 40:360] = (160, 170, 210)
+    body = {int(j["id"]): j for j in skeleton_from_still(rest, still)}
+    guess = {int(j["id"]): j for j in skeleton_from_face(rest)}
+    assert float(body[34]["x"]) - float(body[32]["x"]) > (
+        float(guess[34]["x"]) - float(guess[32]["x"])
+    ) + 40.0
+    assert float(body[32]["x"]) < 80.0
+    assert float(body[34]["x"]) > 320.0
+
+
+def test_skeleton_translates_with_the_head() -> None:
     from .skeleton import follow_skeleton, skeleton_from_face
 
     rest, _osf = _toy_face()
@@ -1759,14 +2130,15 @@ def test_skeleton_follows_the_face_place() -> None:
     moved = follow_skeleton(
         body,
         rest,
-        place={"dx": 24.0, "dy": 0.0, "scale": 1.0, "cx": float(rest[15, 0]), "cy": float(rest[15, 1])},
+        place={"dx": 24.0, "dy": -30.0, "scale": 1.0, "cx": float(rest[15, 0]), "cy": float(rest[15, 1])},
     )
     park_neck = next(j for j in parked if j["id"] == 31)
     move_neck = next(j for j in moved if j["id"] == 31)
     park_sh = next(j for j in parked if j["id"] == 32)
     move_sh = next(j for j in moved if j["id"] == 32)
     assert abs(float(move_neck["x"]) - float(park_neck["x"]) - 24.0) < 0.3
-    assert abs(float(move_sh["x"]) - float(park_sh["x"]) - 24.0) < 0.3
+    assert abs(float(move_neck["y"]) - float(park_neck["y"]) + 30.0) < 0.3
+    assert abs(float(move_sh["y"]) - float(park_sh["y"]) + 30.0) < 0.3
     grown = follow_skeleton(
         body,
         rest,
@@ -1868,10 +2240,10 @@ def test_hair_scales_with_the_face_and_returns() -> None:
     }
     head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0})
+    feel.update({"smoothing": 0.0, "max_size": 1.0})
     try:
         face = FaceRig()
-        face.apply(rest, rest, head, origin)
+        _hold_distance(face, rest, rest, head, origin)
         parked = follow_hair(hrig, rest, face)
         closer = dict(origin)
         closer["scale"] = 140.0
@@ -1931,18 +2303,70 @@ def test_hair_yaws_instead_of_sliding() -> None:
 
     d_left = _mean_x(moved, "hair_left") - _mean_x(parked, "hair_left")
     d_right = _mean_x(moved, "hair_right") - _mean_x(parked, "hair_right")
-    assert abs(d_left - d_right) > 2.0
+    assert abs(d_left - d_right) > 0.5
 
-    def _span_y(parts, cls):
-        ys = [p[1] for p in next(p["polygon"] for p in parts if p["class"] == cls)]
-        return max(ys) - min(ys)
+    def _span_x(parts, cls):
+        xs = [p[0] for p in next(p["polygon"] for p in parts if p["class"] == cls)]
+        return max(xs) - min(xs)
 
-    near_h = _span_y(moved, "hair_left")
-    far_h = _span_y(moved, "hair_right")
-    rest_h = _span_y(parked, "hair_left")
-    assert far_h <= rest_h * 1.05
-    assert near_h <= rest_h * 1.25
-    assert near_h > far_h
+    near_w = _span_x(moved, "hair_left")
+    far_w = _span_x(moved, "hair_right")
+    rest_w = _span_x(parked, "hair_left")
+    assert near_w > rest_w
+    assert far_w < rest_w
+    assert near_w > far_w
+
+
+def test_hair_follow_does_not_collapse_a_bump() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {
+            "class": "hair_middle",
+            "polygon": [
+                [50.0 + 173.1, 48.0 + 56.2],
+                [50.0 + 194.1, 48.0 + 73.3],
+                [50.0 + 188.4, 48.0 + 22.1],
+            ],
+        }
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    face = FaceRig()
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "hair_pin": 0.7})
+
+    def _ang(poly: list) -> float:
+        p = np.asarray(poly, dtype=np.float64)
+        v1 = p[0] - p[1]
+        v2 = p[2] - p[1]
+        e1 = float(np.linalg.norm(v1))
+        e2 = float(np.linalg.norm(v2))
+        return float(
+            np.degrees(np.arccos(np.clip(np.dot(v1, v2) / max(e1 * e2, 1e-8), -1.0, 1.0)))
+        )
+
+    try:
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        parked = follow_hair(hrig, rest, face)
+        turned = rest
+        for _ in range(12):
+            turned = face.apply(
+                rest, rest, {"pitch": 0.0, "yaw": 25.0, "roll": 0.0}, origin
+            )
+        moved = follow_hair(hrig, turned, face)
+    finally:
+        feel.update(prev)
+
+    rest_ang = _ang(parked[0]["polygon"])
+    live_ang = _ang(moved[0]["polygon"])
+    assert rest_ang > 20.0
+    assert live_ang > rest_ang * 0.6
+    assert live_ang > 20.0
 
 
 def _hair_pin_segs() -> list[dict]:
@@ -1950,8 +2374,8 @@ def _hair_pin_segs() -> list[dict]:
         {
             "class": "hair_middle",
             "polygon": [
-                [8.0, 20.0],
-                [28.0, 28.0],
+                [46.0, 36.0],
+                [54.0, 36.0],
                 [50.0, -90.0],
             ],
         }
@@ -1990,9 +2414,7 @@ def test_hair_silhouette_stays_put_on_big_turn() -> None:
     live = _poly_xy(moved, "hair_middle")
     span = float(hrig.rest_ms)
     outer_dx = abs(live[2][0] - park[2][0])
-    hairline_dx = abs(live[0][0] - park[0][0])
     assert outer_dx < 0.15 * span
-    assert hairline_dx > outer_dx + 2.0
 
 
 def test_hair_pin_zero_matches_old_follow() -> None:
@@ -2006,7 +2428,7 @@ def test_hair_pin_zero_matches_old_follow() -> None:
     face = FaceRig()
     origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
     prev = feel.payload()
-    feel.update({"smoothing": 0.0, "hair_pin": 0.0})
+    feel.update({"smoothing": 0.0, "hair_pin": 0.0, "hair_width": 0.0})
     try:
         turned = rest
         for _ in range(12):
@@ -2014,7 +2436,7 @@ def test_hair_pin_zero_matches_old_follow() -> None:
                 rest, rest, {"pitch": 0.0, "yaw": 50.0, "roll": 0.0}, origin
             )
         moved = follow_hair(hrig, turned, face)
-        xs, ys = face.map_local(hrig.parts[0][1][:, 0], hrig.parts[0][1][:, 1])
+        xs, ys = face.map_plane(hrig.parts[0].local[:, 0], hrig.parts[0].local[:, 1])
         expect = [[round(float(x), 1), round(float(y), 1)] for x, y in zip(xs, ys)]
         assert moved[0]["polygon"] == expect
     finally:
@@ -2048,6 +2470,267 @@ def test_hair_pin_ignores_pitch_at_silhouette() -> None:
             assert abs(live[2][1] - park[2][1]) < 0.15 * float(hrig.rest_ms)
     finally:
         feel.update(prev)
+
+
+def _edge_lengths(poly: list) -> list[float]:
+    pts = np.asarray(poly, dtype=np.float64)
+    n = len(pts)
+    return [
+        float(np.linalg.norm(pts[(i + 1) % n] - pts[i]))
+        for i in range(n)
+    ]
+
+
+def test_hair_rigid_keeps_edge_ratios_on_yaw() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {
+            "class": "hair_middle",
+            "polygon": [
+                [42.0, 6.0],
+                [58.0, 10.0],
+                [54.0, 32.0],
+                [46.0, 26.0],
+            ],
+        }
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    face = FaceRig()
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "hair_pin": 1.0})
+    try:
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        parked = follow_hair(hrig, rest, face)
+        turned = rest
+        for _ in range(12):
+            turned = face.apply(
+                rest, rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}, origin
+            )
+        moved = follow_hair(hrig, turned, face)
+    finally:
+        feel.update(prev)
+    rest_e = np.asarray(_edge_lengths(parked[0]["polygon"]))
+    live_e = np.asarray(_edge_lengths(moved[0]["polygon"]))
+    rest_r = rest_e / max(float(np.mean(rest_e)), 1e-6)
+    live_r = live_e / max(float(np.mean(live_e)), 1e-6)
+    assert np.allclose(rest_r, live_r, atol=0.08)
+
+
+def test_hair_middle_width_stays_on_yaw() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {
+            "class": "hair_middle",
+            "polygon": [[42.0, 8.0], [58.0, 8.0], [56.0, 36.0], [50.0, 40.0], [44.0, 36.0]],
+        }
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    face = FaceRig()
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "hair_pin": 1.0})
+    try:
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        parked = follow_hair(hrig, rest, face)
+        turned = rest
+        for _ in range(12):
+            turned = face.apply(
+                rest, rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}, origin
+            )
+        moved = follow_hair(hrig, turned, face)
+    finally:
+        feel.update(prev)
+
+    def _span_x(parts):
+        xs = [p[0] for p in parts[0]["polygon"]]
+        return max(xs) - min(xs)
+
+    assert abs(_span_x(moved) - _span_x(parked)) < 1.0
+
+
+def test_hair_middle_parents_to_hairline_not_tips() -> None:
+    from .hair import build_hair_rig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {
+            "class": "hair_middle",
+            "polygon": [[42.0, 8.0], [58.0, 8.0], [56.0, 36.0], [50.0, 40.0], [44.0, 36.0]],
+        }
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    # Nose is local (0, 0). Brows sit around y=-27; bangs tips around y=-8.
+    assert float(hrig.parts[0].anchor[1]) < -15.0
+    assert hrig.parts[0].cls == "hair_middle"
+
+
+def test_hair_middle_stays_welded_to_sides_on_yaw() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {"class": "hair_left", "polygon": [[20.0, 10.0], [40.0, 10.0], [40.0, 40.0], [20.0, 40.0]]},
+        {"class": "hair_middle", "polygon": [[40.0, 10.0], [60.0, 10.0], [60.0, 40.0], [40.0, 40.0]]},
+        {"class": "hair_right", "polygon": [[60.0, 10.0], [80.0, 10.0], [80.0, 40.0], [60.0, 40.0]]},
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    assert hrig.welds
+    face = FaceRig()
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "hair_pin": 1.0, "hair_width": 1.0})
+    try:
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        for _ in range(12):
+            face.apply(rest, rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}, origin)
+        moved = follow_hair(hrig, rest, face)
+    finally:
+        feel.update(prev)
+
+    def _poly(cls: str) -> set[tuple[float, float]]:
+        return {tuple(p) for p in next(r["polygon"] for r in moved if r["class"] == cls)}
+
+    left = _poly("hair_left")
+    mid = _poly("hair_middle")
+    right = _poly("hair_right")
+    assert left & mid
+    assert right & mid
+
+
+def test_hair_selfie_swaps_near_lock_without_flipping_still() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {"class": "hair_left", "polygon": [[8.0, 10.0], [28.0, 10.0], [28.0, 40.0], [8.0, 40.0]]},
+        {"class": "hair_right", "polygon": [[72.0, 10.0], [92.0, 10.0], [92.0, 40.0], [72.0, 40.0]]},
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    head = {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "hair_pin": 1.0})
+
+    def _span_x(parts, cls):
+        xs = [p[0] for p in next(p["polygon"] for p in parts if p["class"] == cls)]
+        return max(xs) - min(xs)
+
+    try:
+        face = FaceRig()
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        for _ in range(12):
+            face.apply(rest, rest, head, origin)
+        natural = follow_hair(hrig, rest, face)
+        face.selfie = True
+        face.apply(rest, rest, head, origin)
+        flipped = follow_hair(hrig, rest, face)
+    finally:
+        feel.update(prev)
+
+    assert _span_x(natural, "hair_left") > _span_x(natural, "hair_right")
+    assert _span_x(flipped, "hair_right") > _span_x(flipped, "hair_left")
+    left_rest = hrig.parts[0].local.copy()
+    assert left_rest[0, 0] < 0.0
+
+
+def test_hair_reports_width_and_gain_scales_it() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {"class": "hair_left", "polygon": [[8.0, 10.0], [28.0, 10.0], [28.0, 40.0], [8.0, 40.0]]},
+        {"class": "hair_middle", "polygon": [[42.0, 8.0], [58.0, 8.0], [56.0, 36.0], [50.0, 40.0], [44.0, 36.0]]},
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    head = {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}
+    prev = feel.payload()
+
+    def _rec(parts, cls):
+        return next(p for p in parts if p["class"] == cls)
+
+    try:
+        feel.update({"smoothing": 0.0, "hair_pin": 1.0, "hair_width": 1.0})
+        face = FaceRig()
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        for _ in range(12):
+            face.apply(rest, rest, head, origin)
+        one = follow_hair(hrig, rest, face)
+        feel.update({"hair_width": 2.0})
+        two = follow_hair(hrig, rest, face)
+        feel.update({"hair_width": 0.0})
+        none = follow_hair(hrig, rest, face)
+    finally:
+        feel.update(prev)
+
+    left1 = _rec(one, "hair_left")
+    assert left1["side"] == "l"
+    assert left1["pin"] == 1.0
+    assert left1["width"] > 1.0
+    assert _rec(one, "hair_middle")["side"] == "mid"
+    assert _rec(one, "hair_middle")["width"] == 1.0
+    assert _rec(two, "hair_left")["width"] > left1["width"]
+    assert _rec(none, "hair_left")["width"] == 1.0
+
+
+def test_hair_width_applies_with_pin_zero() -> None:
+    from .feel import feel
+    from .hair import build_hair_rig, follow_hair
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    segs = [
+        {"class": "hair_left", "polygon": [[8.0, 10.0], [28.0, 10.0], [28.0, 40.0], [8.0, 40.0]]},
+        {"class": "hair_right", "polygon": [[72.0, 10.0], [92.0, 10.0], [92.0, 40.0], [72.0, 40.0]]},
+    ]
+    hrig = build_hair_rig(segs, rest)
+    assert hrig is not None
+    origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    head = {"pitch": 0.0, "yaw": 35.0, "roll": 0.0}
+    prev = feel.payload()
+
+    def _span_x(parts, cls):
+        xs = [p[0] for p in next(p["polygon"] for p in parts if p["class"] == cls)]
+        return max(xs) - min(xs)
+
+    try:
+        face = FaceRig()
+        face.apply(rest, rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}, origin)
+        for _ in range(12):
+            face.apply(rest, rest, head, origin)
+        feel.update({"smoothing": 0.0, "hair_pin": 0.0, "hair_width": 0.0})
+        flat = follow_hair(hrig, rest, face)
+        feel.update({"hair_width": 1.0})
+        wide = follow_hair(hrig, rest, face)
+    finally:
+        feel.update(prev)
+
+    left = next(p for p in wide if p["class"] == "hair_left")
+    assert left["pin"] == 0.0
+    assert left["width"] > 1.0
+    assert _span_x(wide, "hair_left") > _span_x(flat, "hair_left")
+    assert _span_x(wide, "hair_right") < _span_x(flat, "hair_right")
 
 
 def test_refine_hair_keeps_detector_mask() -> None:

@@ -32,6 +32,7 @@ _FRAME_INTO_STATUS = (
     "keypoints",
     "calib",
     "image_wh",
+    "generation",
     "head",
     "blink",
     "iris",
@@ -40,6 +41,7 @@ _FRAME_INTO_STATUS = (
     "look",
     "hair_method",
     "point_offsets",
+    "travel_box",
 )
 
 
@@ -75,10 +77,14 @@ DEFAULT_FEEL: dict[str, float] = {
     "show_hair": 1.0,
     "show_ids": 0.0,
     "hair_pin": 0.7,
-    "max_yaw": 1.0,
-    "max_roll": 1.0,
+    "hair_width": 1.0,
+    "max_yaw_left": 1.0,
+    "max_yaw_right": 1.0,
+    "max_roll_left": 1.0,
+    "max_roll_right": 1.0,
     "max_pitch_up": 1.0,
     "max_pitch_down": 1.0,
+    "max_size": 1.0,
     "max_look_x": 1.0,
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
@@ -424,6 +430,34 @@ def merge_frame_into_status(payload: dict[str, Any], frame: dict[str, Any]) -> N
     err = frame.get("error")
     if err and (bool(frame.get("live")) or bool(payload.get("live"))):
         payload["error"] = str(err)
+
+
+def lab_packet_generation(packet: dict[str, Any] | None) -> int:
+    if not isinstance(packet, dict):
+        return 0
+    try:
+        return int(packet.get("generation") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def lab_packet_from_ack(ack: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Prefer the overlay packed with a command reply over a later GET /frame."""
+    if not isinstance(ack, dict):
+        return None
+    frame = ack.get("frame") if isinstance(ack.get("frame"), dict) else None
+    status = ack.get("status") if isinstance(ack.get("status"), dict) else None
+    if status is None and frame is None:
+        if "keypoints" in ack or "hair" in ack:
+            return ack
+        return None
+    if status is None:
+        return frame
+    if frame is None:
+        return status
+    merged = dict(status)
+    merge_frame_into_status(merged, frame)
+    return merged
 
 
 def frame_image_wh(frame: dict[str, Any] | None) -> tuple[int, int] | None:

@@ -10,13 +10,14 @@ import numpy as np
 
 from harness.protocol import LEFT_EYE_SLOTS, LEFT_IRIS, RIGHT_EYE_SLOTS, RIGHT_IRIS
 
-ROOT = Path(__file__).resolve().parents[1]
+from .paths import REPO, TRACKERS
+from .travel_box import soft_barrier
+
 IRIS_CANDIDATES = (
-    ROOT.parent / "models" / "trackers" / "iris_pose.pt",
-    ROOT.parent / "vendor" / "tools" / "live-poser" / "models" / "iris_pose.pt",
-    ROOT.parent / "vendor" / "tools" / "pose-traker" / "models" / "iris_pose.pt",
-    ROOT.parent / "vendor" / "tools" / "pose-traker" / "iris-model" / "models" / "iris_pose.pt",
-    ROOT / "models" / "iris_pose.pt",
+    TRACKERS / "iris_pose.pt",
+    REPO / "vendor" / "tools" / "live-poser" / "models" / "iris_pose.pt",
+    REPO / "vendor" / "tools" / "pose-traker" / "models" / "iris_pose.pt",
+    REPO / "vendor" / "tools" / "pose-traker" / "iris-model" / "models" / "iris_pose.pt",
 )
 
 # OSF / dlib: person's right eye, person's left eye.
@@ -48,6 +49,7 @@ class IrisHit:
     visible: bool = False
     side: str = ""
     method: str = ""
+    box: tuple[float, float, float, float] | None = None
 
 
 def _torch_device() -> str:
@@ -113,6 +115,7 @@ def _hits_from_result(result) -> list[dict[str, object]]:
             {
                 "cx": (x0 + x1) / 2.0,
                 "cy": (y0 + y1) / 2.0,
+                "bbox": (x0, y0, x1, y1),
                 "pupil": pupil,
                 "score": float(confs[i]),
                 "visible": visible,
@@ -236,10 +239,17 @@ def detect_crops(image_bgr: np.ndarray, lms: np.ndarray | None) -> list[dict[str
             pupil = det.get("pupil")
             if isinstance(pupil, tuple) and len(pupil) >= 2:
                 pupil = map_crop_to_frame((float(pupil[0]), float(pupil[1])), scale, origin)
+            bbox = det.get("bbox")
+            mapped_box = None
+            if isinstance(bbox, tuple) and len(bbox) >= 4:
+                p0 = map_crop_to_frame((float(bbox[0]), float(bbox[1])), scale, origin)
+                p1 = map_crop_to_frame((float(bbox[2]), float(bbox[3])), scale, origin)
+                mapped_box = (p0[0], p0[1], p1[0], p1[1])
             dets.append(
                 {
                     "cx": cx,
                     "cy": cy,
+                    "bbox": mapped_box,
                     "pupil": pupil,
                     "score": det["score"],
                     "visible": det["visible"],
@@ -328,6 +338,10 @@ def match_to_eyes(
         if best_i is None or best_d > max_dist:
             return IrisHit(side=side, method="iris_pose")
         det = dets[best_i]
+        raw_box = det.get("bbox")
+        box = None
+        if isinstance(raw_box, (tuple, list)) and len(raw_box) >= 4:
+            box = tuple(float(v) for v in raw_box[:4])
         if other is not None:
             other_d = float(np.hypot(float(det["cx"]) - other[0], float(det["cy"]) - other[1]))
             if other_d + max(2.0, eye_w * 0.10) < best_d:
@@ -336,7 +350,13 @@ def match_to_eyes(
         pupil = det.get("pupil")
         if det.get("visible") and isinstance(pupil, tuple) and len(pupil) >= 2:
             if not pupil_in_eye((float(pupil[0]), float(pupil[1])), pts, slots):
-                return IrisHit(score=float(det["score"]), visible=False, side=side, method="iris_pose")
+                return IrisHit(
+                    score=float(det["score"]),
+                    visible=False,
+                    side=side,
+                    method="iris_pose",
+                    box=box,
+                )
             return IrisHit(
                 x=float(pupil[0]),
                 y=float(pupil[1]),
@@ -344,8 +364,15 @@ def match_to_eyes(
                 visible=True,
                 side=side,
                 method="iris_pose",
+                box=box,
             )
-        return IrisHit(score=float(det["score"]), visible=False, side=side, method="iris_pose")
+        return IrisHit(
+            score=float(det["score"]),
+            visible=False,
+            side=side,
+            method="iris_pose",
+            box=box,
+        )
 
     right_pack = _eye_anchor(pts, right_slots)
     left_pack = _eye_anchor(pts, left_slots)
@@ -786,9 +813,9 @@ def _place_in_iris(
     mx = float(np.clip(max_look_x, 0.0, 1.0))
     my = float(np.clip(max_look_y, 0.0, 1.0))
     px, py = float(raw[0]), float(raw[1])
-    x = float(np.clip(px, cx - width * 0.55 * mx, cx + width * 0.55 * mx))
+    x = soft_barrier(px, cx - width * 0.55 * mx, cx + width * 0.55 * mx, cx)
     lid_band = cy - opening * 0.55 * my
-    y = float(np.clip(py, lid_band, cy + opening * 0.95 * my))
+    y = soft_barrier(py, lid_band, cy + opening * 0.95 * my, cy)
     return x, y
 
 
@@ -803,14 +830,24 @@ def _osf_eye(lms: np.ndarray, slots: tuple[int, ...]) -> np.ndarray | None:
     return np.stack(rows, axis=0)
 
 
-def _row(slot: int, x: float, y: float, score: float, visible: bool) -> dict[str, object]:
-    return {
+def _row(
+    slot: int,
+    x: float,
+    y: float,
+    score: float,
+    visible: bool,
+    box: tuple[float, float, float, float] | None = None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
         "id": slot,
         "x": round(float(x), 3),
         "y": round(float(y), 3),
         "score": round(float(score), 3),
         "visible": bool(visible),
     }
+    if box is not None:
+        row["box"] = [round(float(v), 1) for v in box]
+    return row
 
 
 def _rest_xy(rest_iris: object, slot: int) -> tuple[float, float] | None:
@@ -861,11 +898,82 @@ def rows_from_hits(right: IrisHit, left: IrisHit) -> list[dict[str, object]]:
     return out
 
 
+_SHUT_GAP = 0.13
+
+
+def _eye_opening(pts: np.ndarray, slots: tuple[int, ...]) -> tuple[float, float, float, float, float] | None:
+    """Corner center, lid gap, width, and gap/width. None when the eye is missing."""
+    split = _split_eye(pts, slots)
+    if split is None:
+        return None
+    corners, lid = split
+    cx = float(corners[:, 0].mean())
+    cy = float(corners[:, 1].mean())
+    width = max(float(corners[:, 0].max() - corners[:, 0].min()), 8.0)
+    gap = float(cy - float(lid[1]))
+    return cx, cy, width, gap, gap / width
+
+
+def catchlight_pupil(
+    image_bgr: np.ndarray | None,
+    pts: np.ndarray,
+    slots: tuple[int, ...],
+) -> tuple[float, float] | None:
+    """White highlight inside an open mesh eye. Anime pupils carry that dot.
+
+    The iris model misses a stylized pupil (it draws the eye and hides the
+    keypoint). The highlight is low-saturation and bright, and it sits in
+    the iris rather than on the lid line.
+    """
+    if image_bgr is None or getattr(image_bgr, "size", 0) == 0:
+        return None
+    opened = _eye_opening(pts, slots)
+    if opened is None:
+        return None
+    cx, _cy, width, gap, ratio = opened
+    if ratio < _SHUT_GAP:
+        return None
+    split = _split_eye(pts, slots)
+    if split is None:
+        return None
+    _corners, lid = split
+    rx = width * 0.42
+    ry = max(gap * 1.35, 6.0)
+    oy = float(lid[1]) + gap * 0.90
+    h, w = image_bgr.shape[:2]
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    value = hsv[:, :, 2]
+    sat = hsv[:, :, 1]
+    ys, xs = np.ogrid[:h, :w]
+    mask = ((xs - cx) / rx) ** 2 + ((ys - oy) / ry) ** 2 <= 1.0
+    spec = (mask & (value >= 210) & (sat <= 30)).astype(np.uint8)
+    count, _labels, stats, cents = cv2.connectedComponentsWithStats(spec, 8)
+    best: tuple[float, float, float] | None = None
+    for i in range(1, count):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 3 or area > 400:
+            continue
+        x, y = float(cents[i, 0]), float(cents[i, 1])
+        dist = ((x - cx) / rx) ** 2 + ((y - oy) / ry) ** 2
+        if best is None or dist < best[0]:
+            best = (dist, x, y)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def track_still(
     image_bgr: np.ndarray | None,
     pts28: np.ndarray | None,
 ) -> tuple[list[dict[str, object]], str]:
-    """Iris on the character still (Track). Same pixel space as the mesh."""
+    """Iris on the character still (Track). Same pixel space as the mesh.
+
+    The mesh eye says where to look and whether the lid is open. An open eye
+    takes the ``iris_pose`` pupil when the model marks one. A white catchlight
+    is only used when that pupil is hidden. A shut lid drops the point. A
+    midpoint is only used when nothing else found the eye and the model
+    returned no detections at all.
+    """
     if pts28 is None or len(pts28) < 20:
         return [], "none"
     dets: list[dict[str, object]] = []
@@ -878,15 +986,37 @@ def track_still(
         (right, LEFT_EYE_SLOTS, RIGHT_IRIS),
         (left, RIGHT_EYE_SLOTS, LEFT_IRIS),
     ):
-        raw = (hit.x, hit.y) if hit.visible else None
-        placed = _place_in_iris(raw, pts28, eyes)
-        if placed is None:
+        opened = _eye_opening(pts28, eyes)
+        if opened is not None and opened[4] < _SHUT_GAP:
+            if hit.box is not None:
+                x0, y0, x1, y1 = hit.box
+                rows.append(_row(slot, (x0 + x1) / 2.0, (y0 + y1) / 2.0, hit.score, False, hit.box))
+                used_pose = True
+            continue
+        if (hit.box is not None or hit.score > 0.0) and not hit.visible:
+            if hit.box is not None:
+                x0, y0, x1, y1 = hit.box
+                rows.append(_row(slot, (x0 + x1) / 2.0, (y0 + y1) / 2.0, hit.score, False, hit.box))
+                used_pose = True
             continue
         if hit.visible:
+            placed = _place_in_iris((hit.x, hit.y), pts28, eyes)
+            if placed is None:
+                continue
             used_pose = True
-        rows.append(
-            _row(slot, placed[0], placed[1], hit.score if hit.visible else 0.7, True)
-        )
+            rows.append(_row(slot, placed[0], placed[1], hit.score, True, hit.box))
+            continue
+        spot = catchlight_pupil(image_bgr, pts28, eyes)
+        if spot is not None:
+            used_pose = True
+            rows.append(_row(slot, spot[0], spot[1], 0.9, True))
+            continue
+        if dets:
+            continue
+        placed = _place_in_iris(None, pts28, eyes)
+        if placed is None:
+            continue
+        rows.append(_row(slot, placed[0], placed[1], 0.7, True))
     if not rows:
         return [], "none"
     return rows, "iris_pose" if used_pose else "eye_mid"

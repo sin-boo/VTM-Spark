@@ -168,14 +168,14 @@ export function ControlRail(props: Props) {
     if (props.lab?.ifm?.port != null) setIfmPort(String(props.lab.ifm.port))
   }, [props.lab?.ifm?.port])
   const overlayParts = {
-    show_outline: s?.show_outline !== false,
-    show_brows: s?.show_brows !== false,
-    show_eyes: s?.show_eyes !== false,
-    show_nose: s?.show_nose !== false,
-    show_mouth: s?.show_mouth !== false,
-    show_iris_overlay: s?.show_iris_overlay !== false,
-    show_skeleton: s?.show_skeleton !== false,
-    show_hair: s?.show_hair !== false,
+    show_outline: s?.show_outline === true,
+    show_brows: s?.show_brows === true,
+    show_eyes: s?.show_eyes === true,
+    show_nose: s?.show_nose === true,
+    show_mouth: s?.show_mouth === true,
+    show_iris_overlay: s?.show_iris_overlay === true,
+    show_skeleton: s?.show_skeleton === true,
+    show_hair: s?.show_hair === true,
   }
   const overlayOn = Object.values(overlayParts).some(Boolean)
   const labOnline = Boolean(props.lab?.online)
@@ -564,6 +564,9 @@ export function ControlRail(props: Props) {
               onRemove={props.onRemoveCharacter}
               onRename={props.onRenameCharacter}
               onCreate={props.onCreateCharacter}
+              onRefresh={props.onRefreshCharacters}
+              travel={s?.travel_box}
+              onTravel={(travel_box) => props.onSettings({ travel_box })}
             />
           </section>
 
@@ -618,7 +621,7 @@ export function ControlRail(props: Props) {
                 disabled={busy && !virtualCam}
                 title="Send avatar frames to a virtual camera for OBS"
               >
-                {virtualCam ? 'Stop virtual cam' : 'Virtual camera'}
+                {virtualCam ? 'Stop cam' : 'Start cam'}
               </button>
             </div>
             <div className="row">
@@ -631,12 +634,6 @@ export function ControlRail(props: Props) {
                 Generate once
               </button>
             </div>
-            {virtualCam ? (
-              <p className="hint">
-                OBS → Video Capture Device →{' '}
-                {s?.virtual_cam_device || 'VTM Noble Cam'}
-              </p>
-            ) : null}
             {s?.virtual_cam_error ? (
               <p className="status-error">{s.virtual_cam_error}</p>
             ) : null}
@@ -771,6 +768,8 @@ export function ControlRail(props: Props) {
               <TravelBox
                 value={s?.travel_box}
                 disabled={busy}
+                show={s?.show_limiters === true}
+                onShow={(show_limiters) => props.onSettings({ show_limiters })}
                 onChange={(travel_box) => props.onSettings({ travel_box })}
               />
             </section>

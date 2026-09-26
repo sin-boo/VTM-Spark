@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { CharacterCard, CharacterLoadResult } from '../api'
+import type { CharacterCard, CharacterLoadResult, TravelBox } from '../api'
+import { CharacterFit, type CharacterFitHandle } from './CharacterFit'
 import { ProgressMeter } from './widgets'
 
 type Props = {
@@ -19,6 +20,9 @@ type Props = {
   onRemove: (id: string) => void
   onRename: (id: string, name: string) => void
   onCreate: (file: File) => Promise<CharacterCard | void | undefined>
+  onRefresh?: () => void
+  travel?: TravelBox | null
+  onTravel: (box: TravelBox) => void
 }
 
 type CtxMenu = { id: string; x: number; y: number }
@@ -27,7 +31,9 @@ export function CharacterLibrary(props: Props) {
   const createRef = useRef<HTMLInputElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
+  const fitRef = useRef<CharacterFitHandle>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const chooseGen = useRef(0)
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [pickedId, setPickedId] = useState<string | null>(null)
   const [confirmId, setConfirmId] = useState<string | null>(null)
@@ -50,6 +56,7 @@ export function CharacterLibrary(props: Props) {
   const stillSrc = localStill || props.createStillUrl || nameCard?.preview_url || ''
   const previewSrc = current?.preview_url || (creating ? stillSrc : '')
   const createOpen = creating || Boolean(localStill) || Boolean(nameId)
+  const fitting = Boolean(nameId) && !creating
   const notice = pickError || (createOpen ? props.error : '')
 
   function clearOverlays() {
@@ -107,12 +114,12 @@ export function CharacterLibrary(props: Props) {
   }, [renameId])
 
   useEffect(() => {
-    if (nameId && !creating) nameRef.current?.focus()
-  }, [nameId, creating])
+    if (fitting) nameRef.current?.focus()
+  }, [fitting])
 
   function placeMenu(card: CharacterCard, x: number, y: number) {
     const width = 168
-    const height = 88
+    const height = card.shapes_compatible === false ? 148 : 116
     setConfirmId(null)
     setRenameId(null)
     setMenu({
@@ -148,6 +155,7 @@ export function CharacterLibrary(props: Props) {
     if (locked) return
     setPickedId(props.currentId || null)
     setLibraryOpen(true)
+    props.onRefresh?.()
   }
 
   async function beginCreate(file: File) {
@@ -180,11 +188,39 @@ export function CharacterLibrary(props: Props) {
     setRenameId(null)
   }
 
-  function submitCreateName() {
+  async function submitCreateName() {
     const name = nameDraft.trim()
     if (!nameId || !name) return
+    try {
+      await fitRef.current?.commit()
+    } catch {
+      return
+    }
     if (name !== (nameCard?.name || '')) props.onRename(nameId, name)
     closeCreate()
+  }
+
+  async function beginEdit(card: CharacterCard) {
+    setMenu(null)
+    setLibraryOpen(false)
+    setConfirmId(null)
+    setRepairId(null)
+    setRenameId(null)
+    setPickError('')
+    if (card.id !== props.currentId) {
+      try {
+        const res = await props.onLoad(card.id)
+        if (res?.incompatible) {
+          setRepairId(card.id)
+          return
+        }
+      } catch (e) {
+        setPickError(String(e).replace(/^Error:\s*/, ''))
+        return
+      }
+    }
+    setNameDraft(card.name)
+    setNameId(card.id)
   }
 
   async function loadCard(id: string) {
@@ -193,8 +229,21 @@ export function CharacterLibrary(props: Props) {
     if (res?.incompatible) setRepairId(id)
   }
 
+  async function chooseCard(id: string) {
+    if (!id || locked) return
+    const gen = ++chooseGen.current
+    setPickedId(id)
+    setRepairId(null)
+    setConfirmId(null)
+    if (id === props.currentId) return
+    const res = await props.onLoad(id)
+    if (gen !== chooseGen.current) return
+    if (res?.incompatible) setRepairId(id)
+  }
+
   async function addCard(id: string) {
     if (!id || locked) return
+    setPickedId(id)
     if (id !== props.currentId) await loadCard(id)
     closeLibrary()
   }
@@ -295,6 +344,10 @@ export function CharacterLibrary(props: Props) {
         disabled={locked}
         aria-label={current ? `${current.name}. Open characters` : 'No character. Click to add'}
         onClick={openDock}
+        onContextMenu={(e) => {
+          if (!current) return
+          openMenu(current, e)
+        }}
       >
         {previewSrc ? (
           <img src={previewSrc} alt="" />
@@ -342,8 +395,8 @@ export function CharacterLibrary(props: Props) {
                     props.characters.map((card) => (
                     <article
                       key={card.id}
-                      className={`char-card${card.id === props.currentId ? ' is-on' : ''}${
-                        card.id === pickedId ? ' is-picked' : ''
+                      className={`char-card${
+                        card.id === (pickedId || props.currentId) ? ' is-on' : ''
                       }${menu?.id === card.id ? ' is-menu' : ''}${card.id === confirmId ? ' is-remove' : ''}`}
                       onContextMenu={(e) => openMenu(card, e)}
                     >
@@ -351,10 +404,9 @@ export function CharacterLibrary(props: Props) {
                         type="button"
                         className="char-card-hit"
                         disabled={locked}
-                        aria-pressed={card.id === pickedId}
+                        aria-pressed={card.id === (pickedId || props.currentId)}
                         title={card.name}
-                        onClick={() => setPickedId(card.id)}
-                        onDoubleClick={() => void addCard(card.id)}
+                        onClick={() => void chooseCard(card.id)}
                         onContextMenu={(e) => openMenu(card, e)}
                       >
                         <img src={card.preview_url} alt="" />
@@ -408,23 +460,29 @@ export function CharacterLibrary(props: Props) {
       {createOpen
         ? createPortal(
             <div className="char-modal-back" role="presentation">
-              <div className="char-create" role="dialog" aria-labelledby="char-create-title">
-                <div className="char-create-still" aria-hidden="true">
-                  {stillSrc ? <img src={stillSrc} alt="" /> : null}
-                </div>
-                <div className="char-create-body">
-                  <header className="char-create-head">
-                    <h2 id="char-create-title" className="char-sheet-title">
-                      {creating ? 'Creating character' : 'Name character'}
-                    </h2>
-                    <button type="button" className="btn ghost" disabled={creating} onClick={closeCreate}>
-                      Close
-                    </button>
-                  </header>
-                  {creating ? (
-                    <ProgressMeter label={props.createLabel || 'Creating character…'} value={props.createProgress ?? 0} />
-                  ) : (
-                    <>
+              <div
+                className={`char-create${fitting ? ' is-fit' : ''}`}
+                role="dialog"
+                aria-labelledby="char-create-title"
+              >
+                {fitting ? (
+                  <>
+                    <header className="char-create-head">
+                      <h2 id="char-create-title" className="char-sheet-title">
+                        Fit character
+                      </h2>
+                      <button type="button" className="btn ghost" onClick={closeCreate}>
+                        Close
+                      </button>
+                    </header>
+                    <CharacterFit
+                      ref={fitRef}
+                      stillUrl={nameCard?.preview_url || stillSrc}
+                      travel={props.travel}
+                      onTravel={props.onTravel}
+                      onNotice={setPickError}
+                    />
+                    <div className="fit-save">
                       <input
                         ref={nameRef}
                         className="char-rename-input"
@@ -439,20 +497,39 @@ export function CharacterLibrary(props: Props) {
                           }
                         }}
                       />
-                      <div className="row">
-                        <button
-                          type="button"
-                          className="btn primary"
-                          disabled={!nameDraft.trim()}
-                          onClick={submitCreateName}
-                        >
-                          Save
+                      <button
+                        type="button"
+                        className="btn primary"
+                        disabled={!nameDraft.trim()}
+                        onClick={submitCreateName}
+                      >
+                        Save
+                      </button>
+                    </div>
+                    {notice ? <p className="status-error">{notice}</p> : null}
+                  </>
+                ) : (
+                  <>
+                    <div className="char-create-still" aria-hidden="true">
+                      {stillSrc ? <img src={stillSrc} alt="" /> : null}
+                    </div>
+                    <div className="char-create-body">
+                      <header className="char-create-head">
+                        <h2 id="char-create-title" className="char-sheet-title">
+                          Creating character
+                        </h2>
+                        <button type="button" className="btn ghost" disabled={creating} onClick={closeCreate}>
+                          Close
                         </button>
-                      </div>
-                    </>
-                  )}
-                  {notice ? <p className="status-error">{notice}</p> : null}
-                </div>
+                      </header>
+                      <ProgressMeter
+                        label={props.createLabel || 'Creating character…'}
+                        value={props.createProgress ?? 0}
+                      />
+                      {notice ? <p className="status-error">{notice}</p> : null}
+                    </div>
+                  </>
+                )}
               </div>
             </div>,
             document.body,
@@ -485,6 +562,27 @@ export function CharacterLibrary(props: Props) {
               onClick={(e) => e.stopPropagation()}
               onContextMenu={(e) => e.preventDefault()}
             >
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => void beginEdit(menuCard)}
+              >
+                Edit
+              </button>
+              {menuCard.shapes_compatible === false ? (
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setRepairId(menuCard.id)
+                    setMenu(null)
+                  }}
+                >
+                  Repair
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="menu-item"

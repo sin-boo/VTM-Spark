@@ -34,11 +34,11 @@ models/dit/**
 !models/dit/.gitkeep
 models/iamge/
 
-# User refs + local picker state (models/ is the only data tree)
+# User refs + local picker state
 models/refs/**
 !models/refs/.gitkeep
-models/characters/**
-!models/characters/.gitkeep
+characters/**
+!characters/.gitkeep
 models/blendshapes/**
 !models/blendshapes/.gitkeep
 models/*.lock
@@ -62,7 +62,8 @@ vendor/tools/pose-traker/**/dwpose_v2.onnx
 # Local uv bootstrap (Smart Build downloads Astral uv here if PATH has none)
 .tools/
 
-# Isolated face-tracking lab (local venv + copied weights + UI build)
+# Isolated face-tracking lab (local venv + UI build).
+# Weights live in models/trackers and vendor/tools/openseeface/models.
 track_lab/.venv/
 track_lab/ui/node_modules/
 track_lab/ui/dist/

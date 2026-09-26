@@ -248,7 +248,7 @@ def validate_character_pack(path: Path | str) -> dict[str, Any]:
 
 
 def character_still_path(ident: str, *, dest_dir: Path | None = None) -> Path:
-    """Per-character folder: ``models/characters/<id>/preview.png``."""
+    """Per-character folder: ``characters/<id>/preview.png``."""
     folder = dest_dir if dest_dir is not None else characters_dir()
     stem = Path(str(ident or "").strip()).name
     if not stem or stem in {".", ".."}:
@@ -343,6 +343,9 @@ def delete_character_pack(path: Path | str, *, dest_dir: Path | None = None) -> 
             if sidecar.is_file():
                 sidecar.unlink()
     still = character_still_path(stem, dest_dir=library)
+    fit = still.with_name("fit.json")
+    if fit.is_file():
+        fit.unlink()
     if still.is_file():
         still.unlink()
     folder = still.parent

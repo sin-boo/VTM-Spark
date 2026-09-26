@@ -18,7 +18,7 @@ from backend.engine import StreamEngine
 
 
 CKPT = ROOT / "models" / "dit" / "VTM-1.5.1.pt"
-CHAR = ROOT / "models" / "characters" / "ChatGPT-Image-Aug-3-2026-11_36_05-PM.vtm"
+CHAR = ROOT / "characters" / "ChatGPT-Image-Aug-3-2026-11_36_05-PM.vtm"
 GEN_RUNS = 8
 
 

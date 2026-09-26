@@ -4,6 +4,7 @@ import numpy as np
 
 from backend.iris import (
     IrisHit,
+    catchlight_pupil,
     eye_crop_box,
     from_eye_mid,
     from_look,
@@ -41,6 +42,7 @@ def test_resolve_weights_finds_iris_pose() -> None:
     assert path is not None
     assert path.name == "iris_pose.pt"
     assert path.is_file()
+    assert "trackers" in path.parts
 
 
 def test_map_into_eye_preserves_look_offset() -> None:
@@ -296,6 +298,80 @@ def test_still_iris_does_not_sit_on_the_lid(monkeypatch) -> None:
     assert float(by_id[LEFT_IRIS]["y"]) > float(char[18, 1])
     assert abs(float(by_id[RIGHT_IRIS]["x"]) - 120.0) < 15
     assert abs(float(by_id[LEFT_IRIS]["x"]) - 220.0) < 15
+
+
+def test_closed_eye_keeps_the_box_and_drops_the_dot(monkeypatch) -> None:
+    char = _char()
+    monkeypatch.setattr(
+        "backend.iris.detect",
+        lambda _image: [
+            {
+                "cx": 120.0,
+                "cy": 100.0,
+                "bbox": (100.0, 80.0, 140.0, 110.0),
+                "pupil": None,
+                "score": 0.8,
+                "visible": False,
+            },
+            {
+                "cx": 220.0,
+                "cy": 100.0,
+                "bbox": (200.0, 80.0, 240.0, 110.0),
+                "pupil": (222.0, 108.0),
+                "score": 0.9,
+                "visible": True,
+            },
+        ],
+    )
+    image = np.zeros((180, 320, 3), dtype=np.uint8)
+    cv2 = __import__("cv2")
+    cv2.circle(image, (120, 97), 5, (255, 255, 255), -1)
+    rows, method = track_still(image, char)
+    assert method == "iris_pose"
+    by_id = {int(row["id"]): row for row in rows}
+    assert by_id[RIGHT_IRIS]["visible"] is False
+    assert by_id[RIGHT_IRIS]["box"] == [100.0, 80.0, 140.0, 110.0]
+    assert by_id[LEFT_IRIS]["visible"] is True
+    assert abs(float(by_id[LEFT_IRIS]["x"]) - 222.0) < 1e-6
+
+
+def test_track_still_omits_a_hidden_pupil(monkeypatch) -> None:
+    char = _char()
+    monkeypatch.setattr(
+        "backend.iris.detect",
+        lambda _image: [
+            {
+                "cx": 120.0,
+                "cy": 100.0,
+                "pupil": (118.0, 108.0),
+                "score": 0.9,
+                "visible": True,
+            },
+            {
+                "cx": 220.0,
+                "cy": 100.0,
+                "pupil": None,
+                "score": 0.4,
+                "visible": False,
+            },
+        ],
+    )
+    rows, method = track_still(np.zeros((8, 8, 3), dtype=np.uint8), char)
+    assert method == "iris_pose"
+    assert {int(row["id"]) for row in rows} == {RIGHT_IRIS}
+
+
+def test_catchlight_marks_the_open_pupil_and_skips_a_shut_lid() -> None:
+    char = _char()
+    image = np.zeros((180, 320, 3), dtype=np.uint8)
+    cv2 = __import__("cv2")
+    cv2.circle(image, (120, 97), 5, (255, 255, 255), -1)
+    spot = catchlight_pupil(image, char, (11, 12, 13))
+    assert spot is not None
+    assert abs(spot[0] - 120.0) < 4.0
+    shut = char.copy()
+    shut[12, 1] = 96.0
+    assert catchlight_pupil(image, shut, (11, 12, 13)) is None
 
 
 def test_track_still_falls_back_to_eye_mid(monkeypatch) -> None:

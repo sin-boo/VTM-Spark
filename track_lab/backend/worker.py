@@ -12,7 +12,7 @@ import threading
 
 from harness.bridge import ENV_PORT, connect, iter_messages, send
 from harness.dispatch import bind, handle
-from harness.hub import LatestSlot, hub
+from harness.hub import PacketMailbox, hub
 from harness.pack import frame_from_bench, status_from_bench
 from harness.protocol import ack
 
@@ -23,7 +23,7 @@ def _log(msg: str) -> None:
 
 def _wrap_publish() -> None:
     real = hub.publish
-    pending = LatestSlot()
+    pending = PacketMailbox()
 
     def forward(packet: dict) -> None:
         payload = dict(packet)
@@ -33,16 +33,15 @@ def _wrap_publish() -> None:
 
     def sender() -> None:
         while True:
-            msg = pending.take(timeout=0.25)
-            if msg is None:
-                continue
+            batch = pending.take(timeout=0.25)
             sock = _sock
             if sock is None:
                 continue
-            try:
-                send(sock, msg, _send_lock)
-            except OSError:
-                return
+            for msg in batch:
+                try:
+                    send(sock, msg, _send_lock)
+                except OSError:
+                    return
 
     hub.publish = forward  # type: ignore[method-assign]
     threading.Thread(target=sender, daemon=True, name="lab-ipc-send").start()

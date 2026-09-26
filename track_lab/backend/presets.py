@@ -14,6 +14,8 @@ MOUTH_SLOTS = tuple(range(20, 28))
 VOWEL_IDS = ("A", "I", "U", "E", "O")
 FORM_IDS = ("smile", "sad")
 PRESET_IDS = ("rest",) + FORM_IDS + VOWEL_IDS
+# O still drives live speech. It is not an authored blend shape.
+AUTHOR_IDS = tuple(name for name in PRESET_IDS if name != "O")
 PRESET_LABELS = {
     "rest": "Rest",
     "smile": "Smile",
@@ -24,6 +26,117 @@ PRESET_LABELS = {
     "E": "E",
     "O": "O",
 }
+
+
+def pair_ends(name: str) -> tuple[str, str] | None:
+    """Canonical ``a+b`` id, with ``a`` before ``b`` in ``PRESET_IDS``.
+
+    A stop along that pair is ``a+b@NNN`` (thousandths, 1–999). ``a+b`` alone
+    is the halfway stop.
+    """
+    if not isinstance(name, str):
+        return None
+    base, sep, suffix = name.partition("@")
+    if sep:
+        if not suffix.isdigit():
+            return None
+        slot = int(suffix)
+        if slot <= 0 or slot >= 1000:
+            return None
+    if base.count("+") != 1:
+        return None
+    left, right = base.split("+", 1)
+    if left not in PRESET_IDS or right not in PRESET_IDS or left == right:
+        return None
+    if PRESET_IDS.index(left) > PRESET_IDS.index(right):
+        return None
+    return left, right
+
+
+def pair_id(a: str, b: str) -> str:
+    if a not in PRESET_IDS or b not in PRESET_IDS or a == b:
+        raise ValueError("Mouth pair needs two different shapes")
+    if PRESET_IDS.index(a) > PRESET_IDS.index(b):
+        a, b = b, a
+    return f"{a}+{b}"
+
+
+def key_t(name: str) -> float | None:
+    """Blend position of a saved stop. Halfway when the id has no ``@``."""
+    if pair_ends(name) is None:
+        return None
+    if "@" not in name:
+        return 0.5
+    return int(name.split("@", 1)[1]) / 1000.0
+
+
+def key_id(a: str, b: str, t: float) -> str:
+    """Stop id at ``t`` in (0, 1). ``0.5`` stays the legacy ``a+b`` id."""
+    base = pair_id(a, b)
+    slot = int(round(float(np.clip(t, 0.0, 1.0)) * 1000))
+    slot = min(999, max(1, slot))
+    if slot == 500:
+        return base
+    return f"{base}@{slot}"
+
+
+def pair_label(name: str) -> str:
+    ends = pair_ends(name)
+    if ends is None:
+        return PRESET_LABELS.get(name, name)
+    return f"{PRESET_LABELS[ends[0]]} · {PRESET_LABELS[ends[1]]}"
+
+
+def _stored_ids(shapes: dict[str, np.ndarray]) -> list[str]:
+    names = [name for name in PRESET_IDS if name in shapes]
+    names.extend(name for name in shapes if pair_ends(name) is not None)
+    return names
+
+
+def _blend(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    out = copy_pts(a)
+    u = float(np.clip(t, 0.0, 1.0))
+    out[:, :2] = (1.0 - u) * np.asarray(a[:28, :2], dtype=np.float32) + u * np.asarray(
+        b[:28, :2], dtype=np.float32
+    )
+    return out
+
+
+def _midpoint(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return _blend(a, b, 0.5)
+
+
+def _along(
+    rest: np.ndarray,
+    shape: np.ndarray,
+    stops: list[tuple[float, np.ndarray]],
+    amount: float,
+) -> np.ndarray:
+    """Piecewise mouth at ``amount`` through rest, the saved stops, and the end."""
+    slots = list(MOUTH_SLOTS)
+    knots_t = [0.0]
+    knots_xy = [np.asarray(rest[slots, :2], dtype=np.float32)]
+    seen: set[int] = set()
+    for t, mid in stops:
+        slot = int(round(float(t) * 1000))
+        if slot in seen or slot <= 0 or slot >= 1000:
+            continue
+        seen.add(slot)
+        knots_t.append(float(t))
+        knots_xy.append(np.asarray(mid[slots, :2], dtype=np.float32))
+    knots_t.append(1.0)
+    knots_xy.append(np.asarray(shape[slots, :2], dtype=np.float32))
+    amt = float(np.clip(amount, 0.0, 1.0))
+    for i in range(len(knots_t) - 1):
+        t0 = knots_t[i]
+        t1 = knots_t[i + 1]
+        if amt <= t1 or i == len(knots_t) - 2:
+            span = 0.0 if t1 <= t0 else (amt - t0) / (t1 - t0)
+            span = float(np.clip(span, 0.0, 1.0))
+            return knots_xy[i] + span * (knots_xy[i + 1] - knots_xy[i])
+    return knots_xy[-1]
+
+
 # Independent tracking setups. Each bank has its own geometry scale, then
 # all banks mix. Corners (smile/sad) stay coarse; spread/round (I E / U O)
 # can use the smaller lip differences without being swamped by Oh/Smile.
@@ -242,7 +355,7 @@ class MouthBook:
         shapes = data.get("shapes")
         if isinstance(shapes, dict):
             for name, raw in shapes.items():
-                if name in _STALE_IDS or name not in PRESET_IDS:
+                if name in _STALE_IDS or (name not in PRESET_IDS and pair_ends(name) is None):
                     stale = True
                     continue
                 pts = json_to_pts(raw)
@@ -261,7 +374,7 @@ class MouthBook:
         PRESET_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "active": self.active if self.active in self.shapes else "",
-            "shapes": {name: pts_to_json(self.shapes[name]) for name in PRESET_IDS if name in self.shapes},
+            "shapes": {name: pts_to_json(self.shapes[name]) for name in _stored_ids(self.shapes)},
         }
         PRESET_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -289,6 +402,10 @@ class MouthBook:
                 if stored is None:
                     continue
                 self.shapes[name] = retarget_mouth(stored, old, nxt)
+            for name in list(self.shapes):
+                if pair_ends(name) is None:
+                    continue
+                self.shapes[name] = retarget_mouth(self.shapes[name], old, nxt)
         self.shapes["rest"] = nxt
         self.active = "rest"
         self.save()
@@ -298,8 +415,20 @@ class MouthBook:
             return self.shapes["rest"]
         return rest
 
+    def _ends(self, name: str, rest: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        ends = pair_ends(name)
+        if ends is None:
+            raise ValueError(f"Unknown mouth preset: {name}")
+        return self.preview(ends[0], rest), self.preview(ends[1], rest)
+
     def preview(self, name: str, rest: np.ndarray | None) -> np.ndarray:
         """Saved shape, or a drafted viseme from rest. Does not write."""
+        if pair_ends(name) is not None:
+            stored = self.shapes.get(name)
+            if stored is not None:
+                return copy_pts(stored)
+            left, right = self._ends(name, rest)
+            return _blend(left, right, key_t(name) or 0.5)
         if name not in PRESET_IDS:
             raise ValueError(f"Unknown mouth preset: {name}")
         stored = self.shapes.get(name)
@@ -313,12 +442,13 @@ class MouthBook:
         return draft_mouth(name, source)
 
     def apply(self, name: str, rest: np.ndarray | None) -> np.ndarray:
-        if name not in PRESET_IDS:
+        if name not in PRESET_IDS and pair_ends(name) is None:
             raise ValueError(f"Unknown mouth preset: {name}")
         stored = self.shapes.get(name)
         if stored is None:
             if name != "rest":
-                raise ValueError(f"No saved {PRESET_LABELS[name]} yet")
+                label = pair_label(name)
+                raise ValueError(f"No saved {label} yet")
             source = self.template(rest)
             if source is None:
                 raise ValueError("Track a face first")
@@ -329,19 +459,69 @@ class MouthBook:
         return copy_pts(stored)
 
     def set_mouth(self, name: str, mouth: object, rest: np.ndarray | None) -> np.ndarray:
-        if name not in PRESET_IDS:
+        if name not in PRESET_IDS and pair_ends(name) is None:
             raise ValueError(f"Unknown mouth preset: {name}")
         base = self.shapes.get(name)
         if base is None:
-            source = self.template(rest)
-            if source is None:
-                raise ValueError("Track a face first")
-            base = source
+            if pair_ends(name) is not None:
+                left, right = self._ends(name, rest)
+                base = _blend(left, right, key_t(name) or 0.5)
+            else:
+                source = self.template(rest)
+                if source is None:
+                    raise ValueError("Track a face first")
+                base = source
         pts = apply_mouth(base, mouth)
         self.shapes[name] = pts
         self.active = name
         self.save()
         return copy_pts(pts)
+
+    def _stops(self, left: str, right: str) -> list[tuple[float, np.ndarray]]:
+        want = (left, right)
+        found: list[tuple[float, np.ndarray]] = []
+        for name, shape in self.shapes.items():
+            if pair_ends(name) != want:
+                continue
+            t = key_t(name)
+            if t is None:
+                continue
+            found.append((t, shape))
+        found.sort(key=lambda item: item[0])
+        return found
+
+    def move_key(self, name: str, t: object) -> str:
+        """Slide a saved stop along its pair. The mouth shape stays put."""
+        if pair_ends(name) is None or name not in self.shapes:
+            raise ValueError("No saved point")
+        if isinstance(t, bool) or not isinstance(t, (int, float, str)):
+            raise ValueError("Point needs a position")
+        try:
+            pos = float(t)
+        except ValueError:
+            raise ValueError("Point needs a position") from None
+        ends = pair_ends(name)
+        if ends is None:
+            raise ValueError("No saved point")
+        new_name = key_id(ends[0], ends[1], pos)
+        if new_name == name:
+            return name
+        if new_name in self.shapes:
+            raise ValueError("A point is already there")
+        self.shapes[new_name] = self.shapes.pop(name)
+        if self.active == name:
+            self.active = new_name
+        self.save()
+        return new_name
+
+    def drop_key(self, name: str) -> None:
+        """Remove a saved in-between. End shapes stay."""
+        if pair_ends(name) is None or name not in self.shapes:
+            raise ValueError("No saved point")
+        del self.shapes[name]
+        if self.active == name:
+            self.active = "rest" if "rest" in self.shapes else ""
+        self.save()
 
     def has_visemes(self) -> bool:
         return any(name in self.shapes for name in FORM_IDS + VOWEL_IDS)
@@ -381,7 +561,11 @@ class MouthBook:
                 # shape instead of skipping, so live A does not wait for a
                 # saved viseme or replace rest with a camera slit.
                 shape = draft_mouth(name, rest)
-            out[slots, :2] += amount * (shape[slots, :2] - rest[slots, :2])
+            stops = self._stops("rest", name)
+            if not stops:
+                out[slots, :2] += amount * (shape[slots, :2] - rest[slots, :2])
+            else:
+                out[slots, :2] += _along(rest, shape, stops, amount) - rest[slots, :2]
         amt = open_amount(weights)
         apply_open_offset(out, rest, amt)
         return out
@@ -401,10 +585,11 @@ class MouthBook:
                     "label": PRESET_LABELS[name],
                     "ready": name in self.shapes,
                 }
-                for name in PRESET_IDS
+                for name in AUTHOR_IDS
             ],
             "points": pts_to_json(self.current() if self.active else rest),
-            "shapes": {name: pts_to_json(self.shapes[name]) for name in PRESET_IDS if name in self.shapes},
+            "shapes": {name: pts_to_json(self.shapes[name]) for name in _stored_ids(self.shapes)},
+            "mids": [name for name in self.shapes if pair_ends(name) is not None],
         }
 
 

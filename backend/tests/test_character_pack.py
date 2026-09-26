@@ -220,8 +220,6 @@ def test_reset_character_runtime_drops_old_still() -> None:
     rt.status = lambda: dict(rt._status)
     rt._body_lost = False
     rt._mouth_snapped = False
-    rt._travel_silhouette = None
-    rt._travel_silhouette_tight = None
     rt._travel_ref_rgb = np.zeros((4, 4, 3), dtype=np.uint8)
     rt.engine = type("E", (), {"_ref_keypoints": None})()
     emitted: list[str | None] = []
@@ -250,12 +248,14 @@ def test_reset_character_runtime_drops_old_still() -> None:
     rt._drag_base_kps = rt._last_overlay_kps
     rt._drag_xy = (1.0, 1.0)
     rt._lab_image_wh = (12, 12)
+    rt._lab_overlay_gen = 4
     StreamRuntime._reset_character_runtime(rt, emit_blank=True)
     assert rt._last_image is None
     assert rt._last_overlay_kps is None
     assert rt._inbetween_prev is None
     assert rt._ema_frame is None
     assert rt._hair_rig is None
+    assert rt._lab_overlay_gen is None
     assert emitted and emitted[0] is not None
     from backend.stream import _image_to_jpeg_b64
 
@@ -301,11 +301,14 @@ def test_delete_character_pack_removes_still_and_keys(tmp_path: Path) -> None:
     still = character_still_path("gigi", dest_dir=tmp_path)
     still.parent.mkdir(parents=True, exist_ok=True)
     still.write_bytes(b"png")
+    fit = still.with_name("fit.json")
+    fit.write_text("{}", encoding="utf-8")
     keys = dest.with_name("gigi.keys.json")
     keys.write_text("{}", encoding="utf-8")
     delete_character_pack(dest, dest_dir=tmp_path)
     assert not dest.exists()
     assert not still.exists()
+    assert not fit.exists()
     assert not keys.exists()
     assert not still.parent.exists()
 
@@ -375,8 +378,6 @@ def _remove_runtime(tmp_path: Path, dest: Path):
     rt._drag_base_kps = rt._last_overlay_kps
     rt._drag_xy = (1.0, 1.0)
     rt._travel_ref_rgb = np.zeros((4, 4, 3), dtype=np.uint8)
-    rt._travel_silhouette = None
-    rt._travel_silhouette_tight = None
     rt._live_origin_keypoints = np.ones((37, 4), dtype=np.float32)
     rt.list_characters = lambda: []
     rt._emitted = emitted
@@ -503,7 +504,7 @@ def test_boot_skips_missing_character(monkeypatch) -> None:
     stages: list[dict] = []
     monkeypatch.setattr(
         "backend.ui_session.load_ui_session",
-        lambda: {"character_path": "models/characters/gone.vtm"},
+        lambda: {"character_path": "characters/gone.vtm"},
     )
     monkeypatch.setattr(
         "backend.stream.previous_load_target",

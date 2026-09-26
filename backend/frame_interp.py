@@ -70,6 +70,35 @@ def inbetween_slot_s(gen_fps: float, count: int) -> float:
     return 0.0
 
 
+# Shown pictures, not generated ones. 20 fps is a frame every 50 ms.
+SHOW_FPS_MAX = 20.0
+# Let a short burst sit before the first picture so it does not all hit at once.
+PLAYOUT_DELAY_S = 0.25
+# Quarter-second of 20 fps pictures. Newer keys replace anything older.
+PLAYOUT_QUEUE_MAX = 5
+
+
+def playout_gap(
+    now: float,
+    next_at: float,
+    *,
+    fps_max: float = SHOW_FPS_MAX,
+    delay_s: float = PLAYOUT_DELAY_S,
+) -> tuple[float, float]:
+    """Seconds to wait before the next shown picture, and the deadline after it.
+
+    ``next_at <= 0`` is the start of a stream: hold ``delay_s``, then show.
+    A late clock shows immediately. The next picture is one slot later, so a
+    backlog is not dumped in one burst.
+    """
+    slot = 1.0 / max(1.0, float(fps_max))
+    if next_at <= 0.0:
+        return float(delay_s), float(now) + float(delay_s) + slot
+    if next_at <= now:
+        return 0.0, float(now) + slot
+    return float(next_at) - float(now), float(next_at) + slot
+
+
 def print_inbetween_count(
     wanted: int,
     *,

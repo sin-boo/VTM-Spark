@@ -3,76 +3,66 @@ import type { TravelBox as TravelBoxValue } from '../api'
 import { Toggle } from './widgets'
 
 const ROOM_MAX = 1.2
-const PAD_MAX = 200
 const YAW_MAX = 80
 const ROLL_MAX = 80
 const PITCH_UP_MAX = 50
 const PITCH_DOWN_MAX = 32
-const BODY_YAW_MAX = 80
-const BODY_ROLL_MAX = 80
+const SIZE_MAX = 0.7
+const VERSION = 2
 
 const ZERO: TravelBoxValue = {
+  version: VERSION,
   enabled: true,
-  side: true,
-  rotate: true,
-  look_up: true,
-  look_down: true,
-  body: true,
-  body_rotate: true,
-  eyes: true,
-  left: 0,
-  right: 0,
-  up: 0,
-  down: 0,
-  body_left: 0,
-  body_right: 0,
-  body_up: 0,
-  body_down: 0,
-  yaw: YAW_MAX,
-  roll: ROLL_MAX,
-  pitch_up: PITCH_UP_MAX,
-  pitch_down: PITCH_DOWN_MAX,
-  body_yaw: BODY_YAW_MAX,
-  body_roll: BODY_ROLL_MAX,
-  eye_x: 0.78,
-  eye_y: 0.78,
-  pad_px: 50,
+  left: 0.68,
+  right: 0.54,
+  up: 0.57,
+  down: 0.07,
+  body_left: 0.54,
+  body_right: 0.48,
+  body_up: 0.1,
+  body_down: 0.12,
+  turn_left: 12,
+  turn_right: 22,
+  tilt_left: 22,
+  tilt_right: 12,
+  pitch_up: 14,
+  pitch_down: 3,
+  eye: 0.56,
+  size: 0,
 }
+
+type RoomKey = 'left' | 'right' | 'up' | 'down' | 'body_left' | 'body_right' | 'body_up' | 'body_down'
+
+const HEAD_ROOM: [RoomKey, string][] = [
+  ['left', 'Left'],
+  ['right', 'Right'],
+  ['up', 'Up'],
+  ['down', 'Down'],
+]
+
+type TurnKey = 'turn_left' | 'turn_right' | 'tilt_left' | 'tilt_right'
+
+// Screen sides of the character: which way the face turns, or the crown tips.
+const HEAD_TURN: [TurnKey, string, number][] = [
+  ['turn_left', 'Turn left', YAW_MAX],
+  ['turn_right', 'Turn right', YAW_MAX],
+  ['tilt_left', 'Tilt left', ROLL_MAX],
+  ['tilt_right', 'Tilt right', ROLL_MAX],
+]
+
+const BODY_ROOM: [RoomKey, string][] = [
+  ['body_left', 'Left'],
+  ['body_right', 'Right'],
+  ['body_up', 'Up'],
+  ['body_down', 'Down'],
+]
 
 type Props = {
   value?: TravelBoxValue | null
   disabled?: boolean
+  show?: boolean
+  onShow?: (on: boolean) => void
   onChange: (patch: TravelBoxValue) => void
-}
-
-function fill(raw: TravelBoxValue | null | undefined): TravelBoxValue {
-  return {
-    enabled: raw?.enabled !== false,
-    side: raw?.side !== false,
-    rotate: raw?.rotate !== false,
-    look_up: raw?.look_up !== false,
-    look_down: raw?.look_down !== false,
-    body: raw?.body !== false,
-    body_rotate: raw?.body_rotate !== false,
-    eyes: raw?.eyes !== false,
-    left: clampRoom(raw?.left ?? ZERO.left),
-    right: clampRoom(raw?.right ?? ZERO.right),
-    up: 0,
-    down: 0,
-    body_left: clampRoom(raw?.body_left ?? ZERO.body_left),
-    body_right: clampRoom(raw?.body_right ?? ZERO.body_right),
-    body_up: clampRoom(raw?.body_up ?? ZERO.body_up),
-    body_down: clampRoom(raw?.body_down ?? ZERO.body_down),
-    yaw: clampDeg(raw?.yaw ?? ZERO.yaw, YAW_MAX),
-    roll: clampDeg(raw?.roll ?? ZERO.roll, ROLL_MAX),
-    pitch_up: clampDeg(raw?.pitch_up ?? ZERO.pitch_up, PITCH_UP_MAX),
-    pitch_down: clampDeg(raw?.pitch_down ?? ZERO.pitch_down, PITCH_DOWN_MAX),
-    body_yaw: clampDeg(raw?.body_yaw ?? ZERO.body_yaw, BODY_YAW_MAX),
-    body_roll: clampDeg(raw?.body_roll ?? ZERO.body_roll, BODY_ROLL_MAX),
-    eye_x: clampEye(raw?.eye_x ?? ZERO.eye_x),
-    eye_y: clampEye(raw?.eye_y ?? ZERO.eye_y),
-    pad_px: clampPad(raw?.pad_px ?? ZERO.pad_px),
-  }
 }
 
 function clampRoom(n: number) {
@@ -86,13 +76,38 @@ function clampDeg(n: number, max: number) {
 }
 
 function clampEye(n: number) {
-  if (!Number.isFinite(n)) return ZERO.eye_x
+  if (!Number.isFinite(n)) return ZERO.eye
   return Math.max(0, Math.min(1, n))
 }
 
-function clampPad(n: number) {
-  if (!Number.isFinite(n)) return ZERO.pad_px
-  return Math.max(0, Math.min(PAD_MAX, Math.round(n)))
+function clampSize(n: number) {
+  if (!Number.isFinite(n)) return ZERO.size
+  return Math.max(0, Math.min(SIZE_MAX, n))
+}
+
+function fill(raw: TravelBoxValue | null | undefined): TravelBoxValue {
+  const fresh = raw?.version === VERSION
+  const room = (key: RoomKey) => clampRoom(fresh ? (raw?.[key] ?? ZERO[key]) : ZERO[key])
+  return {
+    version: VERSION,
+    enabled: raw?.enabled !== false,
+    left: room('left'),
+    right: room('right'),
+    up: room('up'),
+    down: room('down'),
+    body_left: room('body_left'),
+    body_right: room('body_right'),
+    body_up: room('body_up'),
+    body_down: room('body_down'),
+    turn_left: clampDeg(raw?.turn_left ?? raw?.yaw ?? ZERO.turn_left, YAW_MAX),
+    turn_right: clampDeg(raw?.turn_right ?? raw?.yaw ?? ZERO.turn_right, YAW_MAX),
+    tilt_left: clampDeg(raw?.tilt_left ?? raw?.roll ?? ZERO.tilt_left, ROLL_MAX),
+    tilt_right: clampDeg(raw?.tilt_right ?? raw?.roll ?? ZERO.tilt_right, ROLL_MAX),
+    pitch_up: clampDeg(raw?.pitch_up ?? ZERO.pitch_up, PITCH_UP_MAX),
+    pitch_down: clampDeg(raw?.pitch_down ?? ZERO.pitch_down, PITCH_DOWN_MAX),
+    eye: clampEye(raw?.eye ?? ZERO.eye),
+    size: clampSize(raw?.size ?? ZERO.size),
+  }
 }
 
 export function TravelBox(props: Props) {
@@ -100,35 +115,12 @@ export function TravelBox(props: Props) {
   const [draft, setDraft] = useState(live)
   const drag = useRef(false)
   const timer = useRef<number | null>(null)
+  const liveKey = JSON.stringify(live)
 
   useEffect(() => {
     if (drag.current) return
     setDraft(live)
-  }, [
-    live.enabled,
-    live.side,
-    live.rotate,
-    live.look_up,
-    live.look_down,
-    live.body,
-    live.body_rotate,
-    live.eyes,
-    live.left,
-    live.right,
-    live.body_left,
-    live.body_right,
-    live.body_up,
-    live.body_down,
-    live.yaw,
-    live.roll,
-    live.pitch_up,
-    live.pitch_down,
-    live.body_yaw,
-    live.body_roll,
-    live.eye_x,
-    live.eye_y,
-    live.pad_px,
-  ])
+  }, [liveKey])
 
   useEffect(() => {
     return () => {
@@ -151,7 +143,7 @@ export function TravelBox(props: Props) {
     timer.current = window.setTimeout(send, 80)
   }
 
-  const masterOff = props.disabled || !draft.enabled
+  const off = props.disabled || !draft.enabled
 
   return (
     <div className={`travel-box${draft.enabled ? '' : ' is-off'}`}>
@@ -163,10 +155,17 @@ export function TravelBox(props: Props) {
             className="btn ghost compact"
             disabled={props.disabled}
             onClick={() => commit({ ...ZERO, enabled: draft.enabled }, true)}
-            title="Reset size, head, look, eyes, and skeleton limits"
+            title="Reset head, body, turn, and eye limits"
           >
             Reset
           </button>
+          <Toggle
+            label="Show"
+            checked={Boolean(props.show)}
+            disabled={props.disabled}
+            title="Draw the head and body walls on the character"
+            onChange={(on) => props.onShow?.(on)}
+          />
           <Toggle
             label="On"
             checked={draft.enabled}
@@ -175,245 +174,111 @@ export function TravelBox(props: Props) {
           />
         </div>
       </div>
-      <ul className="travel-legend">
-        <li title="How far the whole character may scale before a walk is pushed back.">
-          <i className="travel-swatch is-size" />
-          Size
-          <span className="travel-kind">Scale</span>
-        </li>
-        <li title="Pink face overlay. Drag a slider and the head walks to that max.">
-          <i className="travel-swatch is-head" />
-          Head
-          <span className="travel-kind">Form</span>
-        </li>
-        <li title="Blue shoulders, arms, and chest. Drag a slider and the skeleton walks to that max.">
-          <i className="travel-swatch is-body" />
-          Skeleton
-          <span className="travel-kind">Form</span>
-        </li>
-        <li title="Look, turn, and tilt. The overlay nods or twists to the angle you set.">
-          <span className="travel-kind">Rotation</span>
-        </li>
-      </ul>
+      <p className="hint travel-hint">
+        Walls are fixed to the character's rest pose. The head and the body each stop at their own wall;
+        turn and tilt have a cap per side. Drag these while tracking is on — the character takes the new
+        limit immediately.
+      </p>
 
       <div className="travel-limits">
         <div className="travel-block">
           <div className="travel-block-head">
-            <h3
-              className="group-subtitle"
-              title="How far the whole character drawing, hair included, may scale"
-            >
-              Size
-            </h3>
-            <span className="travel-kind">Scale</span>
-          </div>
-          <ul className="lab-sliders travel-readout">
-            <RangeRow
-              label="Size pad"
-              title="Scale room around the character. Bigger pad = more room before a walk is pushed back."
-              value={draft.pad_px}
-              min={0}
-              max={PAD_MAX}
-              step={1}
-              disabled={masterOff}
-              text={`${draft.pad_px}px`}
-              onChange={(n) => commit({ ...draft, pad_px: clampPad(n) })}
-            />
-          </ul>
-        </div>
-
-        <div className="travel-block">
-          <div className="travel-block-head">
-            <h3
-              className="group-subtitle"
-              title="Face mesh only (jaw, brows, eyes, nose). Hair stays in Size."
-            >
+            <i className="travel-swatch is-head" />
+            <h3 className="group-subtitle" title="How far the head may move from rest, in face heights.">
               Head
             </h3>
-            <span className="travel-kind">Form</span>
-            <Toggle
-              label="On"
-              checked={draft.side}
-              disabled={masterOff}
-              title="Pink overlay around the face mesh (jaw, brows, eyes, nose)."
-              onChange={(side) => commit({ ...draft, side }, true)}
-            />
           </div>
           <ul className="lab-sliders travel-readout">
-            <RangeRow
-              label="Left"
-              value={draft.left}
-              disabled={masterOff || !draft.side}
-              title="Slide the head overlay left to this max."
-              kind="room"
-              onChange={(left) => commit({ ...draft, left })}
-            />
-            <RangeRow
-              label="Right"
-              value={draft.right}
-              disabled={masterOff || !draft.side}
-              title="Slide the head overlay right to this max."
-              kind="room"
-              onChange={(right) => commit({ ...draft, right })}
-            />
+            {HEAD_ROOM.map(([key, label]) => (
+              <RangeRow
+                key={key}
+                label={label}
+                value={draft[key]}
+                disabled={off}
+                title={`Head may move ${label.toLowerCase()} this far from rest.`}
+                kind="room"
+                onChange={(n) => commit({ ...draft, [key]: n })}
+              />
+            ))}
+            {HEAD_TURN.map(([key, label, max]) => (
+              <RangeRow
+                key={key}
+                label={label}
+                value={draft[key]}
+                max={max}
+                disabled={off}
+                title={`How far the head may ${label.toLowerCase()} on screen.`}
+                kind="deg"
+                onChange={(n) => commit({ ...draft, [key]: n })}
+              />
+            ))}
           </ul>
         </div>
 
         <div className="travel-block">
           <div className="travel-block-head">
+            <i className="travel-swatch is-body" />
             <h3
               className="group-subtitle"
-              title="Nod-up and nod-down caps. The head overlay nods to the angle as you drag."
+              title="How far the neck, shoulders, and chest may move from rest, in face heights."
             >
+              Body
+            </h3>
+          </div>
+          <ul className="lab-sliders travel-readout">
+            {BODY_ROOM.map(([key, label]) => (
+              <RangeRow
+                key={key}
+                label={label}
+                value={draft[key]}
+                disabled={off}
+                title={`Body may move ${label.toLowerCase()} this far from rest.`}
+                kind="room"
+                onChange={(n) => commit({ ...draft, [key]: n })}
+              />
+            ))}
+          </ul>
+        </div>
+
+        <div className="travel-block">
+          <div className="travel-block-head">
+            <h3 className="group-subtitle" title="Look angles, eyes, and size.">
               Look
             </h3>
-            <span className="travel-kind">Rotation</span>
-          </div>
-          <div className="travel-inline-toggles">
-            <Toggle
-              label="Look up"
-              checked={draft.look_up}
-              disabled={masterOff}
-              title="Nod-up cap sent to Track Lab."
-              onChange={(look_up) => commit({ ...draft, look_up }, true)}
-            />
-            <Toggle
-              label="Look down"
-              checked={draft.look_down}
-              disabled={masterOff}
-              title="Nod-down cap sent to Track Lab."
-              onChange={(look_down) => commit({ ...draft, look_down }, true)}
-            />
           </div>
           <ul className="lab-sliders travel-readout">
             <RangeRow
               label="Look up"
               value={draft.pitch_up}
               max={PITCH_UP_MAX}
-              disabled={masterOff || !draft.look_up}
-              title="Head overlay nods up to this angle."
+              disabled={off}
               kind="deg"
+              title="How far the head may tip up toward the ceiling. Applies while tracking is on."
               onChange={(pitch_up) => commit({ ...draft, pitch_up })}
             />
             <RangeRow
               label="Look down"
               value={draft.pitch_down}
               max={PITCH_DOWN_MAX}
-              disabled={masterOff || !draft.look_down}
-              title="Head overlay nods down to this angle."
+              disabled={off}
               kind="deg"
               onChange={(pitch_down) => commit({ ...draft, pitch_down })}
             />
-          </ul>
-        </div>
-
-        <div className="travel-block">
-          <div className="travel-block-head">
-            <h3 className="group-subtitle">Eyes</h3>
-            <span className="travel-kind">Form</span>
-            <Toggle
-              label="On"
-              checked={draft.eyes}
-              disabled={masterOff}
-              title="Stop how far the pupils can travel inside each eye."
-              onChange={(eyes) => commit({ ...draft, eyes }, true)}
-            />
-          </div>
-          <ul className="lab-sliders travel-readout">
             <RangeRow
-              label="Side"
-              value={draft.eye_x}
-              disabled={masterOff || !draft.eyes}
-              title="Pupils slide to this side limit."
+              label="Eyes"
+              value={draft.eye}
+              disabled={off}
+              title="How far the pupils may travel inside each eye."
               kind="eye"
-              onChange={(eye_x) => commit({ ...draft, eye_x })}
+              onChange={(eye) => commit({ ...draft, eye })}
             />
             <RangeRow
-              label="Up / down"
-              value={draft.eye_y}
-              disabled={masterOff || !draft.eyes}
-              title="Pupils slide to this up / down limit."
-              kind="eye"
-              onChange={(eye_y) => commit({ ...draft, eye_y })}
-            />
-          </ul>
-        </div>
-
-        <div className="travel-block">
-          <div className="travel-block-head">
-            <h3 className="group-subtitle">Skeleton</h3>
-            <span className="travel-kind">Form</span>
-            <Toggle
-              label="On"
-              checked={draft.body}
-              disabled={masterOff}
-              title="Stop how far the shoulders, arms, and chest can slide."
-              onChange={(body) => commit({ ...draft, body }, true)}
-            />
-          </div>
-          <ul className="lab-sliders travel-readout">
-            <RangeRow
-              label="Left"
-              value={draft.body_left}
-              disabled={masterOff || !draft.body}
-              title="Slide the skeleton overlay left to this max."
-              kind="room"
-              onChange={(body_left) => commit({ ...draft, body_left })}
-            />
-            <RangeRow
-              label="Right"
-              value={draft.body_right}
-              disabled={masterOff || !draft.body}
-              title="Slide the skeleton overlay right to this max."
-              kind="room"
-              onChange={(body_right) => commit({ ...draft, body_right })}
-            />
-            <RangeRow
-              label="Up"
-              value={draft.body_up}
-              disabled={masterOff || !draft.body}
-              title="Slide the skeleton overlay up to this max."
-              kind="room"
-              onChange={(body_up) => commit({ ...draft, body_up })}
-            />
-            <RangeRow
-              label="Down"
-              value={draft.body_down}
-              disabled={masterOff || !draft.body}
-              title="Slide the skeleton overlay down to this max."
-              kind="room"
-              onChange={(body_down) => commit({ ...draft, body_down })}
-            />
-          </ul>
-          <div className="travel-block-head">
-            <h3 className="group-subtitle">Skel rotate</h3>
-            <span className="travel-kind">Rotation</span>
-            <Toggle
-              label="On"
-              checked={draft.body_rotate}
-              disabled={masterOff}
-              title="Stop how far the torso can turn and the shoulders can tilt."
-              onChange={(body_rotate) => commit({ ...draft, body_rotate }, true)}
-            />
-          </div>
-          <ul className="lab-sliders travel-readout">
-            <RangeRow
-              label="Turn"
-              value={draft.body_yaw}
-              max={BODY_YAW_MAX}
-              disabled={masterOff || !draft.body_rotate}
-              title="Skeleton overlay turns to this angle."
-              kind="deg"
-              onChange={(body_yaw) => commit({ ...draft, body_yaw })}
-            />
-            <RangeRow
-              label="Tilt"
-              value={draft.body_roll}
-              max={BODY_ROLL_MAX}
-              disabled={masterOff || !draft.body_rotate}
-              title="Skeleton overlay tilts to this angle."
-              kind="deg"
-              onChange={(body_roll) => commit({ ...draft, body_roll })}
+              label="Size"
+              value={draft.size}
+              disabled={off}
+              title="How much stepping toward or away from the camera may grow or shrink the character."
+              kind="size"
+              onChange={(size) => commit({ ...draft, size })}
             />
           </ul>
         </div>
@@ -427,44 +292,87 @@ function RangeRow(props: {
   value: number
   disabled: boolean
   title?: string
-  kind?: 'room' | 'eye' | 'deg'
-  min?: number
+  kind: 'room' | 'eye' | 'deg' | 'size'
   max?: number
-  step?: number
-  text?: string
   onChange: (value: number) => void
 }) {
   const kind = props.kind
-  const max = props.max ?? (kind === 'eye' ? 1 : kind === 'deg' ? 0 : ROOM_MAX)
-  const min = props.min ?? 0
-  const step = props.step ?? (kind === 'deg' || props.text?.endsWith('px') ? 1 : 0.01)
-  const clamp = (n: number) => {
-    if (kind === 'eye') return clampEye(n)
-    if (kind === 'deg') return clampDeg(n, max)
-    if (props.text?.endsWith('px')) return clampPad(n)
-    if (kind === 'room') return clampRoom(n)
-    return n
-  }
-  const text =
-    props.text ??
-    (kind === 'eye'
-      ? `${Math.round(props.value * 100)}%`
-      : kind === 'deg'
-        ? `${Math.round(props.value)}°`
-        : props.value.toFixed(2))
+  const max = props.max ?? (kind === 'eye' ? 1 : kind === 'size' ? SIZE_MAX : ROOM_MAX)
+  const step = kind === 'deg' ? 1 : 0.01
+  const clamp = (n: number) =>
+    kind === 'eye' ? clampEye(n) : kind === 'size' ? clampSize(n) : kind === 'deg' ? clampDeg(n, max) : clampRoom(n)
   return (
     <li title={props.title}>
       <span>{props.label}</span>
       <input
         type="range"
-        min={min}
+        min={0}
         max={max}
         step={step}
         value={props.value}
         disabled={props.disabled}
         onChange={(e) => props.onChange(clamp(Number(e.target.value)))}
       />
-      <em className="mono">{text}</em>
+      <ValueBox
+        label={props.label}
+        value={props.value}
+        disabled={props.disabled}
+        kind={kind}
+        clamp={clamp}
+        onChange={props.onChange}
+      />
     </li>
+  )
+}
+
+// Typed values use the units the readout shows: degrees, percent, or face heights.
+function ValueBox(props: {
+  label: string
+  value: number
+  disabled: boolean
+  kind: 'room' | 'eye' | 'deg' | 'size'
+  clamp: (n: number) => number
+  onChange: (value: number) => void
+}) {
+  const kind = props.kind
+  const scale = kind === 'eye' || kind === 'size' ? 100 : 1
+  const shown = (props.value * scale).toFixed(kind === 'room' ? 2 : 0)
+  const [typed, setTyped] = useState<string | null>(null)
+  const cancel = useRef(false)
+
+  function apply() {
+    const raw = typed
+    setTyped(null)
+    if (cancel.current || raw == null) {
+      cancel.current = false
+      return
+    }
+    const n = Number(raw.replace(/[^0-9.-]/g, ''))
+    if (raw.trim() === '' || !Number.isFinite(n)) return
+    props.onChange(props.clamp(n / scale))
+  }
+
+  return (
+    <em className="travel-num">
+      {kind === 'size' ? <i>±</i> : null}
+      <input
+        type="text"
+        inputMode="decimal"
+        aria-label={`${props.label} value`}
+        value={typed ?? shown}
+        disabled={props.disabled}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => setTyped(e.target.value)}
+        onBlur={apply}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') {
+            cancel.current = true
+            e.currentTarget.blur()
+          }
+        }}
+      />
+      {kind === 'eye' || kind === 'size' ? <i>%</i> : kind === 'deg' ? <i>°</i> : null}
+    </em>
   )
 }

@@ -10,7 +10,7 @@ from backend import face as face_mod
 
 def test_start_live_tracks_when_rest_is_missing(monkeypatch) -> None:
     monkeypatch.setattr(face_mod, "list_cameras", lambda: [])
-    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved: 0)
+    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved, **_kwargs: 0)
     monkeypatch.setattr(face_mod.book, "template", lambda rest: rest)
     monkeypatch.setattr(FaceBench, "_load_parts", lambda self: None)
     monkeypatch.setattr(FaceBench, "_load_ifm", lambda self: None)
@@ -60,7 +60,7 @@ def _bench_for_track(monkeypatch, tmp_path, rest: np.ndarray):
     monkeypatch.setattr(face_mod, "PARTS_PATH", tmp_path / "overlay_parts.json")
     monkeypatch.setattr(face_mod, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(face_mod, "list_cameras", lambda: [])
-    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved: 0)
+    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved, **_kwargs: 0)
     book = MouthBook()
     monkeypatch.setattr(face_mod, "book", book)
     monkeypatch.setattr(FaceBench, "_load_parts", lambda self: None)
@@ -146,7 +146,7 @@ def test_track_keeps_visemes_when_rest_stays_put(tmp_path, monkeypatch) -> None:
 
 def _mirror_bench(monkeypatch) -> FaceBench:
     monkeypatch.setattr(face_mod, "list_cameras", lambda: [])
-    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved: 0)
+    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved, **_kwargs: 0)
     monkeypatch.setattr(face_mod.book, "template", lambda rest: rest)
     monkeypatch.setattr(FaceBench, "_load_parts", lambda self: None)
     monkeypatch.setattr(FaceBench, "_load_ifm", lambda self: None)
@@ -210,7 +210,7 @@ def test_mirror_persists_in_ifm_json(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(face_mod, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(face_mod, "IFM_PATH", tmp_path / "ifm.json")
     monkeypatch.setattr(face_mod, "list_cameras", lambda: [])
-    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved: 0)
+    monkeypatch.setattr(face_mod, "pick_default", lambda cameras, saved, **_kwargs: 0)
     monkeypatch.setattr(FaceBench, "_load_parts", lambda self: None)
     first = FaceBench()
     first.set_mirror(True)

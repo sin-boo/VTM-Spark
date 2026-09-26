@@ -13,6 +13,23 @@ def test_start_scripts_are_ascii() -> None:
         (ROOT / name).read_bytes().decode("ascii")
 
 
+def test_start_ps1_uses_shared_osf_models() -> None:
+    text = (ROOT / "start.ps1").read_text(encoding="ascii")
+    assert r"vendor\tools\openseeface\models\lm_model3_opt.onnx" in text
+    assert r'Join-Path $Root "models\lm_model3_opt.onnx"' not in text
+
+
+def test_lab_weights_point_at_desk_trees() -> None:
+    from backend.anime import ANIME_DIR
+    from backend.osf_cam import MODELS_DIR
+    from backend.paths import OSF_MODELS, TRACKERS
+
+    assert MODELS_DIR == OSF_MODELS
+    assert "openseeface" in MODELS_DIR.as_posix()
+    assert ANIME_DIR == TRACKERS
+    assert ANIME_DIR.as_posix().endswith("models/trackers")
+
+
 def test_start_ps1_parses_in_windows_powershell() -> None:
     script = ROOT / "start.ps1"
     cmd = (

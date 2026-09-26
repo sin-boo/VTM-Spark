@@ -9,6 +9,7 @@ from backend.frame_interp import (
     inbetween_slot_s,
     inbetween_ts,
     lerp_stream_pose,
+    playout_gap,
     print_inbetween_count,
 )
 
@@ -72,3 +73,16 @@ def test_inbetween_frames_count() -> None:
     first = int(np.asarray(frames[0][1]).mean())
     second = int(np.asarray(frames[1][1]).mean())
     assert first < second
+
+
+def test_playout_holds_then_caps_at_20() -> None:
+    wait, nxt = playout_gap(10.0, 0.0)
+    assert wait == 0.25
+    assert abs(nxt - 10.30) < 1e-9
+    # Ready just after the first picture: wait out the rest of the 50 ms slot.
+    wait, nxt = playout_gap(10.26, nxt)
+    assert abs(wait - 0.04) < 1e-9
+    # Late frame shows now. The one after it is a full slot later, not a burst.
+    wait, nxt = playout_gap(11.0, 10.5)
+    assert wait == 0.0
+    assert nxt == 11.05

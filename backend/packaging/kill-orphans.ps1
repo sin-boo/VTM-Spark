@@ -25,7 +25,7 @@ if (-not $Fast) {
       (
         $_.CommandLine -match '(?i)-m\s+backend(\s|$)' -and
         (
-          $_.CommandLine -match '(?i)[\\/](vtm-noble|real_stream|VTMNoble|RealStream)[\\/]' -or
+          $_.CommandLine -match '(?i)[\\/](vtm[ -]?noble|real_stream|VTMNoble|RealStream)[\\/]' -or
           $_.CommandLine -match '(?i)[\\/]dist[\\/](VTMNoble|RealStream)[\\/]' -or
           $_.CommandLine -match '(?i)VTM_NOBLE|REAL_STREAM'
         )

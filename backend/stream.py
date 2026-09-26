@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import base64
 import io
 import queue
@@ -55,7 +56,9 @@ from .engine import (
     interpolate_on,
 )
 from .frame_interp import (
+    PLAYOUT_QUEUE_MAX,
     inbetween_frames,
+    playout_gap,
     print_inbetween_count,
     lerp_stream_hair,
     lerp_stream_pose,
@@ -75,7 +78,16 @@ from .hair_follow import (
     rest_hair,
 )
 from .tracking.hair import create_hair_tracker, resolve_hair_weights
-from .paths import data_dir, display_path, package_root, resolve_user_path
+from .paths import characters_dir, data_dir, display_path, package_root, resolve_user_path
+
+
+def _remembered_camera() -> tuple[int | None, str]:
+    try:
+        from track_lab.backend.cameras import load_camera_choice
+
+        return load_camera_choice()
+    except Exception:
+        return None, ""
 from .pose_controller import (
     NUM_KEYPOINTS,
     draw_hair_overlay,
@@ -87,13 +99,11 @@ from .pose_controller import (
 from .travel_box import (
     default_travel_box,
     apply_travel_box,
-    apply_walk_box,
     changed_preview_axis,
-    lab_feel_caps,
     motion_caps,
+    draw_travel_box,
     normalize_travel_box,
     preview_travel_pose,
-    silhouette_rect_norm,
 )
 from utils.hair import empty_hair_maps, rasterize_hair_maps
 
@@ -315,15 +325,16 @@ class StreamRuntime:
             "paused": False,
             "track_fps": 2.0,
             "drive_pose": True,
-            "show_mesh": True,
-            "show_hair": True,
-            "show_outline": True,
-            "show_brows": True,
-            "show_eyes": True,
-            "show_nose": True,
-            "show_mouth": True,
-            "show_iris_overlay": True,
-            "show_skeleton": True,
+            "show_mesh": False,
+            "show_hair": False,
+            "show_outline": False,
+            "show_brows": False,
+            "show_eyes": False,
+            "show_nose": False,
+            "show_mouth": False,
+            "show_iris_overlay": False,
+            "show_skeleton": False,
+            "show_limiters": False,
             "mirror": False,
             "use_iris": True,
             "use_body": True,
@@ -350,6 +361,8 @@ class StreamRuntime:
             "virtual_cam": False,
             "virtual_cam_device": "",
             "virtual_cam_error": "",
+            "virtual_cam_width": 0,
+            "virtual_cam_height": 0,
             "travel_box": default_travel_box(),
             "pose_frozen": False,
             "pose_key_count": 0,
@@ -365,15 +378,14 @@ class StreamRuntime:
         self._last_image: Image.Image | None = None
         self._inbetween_prev: Image.Image | None = None
         self._inbetween_prev_kps: np.ndarray | None = None
-        self._travel_ref_rgb: np.ndarray | None = None
-        self._travel_silhouette: tuple[float, float, float, float] | None = None
-        self._travel_silhouette_tight: tuple[float, float, float, float] | None = None
         self._restore_last_reference()
         from .ui_session import save_ui_session
 
         save_ui_session(checkpoint=display_path(default_ckpt))
         self._last_overlay_kps: np.ndarray | None = None
         self._travel_preview_kps: np.ndarray | None = None
+        # After a desk edit, live frames must not put the old box back on the slider.
+        self._travel_from_desk = False
         self._driven_keypoints: np.ndarray | None = None
         self._last_good_keypoints: np.ndarray | None = None
         self._mesh_edited = False
@@ -394,6 +406,9 @@ class StreamRuntime:
         self._lab_drive = False
         self._lab_seen_online = False
         self._lab_image_wh: tuple[int, int] | None = None
+        # None = this still is not in Track Lab yet; ignore leftover overlay/hair.
+        self._lab_overlay_gen: int | None = 0
+        self._lab_seen_generation: int = 0
         # Live retarget state (webcam → character). Missing this made the mesh
         # draw raw webcam-scale keypoints and look tiny / "broken".
         self._live_origin_keypoints: np.ndarray | None = None
@@ -424,6 +439,7 @@ class StreamRuntime:
         self._gen_queue: queue.Queue = queue.Queue(maxsize=1)
         self._display_queue: queue.Queue = queue.Queue()
         self._display_busy = False
+        self._playout_next = 0.0
         self._last_interp_s = 0.0
         self._last_display_t = 0.0
         self._last_key_t = 0.0
@@ -466,6 +482,9 @@ class StreamRuntime:
             )
         except (TypeError, ValueError):
             frame_blend = STREAM_TEMPORAL_EMA
+        saved_index, _saved_name = _remembered_camera()
+        if saved_index is not None:
+            self._status["camera_index"] = int(saved_index)
         self._status["steps"] = steps
         self._status["pose_cfg"] = pose_cfg
         self._status["id_cfg"] = id_cfg
@@ -493,6 +512,7 @@ class StreamRuntime:
         if not raw:
             return
         try:
+            characters_dir()
             ref = resolve_user_path(raw)
         except Exception:
             return
@@ -753,6 +773,7 @@ class StreamRuntime:
             from .lab_harness import lab as lab_harness
 
             self._lab_seen_online = True
+            self.adopt_lab_travel_box(packet)
             if packet.get("live") and packet.get("loaded", True):
                 try:
                     lab_harness.command("stop")
@@ -780,6 +801,22 @@ class StreamRuntime:
             self._sync_lab_character()
         except Exception:
             return
+        self._restore_character_fit()
+
+    def _restore_character_fit(self) -> None:
+        """A lab re-track re-detects hair and skeleton. Put the painted ones back."""
+        try:
+            changed = self._apply_character_fit()
+        except Exception as exc:
+            print(f"Character fit restore failed: {exc}")
+            return
+        if changed and self._last_image is not None:
+            self._emit(
+                {
+                    "type": "frame",
+                    **self._frame_payload(self._last_image, self._last_overlay_kps),
+                }
+            )
 
     def _sync_lab_character(self, *, replace: bool = False) -> None:
         """Load the current character still into Track Lab and fit the rest mesh.
@@ -793,23 +830,45 @@ class StreamRuntime:
         if not probe.get("online"):
             return
         self._lab_seen_online = True
+        self._note_lab_generation(probe)
         same = self._same_lab_still()
         keep = lab_keeps_authored(probe) and not replace and same
         if keep:
-            self._adopt_lab_hair()
-            self.adopt_lab_overlay(probe, emit=True)
+            self._accept_lab_overlay(probe)
+            packet = self._lab_packet_from_ack({"status": probe})
+            self._adopt_lab_hair(packet)
+            self.adopt_lab_overlay(packet, emit=True)
             return
         path = self._write_lab_source()
         if path is None:
             return
+        prev_gen = int(getattr(self, "_lab_seen_generation", 0) or 0)
         src_ack = lab_harness.put_source(str(path))
         nested = src_ack.get("status") if isinstance(src_ack.get("status"), dict) else {}
         err = str(src_ack.get("error") or nested.get("error") or "")
         if src_ack.get("ok") is False:
             raise RuntimeError(err or "Track Lab could not load the character")
-        self._lab_ack("track")
-        self._adopt_lab_hair()
-        self.adopt_lab_overlay(emit=True)
+        src_packet = self._lab_packet_from_ack(src_ack)
+        src_gen = self._lab_generation(src_packet)
+        if prev_gen and src_gen and src_gen <= prev_gen:
+            raise RuntimeError("Track Lab did not load the new character still")
+        self._accept_lab_overlay(src_packet or src_ack)
+        track_ack = self._lab_ack("track")
+        packet = self._lab_packet_from_ack(track_ack)
+        self._accept_lab_overlay(packet or track_ack)
+        got_hair = self._adopt_lab_hair(packet)
+        self.adopt_lab_overlay(packet, emit=True)
+        overlay = self._last_overlay_kps
+        if overlay is not None:
+            try:
+                self.engine.adopt_ref_keypoints(
+                    overlay, persist=False, pose_source="lab"
+                )
+            except Exception:
+                pass
+        if not got_hair:
+            self._hair_capture_done = False
+            self._maybe_capture_hair(rest_keypoints=self._last_overlay_kps)
 
     def _compile_status_fields(self) -> dict[str, Any]:
         """Derive UI compile light from the engine (always fresh)."""
@@ -948,12 +1007,12 @@ class StreamRuntime:
         self._last_lab_hair = None
         self._lab_rest_hair = None
         self._lab_image_wh = None
+        self._lab_overlay_gen = None
         self._inbetween_prev = None
         self._inbetween_prev_kps = None
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
-        self._set_travel_reference(None)
         if emit_blank:
             blank = Image.new("RGB", (16, 16), (8, 8, 8))
             self._emit({"type": "frame", **self._frame_payload(blank, None)})
@@ -998,7 +1057,6 @@ class StreamRuntime:
         except Exception:
             pass
         self._last_image = preview
-        self._set_travel_reference(preview)
         self._emit({"type": "frame", **self._frame_payload(preview, None)})
 
     def _warm_overlay_tools(self, kind: str) -> None:
@@ -1167,6 +1225,31 @@ class StreamRuntime:
             for label, path in list_stream_checkpoints()
         ]
 
+    def _reload_character_after_model(self) -> None:
+        """Put the open pack's latents back on the new DiT. Do not reopen the zip as a picture or resync Track Lab."""
+        ref = self._ref_path
+        if ref is None or ref.suffix.lower() != ".vtm" or not ref.is_file():
+            return
+        from .character_pack import read_character_pack
+
+        pack = read_character_pack(ref)
+        engine_size = int(getattr(self.engine, "image_size", 0) or 0)
+        if pack.image_size and pack.image_size == engine_size:
+            self.engine.load_encoded_reference(
+                keypoints=pack.keypoints,
+                ref_latent=pack.ref_latent,
+                ref_face_latent=pack.ref_face_latent,
+                skip_crop=pack.skip_crop,
+                path=ref,
+            )
+            return
+        from .paths import refs_dir
+
+        tmp = refs_dir() / "_character_fallback.png"
+        Image.fromarray(pack.preview_rgb).save(tmp)
+        self.engine.set_reference(tmp, pack.keypoints, skip_crop=pack.skip_crop)
+        self.engine._ref_path = ref
+
     def set_checkpoint(self, path: str | Path) -> None:
         ckpt = resolve_user_path(path).resolve()
         if not ckpt.is_file():
@@ -1189,6 +1272,7 @@ class StreamRuntime:
                     kind="model",
                     target_bytes=_estimate_model_load_bytes(ckpt),
                 )
+                self._reload_character_after_model()
                 self._fast_warmed = False
                 self._batch2_auto_tried = False
                 try:
@@ -1229,6 +1313,11 @@ class StreamRuntime:
         ref = resolve_user_path(path)
         if not ref.is_file():
             raise FileNotFoundError(f"Reference not found: {ref}")
+        if ref.suffix.lower() == ".vtm":
+            # A character pack is a zip. Load its preview and latents.
+            loaded = self.load_character(ref.stem, require_compatible=False)
+            frame = loaded.get("frame") if isinstance(loaded, dict) else None
+            return frame if isinstance(frame, dict) else {}
         if self._streaming:
             raise RuntimeError("Stop the stream before applying a new reference")
         self._set_status(
@@ -1317,7 +1406,6 @@ class StreamRuntime:
             except Exception:
                 preview = Image.open(ref).convert("RGB")
                 self._last_image = preview
-            self._set_travel_reference(self._last_image)
             overlay_lo = 0.72 if silent else 0.90
             overlay_hi = 0.86 if silent else 0.96
             try:
@@ -1417,7 +1505,6 @@ class StreamRuntime:
         still = ensure_character_still(path)
         preview = Image.open(still).convert("RGB")
         self._last_image = preview
-        self._set_travel_reference(preview)
         frame = self._frame_payload(preview, None)
         self._emit({"type": "frame", **frame})
         self._status["character_id"] = path.stem
@@ -1471,10 +1558,9 @@ class StreamRuntime:
         self._last_lab_hair = None
         self._lab_rest_hair = None
         self._lab_image_wh = None
+        self._lab_overlay_gen = None
         self._reset_live_origin(reason="load_character")
         self._last_image = preview
-        self._set_travel_reference(preview)
-        self._maybe_capture_hair(rest_keypoints=self._last_overlay_kps)
         frame = self._frame_payload(preview, self._last_overlay_kps)
         self._emit({"type": "frame", **frame})
         return frame
@@ -1513,7 +1599,8 @@ class StreamRuntime:
                     skip_crop=bool(exported["skip_crop"]),
                     source_name=src.name,
                 )
-                self._snapshot_character_shapes(dest.stem)
+                if getattr(self, "_lab_overlay_gen", None) is not None:
+                    self._snapshot_character_shapes(dest.stem)
             self.engine._ref_path = dest
             self._mark_current_character(dest, label)
             self._clear_progress(
@@ -1558,22 +1645,17 @@ class StreamRuntime:
         replace_lab: bool = False,
         repair: bool = False,
         require_compatible: bool = True,
+        quiet: bool = False,
     ) -> dict[str, Any]:
         from .character_pack import read_character_pack, resolve_character_id
 
-        if self._streaming:
+        if self._streaming and not quiet:
             raise RuntimeError("Stop the stream before loading a character")
         path = resolve_character_id(ident)
-        blocked = self._character_shape_gate(
-            path.stem,
-            repair=repair,
-            require_compatible=require_compatible,
-        )
-        if blocked is not None:
-            return blocked
         pack = read_character_pack(path)
-        self._set_status(busy=True, message=f"Loading {pack.name}…", error="")
-        self._set_progress(0.28, label=f"Loading {pack.name}", kind="character")
+        if not quiet:
+            self._set_status(busy=True, message=f"Loading {pack.name}…", error="")
+            self._set_progress(0.28, label=f"Loading {pack.name}", kind="character")
         try:
             if not getattr(self.engine, "_ready", False):
                 self.ensure_model(keep_busy=True)
@@ -1614,8 +1696,36 @@ class StreamRuntime:
                 self._sync_lab_character(replace=replace_lab)
             except Exception:
                 pass
+            if not self._last_lab_hair:
+                self._hair_capture_done = False
+                self._maybe_capture_hair(rest_keypoints=self._last_overlay_kps)
+                frame = self._frame_payload(self._last_image, self._last_overlay_kps)
+                self._emit({"type": "frame", **frame})
+            if self._apply_character_fit():
+                frame = self._frame_payload(self._last_image, self._last_overlay_kps)
+                self._emit({"type": "frame", **frame})
+            # Repair after Track Lab holds this still. Before that, the plan is
+            # still rebased onto the previous character's face.
+            # A mismatch does not keep the previous character on the desk.
+            self._character_shape_gate(
+                path.stem,
+                repair=repair,
+                require_compatible=False,
+            )
             self._set_status(busy=False)
-            return {"character": self._character_card_safe(path), "frame": frame, "status": self.status()}
+            result: dict[str, Any] = {
+                "character": self._character_card_safe(path),
+                "frame": frame,
+                "status": self.status(),
+            }
+            if require_compatible:
+                from .blendshapes import INCOMPATIBLE_MESSAGE, compatibility
+
+                info = compatibility(path.stem)
+                if not info["compatible"]:
+                    result["incompatible"] = True
+                    result["message"] = INCOMPATIBLE_MESSAGE
+            return result
         except Exception as exc:
             self._clear_progress(busy=False, error=str(exc), message="Character load failed")
             raise
@@ -1946,6 +2056,7 @@ class StreamRuntime:
             "show_mouth",
             "show_iris_overlay",
             "show_skeleton",
+            "show_limiters",
             "mirror",
             "use_iris",
             "use_body",
@@ -1996,8 +2107,11 @@ class StreamRuntime:
                 if isinstance(updates["travel_box"], dict)
                 else updates["travel_box"]
             )
+        if "show_limiters" in updates:
+            updates["show_limiters"] = bool(updates["show_limiters"])
         overlay_touched = any(
-            k in updates for k in ("show_mesh", "show_hair", "travel_box", *OVERLAY_PART_KEYS)
+            k in updates
+            for k in ("show_mesh", "show_hair", "show_limiters", "travel_box", *OVERLAY_PART_KEYS)
         )
         with self._lock:
             self._status.update(updates)
@@ -2015,6 +2129,11 @@ class StreamRuntime:
                     )
                 self._status["show_mesh"] = any_mesh
             snap = dict(self._status)
+        if "camera_index" in updates:
+            try:
+                self._remember_camera(int(updates["camera_index"]))
+            except (TypeError, ValueError):
+                pass
         if "steps" in updates:
             try:
                 self.engine.num_steps = int(updates["steps"])
@@ -2065,9 +2184,12 @@ class StreamRuntime:
             from .ui_session import save_ui_session
 
             save_ui_session(travel_box=updates["travel_box"])
-            self._refresh_travel_silhouette()
-            self._push_lab_limiters()
+            # Clear the stopped-tracking preview first so a live emit shows the
+            # camera pose at the new cap, not the slider's extreme.
             self._refresh_travel_preview(old_travel, updates["travel_box"])
+            # Explicit UI / session edit — push full box; do not push feel caps.
+            # Applies while tracking is on.
+            self._push_lab_limiters(user_edit=True)
         if "use_iris" in updates:
             self.tracker.use_iris = bool(updates["use_iris"])
         if "use_body" in updates:
@@ -2164,12 +2286,34 @@ class StreamRuntime:
         return [{"index": i, "name": name} for i, name in cams]
 
     def preferred_camera(self) -> int:
+        """Last camera the user chose, if it is still connected."""
         try:
             cams = self.list_cameras()
+            saved_index, saved_name = _remembered_camera()
+            if saved_name or saved_index is not None:
+                from track_lab.backend.cameras import pick_default
+
+                return int(pick_default(cams, saved_index, saved_name=saved_name))
             pairs = [(int(c["index"]), str(c.get("name") or "")) for c in cams]
             return int(pick_default_camera_index(pairs))
         except Exception:
-            return 0
+            try:
+                return int(self._status.get("camera_index") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+    def _remember_camera(self, index: int) -> None:
+        from track_lab.backend.cameras import save_camera_index
+
+        name = ""
+        try:
+            for cam in self.list_cameras():
+                if int(cam.get("index", -1)) == int(index):
+                    name = str(cam.get("name") or "")
+                    break
+        except Exception:
+            name = ""
+        save_camera_index(int(index), name)
 
     def _reset_live_origin(self, *, reason: str = "") -> None:
         self._live_origin_keypoints = None
@@ -2226,8 +2370,7 @@ class StreamRuntime:
             return
         if self._last_image is None and self._character_path() is None:
             return
-        st = self.status()
-        cam = int(st.get("camera_index") or 0)
+        cam = int(self.preferred_camera())
         self._reset_live_origin(reason="start_tracking")
         self._capture_session_seen = 0
         self._set_track_status(
@@ -2322,17 +2465,23 @@ class StreamRuntime:
         source = "ifm" if str(probe.get("source") or "") == "ifm" else "camera"
         self._set_track_status(busy=True, message="Fitting rest mesh…", track_message="Fitting rest…")
         self._sync_lab_character()
+        self._restore_character_fit()
+        # Lab wins on connect — take its travel box before start, never push desk.
+        self.adopt_lab_travel_box(probe)
         body: dict[str, Any] = {"source": source}
         if source == "camera":
             body["camera"] = cam
             body["mirror"] = bool(self._status.get("mirror"))
         self._set_track_status(busy=True, message="Starting Track Lab…", track_message="Starting…")
-        self._lab_ack("start", body)
+        ack = self._lab_ack("start", body)
         self._tracking = True
         self._lab_drive = True
         self._travel_preview_kps = None
         self._adopt_lab_hair()
-        self._push_lab_limiters()
+        # Lab wins on connect / start — adopt its box; do not overwrite the lab.
+        packet = self._lab_packet_from_ack(ack) or {}
+        nested = ack.get("status") if isinstance(ack.get("status"), dict) else {}
+        self.adopt_lab_travel_box(nested or packet)
         self._set_track_status(
             busy=False,
             track_busy=False,
@@ -2381,14 +2530,79 @@ class StreamRuntime:
             return ref
         return None
 
-    def _push_lab_limiters(self) -> None:
-        """Send rotation / look caps to Track Lab FaceRig (no-op if the lab is down)."""
+    def _push_lab_limiters(self, *, user_edit: bool = False) -> None:
+        """Send the full travel box to Track Lab. Only for explicit desk edits."""
+        if not user_edit:
+            return
         from .lab_harness import lab as lab_harness
 
+        box = normalize_travel_box(self._status.get("travel_box"))
         try:
-            lab_harness.command("set_feel", lab_feel_caps(self._status.get("travel_box")))
+            ack = lab_harness.command("set_travel", dict(box))
         except Exception as exc:
-            print(f"[lab-harness] limiter feel failed: {exc}", flush=True)
+            print(f"[lab-harness] set_travel failed: {exc}", flush=True)
+            return
+        if not isinstance(ack, dict):
+            return
+        if ack.get("ok") is False or not ack.get("online", True):
+            err = str(ack.get("error") or "Track Lab is not running")
+            print(f"[lab-harness] set_travel failed: {err}", flush=True)
+            return
+        # Desk owns the sliders from here. A camera frame packed before this
+        # edit must not snap Look up back.
+        self._travel_from_desk = True
+        # Lab may re-normalize; adopt ack box without echoing another set_travel.
+        nested = ack.get("status") if isinstance(ack.get("status"), dict) else {}
+        raw = nested.get("travel_box") if isinstance(nested, dict) else None
+        if not isinstance(raw, dict):
+            raw = ack.get("travel_box")
+        if isinstance(raw, dict):
+            self.adopt_lab_travel_box({"travel_box": raw}, user_edit=True)
+        self._emit_live_limiter_pose(ack)
+
+    def _emit_live_limiter_pose(self, ack: dict[str, Any] | None) -> None:
+        """Show the re-capped pose now. Tracking stays on."""
+        if not getattr(self, "_tracking", False):
+            return
+        if getattr(self, "_pose_frozen", False) or getattr(self, "_mesh_edited", False):
+            return
+        frame = ack.get("frame") if isinstance(ack, dict) and isinstance(ack.get("frame"), dict) else None
+        driven = None
+        if isinstance(frame, dict) and ("keypoints" in frame or "generation" in frame):
+            try:
+                driven = self._lab_overlay_keypoints(frame)
+            except Exception:
+                driven = None
+        if driven is None:
+            try:
+                driven = self._lab_overlay_keypoints()
+            except Exception:
+                return
+        image = self._last_image
+        if driven is not None and image is not None:
+            self._emit({"type": "frame", **self._frame_payload(image, driven)})
+
+    def adopt_lab_travel_box(self, packet: dict[str, Any] | None, *, user_edit: bool = False) -> bool:
+        """Copy Track Lab's travel_box into desk status. Never echoes set_travel."""
+        if not isinstance(packet, dict):
+            return False
+        if getattr(self, "_travel_from_desk", False) and not user_edit:
+            return False
+        raw = packet.get("travel_box")
+        if not isinstance(raw, dict):
+            return False
+        incoming = normalize_travel_box(raw)
+        current = normalize_travel_box(self._status.get("travel_box"))
+        if incoming == current:
+            return False
+        from .ui_session import save_ui_session
+
+        with self._lock:
+            self._status["travel_box"] = incoming
+            snap = dict(self._status)
+        save_ui_session(travel_box=incoming)
+        self._emit({"type": "status", "status": snap})
+        return True
 
     def _lab_ack(self, op: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         from .lab_harness import lab as lab_harness
@@ -2400,25 +2614,12 @@ class StreamRuntime:
             raise RuntimeError(err or f"Track Lab {op} failed")
         return ack
 
-    def _set_travel_reference(self, image: Image.Image | None) -> None:
-        """Keep the original character preview so the size limiter does not drift."""
-        if image is None:
-            self._travel_ref_rgb = None
-            self._travel_silhouette = None
-            self._travel_silhouette_tight = None
-            return
-        self._travel_ref_rgb = np.asarray(image.convert("RGB"))
-        self._refresh_travel_silhouette()
-
-    def _refresh_travel_silhouette(self) -> None:
-        rgb = getattr(self, "_travel_ref_rgb", None)
-        if rgb is None:
-            self._travel_silhouette = None
-            self._travel_silhouette_tight = None
-            return
-        spec = normalize_travel_box(self._status.get("travel_box"))
-        self._travel_silhouette_tight = silhouette_rect_norm(rgb, pad_px=0)
-        self._travel_silhouette = silhouette_rect_norm(rgb, pad_px=int(spec["pad_px"]))
+    def _limiter_rest(self) -> np.ndarray | None:
+        """The character's rest pose. Limiter walls are boxed around this, never the live pose."""
+        rest = getattr(getattr(self, "engine", None), "_ref_keypoints", None)
+        if rest is None:
+            rest = getattr(self, "_last_overlay_kps", None)
+        return None if rest is None else np.asarray(rest, dtype=np.float32)
 
     def _refresh_travel_preview(self, old_box: Any, new_box: Any) -> None:
         """Walk the overlay to the slider that just moved so the max is visible."""
@@ -2426,10 +2627,7 @@ class StreamRuntime:
             self._travel_preview_kps = None
             return
         axis = changed_preview_axis(old_box, new_box)
-        rest = getattr(self, "_last_overlay_kps", None)
-        if rest is None:
-            engine = getattr(self, "engine", None)
-            rest = getattr(engine, "_ref_keypoints", None) if engine is not None else None
+        rest = self._limiter_rest()
         if axis is None or rest is None:
             self._travel_preview_kps = None
             return
@@ -2440,30 +2638,11 @@ class StreamRuntime:
         driven: np.ndarray,
         hair: list | None = None,
     ) -> tuple[np.ndarray, list | None]:
-        rest = getattr(self.engine, "_ref_keypoints", None)
-        box = self._status.get("travel_box")
         out, hair_out, _scale = apply_travel_box(
             driven,
-            rest,
-            box,
+            getattr(self.engine, "_ref_keypoints", None),
+            self._status.get("travel_box"),
             hair=hair,
-            silhouette=getattr(self, "_travel_silhouette", None),
-        )
-        return out, hair_out
-
-    def _clamp_lab_walk(
-        self,
-        driven: np.ndarray,
-        hair: list | None = None,
-    ) -> tuple[np.ndarray, list | None]:
-        rest = getattr(self.engine, "_ref_keypoints", None)
-        status = getattr(self, "_status", None) or {}
-        out, hair_out, _scale = apply_walk_box(
-            driven,
-            rest,
-            status.get("travel_box"),
-            hair=hair,
-            silhouette=getattr(self, "_travel_silhouette", None),
         )
         return out, hair_out
 
@@ -2472,6 +2651,43 @@ class StreamRuntime:
             self._last_image,
             package_root() / "track_lab" / "input" / "source.png",
         )
+
+    def _lab_generation(self, packet: dict[str, Any] | None) -> int:
+        from .lab_harness import lab_packet_generation
+
+        return lab_packet_generation(packet)
+
+    def _lab_packet_from_ack(self, ack: dict[str, Any] | None) -> dict[str, Any] | None:
+        from .lab_harness import lab_packet_from_ack
+
+        return lab_packet_from_ack(ack)
+
+    def _note_lab_generation(self, packet: dict[str, Any] | None) -> None:
+        gen = self._lab_generation(packet)
+        if gen:
+            seen = int(getattr(self, "_lab_seen_generation", 0) or 0)
+            self._lab_seen_generation = max(seen, gen)
+
+    def _accept_lab_overlay(self, packet: dict[str, Any] | None) -> None:
+        if not isinstance(packet, dict):
+            return
+        # None means this still is not in Track Lab yet. Generation 0 is a
+        # real still — dropping those frames left the cel on the rest pose
+        # while blink / look meters kept updating.
+        if "generation" not in packet and "keypoints" not in packet:
+            return
+        gen = self._lab_generation(packet)
+        self._lab_overlay_gen = gen
+        self._note_lab_generation(packet)
+
+    def _lab_overlay_current(self, packet: dict[str, Any] | None) -> bool:
+        want = getattr(self, "_lab_overlay_gen", 0)
+        if want is None:
+            return False
+        gen = self._lab_generation(packet)
+        if not gen:
+            return int(want) <= 0
+        return gen >= int(want)
 
     def adopt_lab_overlay(
         self,
@@ -2506,6 +2722,9 @@ class StreamRuntime:
             if not getattr(self, "_lab_drive", False):
                 self._lab_seen_online = False
             return None
+        self._note_lab_generation(frame)
+        if not self._lab_overlay_current(frame):
+            return None
         self._lab_seen_online = True
         lab_wh = frame_image_wh(frame)
         if lab_wh is not None:
@@ -2519,11 +2738,11 @@ class StreamRuntime:
                 self._last_lab_hair = hair
                 if self._lab_rest_hair is None and hair:
                     self._lab_rest_hair = [dict(seg) for seg in hair]
+            self.adopt_lab_travel_box(frame)
             return None
-        # Lab already retargeted look / expression. Rotation caps go to
-        # set_feel. Walk is not a feel slider — slide the whole mesh back
-        # when it leaves the size walls so generate stays in the trained crop.
-        driven, hair = self._clamp_lab_walk(driven, hair)
+        # Lab already limited walk / look / rotate. Do not re-clamp here —
+        # a second apply_walk_box squashes the look the lab authored.
+        self.adopt_lab_travel_box(frame)
         driven = self._apply_drag_to_overlay(driven)
         if hair is not None:
             self._last_lab_hair = hair
@@ -2932,46 +3151,56 @@ class StreamRuntime:
         )
 
     def _vcam_frame_size(self) -> tuple[int, int]:
-        """Match DiT output resolution (not the desktop)."""
-        if self._last_image is not None:
-            w, h = self._last_image.size
-            if w > 0 and h > 0:
-                return int(w), int(h)
+        """Square DiT canvas — never a widescreen still or the desktop."""
+        from .virtual_cam import vcam_even_size
+
         size = int(getattr(self.engine, "image_size", 768) or 768)
-        return size, size
+        image = self._last_image
+        if image is not None:
+            w, h = image.size
+            if w == h and w >= 64:
+                size = int(w)
+        w, h = vcam_even_size(size, size)
+        return w, h
+
+    def _vcam_source(self) -> Image.Image | None:
+        return self._last_image
 
     def start_virtual_cam(self) -> None:
-        """Open bundled VTM Noble Cam at the generated-image resolution."""
+        """Open VTM Noble Cam and keep the current still/gen picture pumping."""
         from .vcam_device import DEVICE_NAME
-        from .virtual_cam import get_virtual_cam
+        from .virtual_cam import VCAM_FPS, get_virtual_cam
 
         w, h = self._vcam_frame_size()
-        fps = float(self.status().get("gen_fps") or 0.0)
-        if fps < 1.0:
-            fps = 15.0
+        vcam = get_virtual_cam()
         try:
-            device = get_virtual_cam().start(w, h, fps=fps)
+            device = vcam.start(w, h, fps=VCAM_FPS, source=self._vcam_source)
         except Exception as exc:
             self._vcam_wanted = False
             self._set_status(
                 virtual_cam=False,
                 virtual_cam_device="",
                 virtual_cam_error=str(exc),
+                virtual_cam_width=0,
+                virtual_cam_height=0,
                 error=str(exc),
                 message="Virtual camera failed",
             )
             raise
         self._vcam_wanted = True
+        seed = self._last_image
+        if seed is None:
+            seed = Image.new("RGB", (w, h), (8, 8, 8))
+        vcam.send(seed)
         self._set_status(
             virtual_cam=True,
             virtual_cam_device=device or DEVICE_NAME,
             virtual_cam_error="",
+            virtual_cam_width=w,
+            virtual_cam_height=h,
             error="",
             message=f"Virtual camera on · {device or DEVICE_NAME} ({w}×{h})",
         )
-        # Push last frame so OBS sees something before the next generate.
-        if self._last_image is not None:
-            get_virtual_cam().send(self._last_image)
 
     def stop_virtual_cam(self) -> None:
         from .virtual_cam import get_virtual_cam
@@ -2982,6 +3211,8 @@ class StreamRuntime:
             virtual_cam=False,
             virtual_cam_device="",
             virtual_cam_error="",
+            virtual_cam_width=0,
+            virtual_cam_height=0,
             message="Virtual camera off",
         )
 
@@ -3005,6 +3236,7 @@ class StreamRuntime:
         self._last_display_t = 0.0
         self._last_key_t = 0.0
         self._last_interp_s = 0.0
+        self._playout_next = 0.0
         self._display_busy = False
         self._drain_display_queue()
         self._set_status(
@@ -3046,6 +3278,7 @@ class StreamRuntime:
         self._inbetween_prev_kps = None
         self._last_display_t = 0.0
         self._last_key_t = 0.0
+        self._playout_next = 0.0
         self._drain_display_queue()
         self._offload_pending = True
         self._set_status(
@@ -3205,7 +3438,24 @@ class StreamRuntime:
             item = dict(item)
             item["count"] = 0
             item["prev"] = None
-        # Never drop a generated key. Skip mids when behind instead.
+        # Keep the newest quarter-second. Older keys would only add lag.
+        while True:
+            try:
+                if int(self._display_queue.qsize()) < PLAYOUT_QUEUE_MAX:
+                    break
+                old = self._display_queue.get_nowait()
+            except queue.Empty:
+                break
+            if old is None:
+                try:
+                    self._display_queue.put_nowait(None)
+                except queue.Full:
+                    pass
+                break
+            try:
+                self._display_queue.task_done()
+            except Exception:
+                pass
         self._display_queue.put_nowait(item)
 
     def _display_worker_loop(self) -> None:
@@ -3258,10 +3508,23 @@ class StreamRuntime:
                     posed = keypoints
                     if prev_kps is not None and keypoints is not None:
                         posed = lerp_stream_pose(prev_kps, keypoints, amount)
+                    self._pace_display()
                     self._publish_display_frame(mid, posed, key=False)
+            self._pace_display()
             self._publish_display_frame(image, keypoints, key=True)
         finally:
             self._display_busy = False
+
+    def _pace_display(self) -> None:
+        """Show at most 20 fps, after a quarter-second hold at the start of a stream."""
+        now = time.perf_counter()
+        wait, nxt = playout_gap(now, float(getattr(self, "_playout_next", 0.0) or 0.0))
+        self._playout_next = nxt
+        if wait <= 0:
+            return
+        end = time.perf_counter() + wait
+        while self._streaming and not self._paused and time.perf_counter() < end:
+            time.sleep(min(0.02, end - time.perf_counter()))
 
     def _ema_fps(self, attr: str, key: str, now: float) -> float:
         """Wall-clock rate of pictures that actually left this path."""
@@ -3463,18 +3726,19 @@ class StreamRuntime:
 
     def _push_virtual_cam(self, image: Image.Image) -> None:
         from .vcam_device import DEVICE_NAME
-        from .virtual_cam import get_virtual_cam
+        from .virtual_cam import VCAM_FPS, get_virtual_cam
 
         vcam = get_virtual_cam()
         if not vcam.active:
             try:
-                w, h = image.size if image is not None else self._vcam_frame_size()
-                fps = float(self.status().get("gen_fps") or 15.0)
-                device = vcam.start(int(w), int(h), fps=max(1.0, fps))
+                w, h = self._vcam_frame_size()
+                device = vcam.start(w, h, fps=VCAM_FPS, source=self._vcam_source)
                 self._set_status(
                     virtual_cam=True,
                     virtual_cam_device=device or DEVICE_NAME,
                     virtual_cam_error="",
+                    virtual_cam_width=w,
+                    virtual_cam_height=h,
                 )
             except Exception as exc:
                 self._vcam_wanted = False
@@ -3482,6 +3746,8 @@ class StreamRuntime:
                     virtual_cam=False,
                     virtual_cam_device="",
                     virtual_cam_error=str(exc),
+                    virtual_cam_width=0,
+                    virtual_cam_height=0,
                     error=str(exc),
                 )
                 return
@@ -3493,6 +3759,8 @@ class StreamRuntime:
                 virtual_cam=False,
                 virtual_cam_device="",
                 virtual_cam_error=err,
+                virtual_cam_width=0,
+                virtual_cam_height=0,
                 error=err,
             )
 
@@ -3516,11 +3784,14 @@ class StreamRuntime:
         from .lab_harness import hair_from_frame, lab as lab_harness
 
         packet = frame if isinstance(frame, dict) else lab_harness.frame()
+        if not self._lab_overlay_current(packet):
+            return False
+        self._note_lab_generation(packet)
         w, h = self._lab_hair_wh(packet)
         hair = hair_from_frame(packet, width=w, height=h)
-        if hair is None:
+        if hair is None and frame is None:
             status = lab_harness.status(merge_frame=True)
-            if isinstance(status, dict):
+            if isinstance(status, dict) and self._lab_overlay_current(status):
                 w, h = self._lab_hair_wh(status)
                 try:
                     w = w or int(status.get("width") or 0)
@@ -3528,6 +3799,7 @@ class StreamRuntime:
                 except (TypeError, ValueError):
                     pass
                 hair = hair_from_frame(status, width=w, height=h)
+                self._note_lab_generation(status)
         if not hair:
             return False
         self._last_lab_hair = hair
@@ -3552,9 +3824,7 @@ class StreamRuntime:
         if self._last_lab_hair:
             self._hair_capture_done = True
             return
-        if self._lab_drive or self._lab_harness_online():
-            # set_source + track adopt the new character. Don't copy a
-            # previous lab mesh or run desk animeseg while the lab is up.
+        if getattr(self, "_lab_drive", False) and getattr(self, "_lab_overlay_gen", None) is not None:
             self._hair_capture_done = True
             return
         self._capture_character_hair_mesh(rest_keypoints=rest_keypoints)
@@ -3579,6 +3849,239 @@ class StreamRuntime:
 
     def _release_hair_tracker(self) -> None:
         self._hair_overlay_tracker = None
+
+    def character_fit(self) -> dict[str, Any]:
+        """Hair, skeleton, and limiter boxes in still pixels for the fit canvas."""
+        from .character_fit import build_fit_view
+
+        image = self._last_image
+        if image is None:
+            raise RuntimeError("Create a character before fitting it")
+        hair = self._rest_hair_segments() or self._last_lab_hair or []
+        return build_fit_view(
+            width=int(image.size[0]),
+            height=int(image.size[1]),
+            keypoints=self._last_overlay_kps,
+            hair_norm=hair,
+            box=self._status.get("travel_box"),
+        )
+
+    def paint_character_hair(
+        self,
+        points: list,
+        *,
+        radius: float,
+        part: str,
+        erase: bool = False,
+    ) -> dict[str, Any]:
+        """Stamp a brush stroke onto the character hair and keep it."""
+        from .character_fit import (
+            norm_hair_to_pixels,
+            pixels_hair_to_norm,
+            update_character_fit,
+        )
+        from .hair_edit import HAIR_PARTS, stamp_hair_stroke
+
+        image = self._last_image
+        if image is None:
+            raise RuntimeError("Create a character before painting hair")
+        if not points:
+            raise ValueError("Paint a stroke on the hair")
+        chosen = str(part or "hair_middle")
+        if chosen not in HAIR_PARTS:
+            raise ValueError("Pick middle, left, or right hair")
+        width, height = image.size
+        current = norm_hair_to_pixels(self._rest_hair_segments() or self._last_lab_hair or [], width, height)
+        stamped = stamp_hair_stroke(
+            current,
+            points,
+            radius=max(1.0, min(80.0, float(radius))),
+            part=chosen,
+            width=width,
+            height=height,
+            erase=bool(erase),
+        )
+        norm = pixels_hair_to_norm(stamped, width, height)
+        self._last_lab_hair = norm
+        self._lab_rest_hair = [dict(seg) for seg in norm]
+        self._hair_capture_done = True
+        self._hair_rig = None
+        ident = str(self._status.get("character_id") or "")
+        if ident:
+            update_character_fit(ident, {"hair": norm})
+        lab_hair = []
+        for seg in stamped:
+            poly = []
+            for vertex in seg.get("polygon") or []:
+                if isinstance(vertex, (list, tuple)) and len(vertex) >= 2:
+                    px, py = self._desk_px_to_lab(float(vertex[0]), float(vertex[1]))
+                    poly.append([round(px, 1), round(py, 1)])
+            if len(poly) >= 3:
+                lab_hair.append({"class": seg.get("class"), "polygon": poly})
+        try:
+            ack = self._lab_ack("set_hair", {"hair": lab_hair})
+            packet = self._lab_packet_from_ack(ack)
+            self._adopt_lab_hair(packet)
+        except Exception as exc:
+            print(f"Hair paint kept on the desk; Track Lab did not store it: {exc}")
+        if self._last_image is not None:
+            self._emit(
+                {
+                    "type": "frame",
+                    **self._frame_payload(self._last_image, self._last_overlay_kps),
+                }
+            )
+        return self.character_fit()
+
+    def move_character_skeleton(self, idx: int, x: float, y: float) -> dict[str, Any]:
+        """Place one rest skeleton joint. Face points stay where the fit left them."""
+        from .character_fit import SKELETON_LABELS, update_character_fit
+
+        image = self._last_image
+        kps = self._last_overlay_kps
+        if image is None or kps is None:
+            raise RuntimeError("Create a character before moving the skeleton")
+        slot = int(idx)
+        if slot not in SKELETON_LABELS:
+            raise ValueError("Only the neck, shoulders, elbows, and chest can be moved here")
+        width, height = image.size
+        nx, ny = pixels_to_normalized(float(x), float(y), width, height)
+        edited = np.asarray(kps, dtype=np.float32).copy()
+        edited[slot, 0] = nx
+        edited[slot, 1] = ny
+        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
+        edited[slot, 3] = 1.0
+        self._install_fit_keypoints(edited)
+        try:
+            px, py = self._desk_px_to_lab(float(x), float(y))
+            ack = self._lab_ack("set_skeleton_point", {"id": slot, "x": float(px), "y": float(py)})
+            packet = self._lab_packet_from_ack(ack)
+            self.adopt_lab_overlay(packet, emit=False)
+            merged = (
+                np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
+                if self._last_overlay_kps is not None
+                else edited
+            )
+            merged[slot, 0] = nx
+            merged[slot, 1] = ny
+            merged[slot, 2] = max(float(merged[slot, 2]), 0.85)
+            merged[slot, 3] = 1.0
+            self._install_fit_keypoints(merged)
+        except Exception as exc:
+            print(f"Skeleton move kept on the desk; Track Lab did not store it: {exc}")
+        ident = str(self._status.get("character_id") or "")
+        if ident and self._last_overlay_kps is not None:
+            body = []
+            for joint in SKELETON_LABELS:
+                body.append(
+                    {
+                        "id": joint,
+                        "x": round(float(self._last_overlay_kps[joint, 0]), 5),
+                        "y": round(float(self._last_overlay_kps[joint, 1]), 5),
+                    }
+                )
+            update_character_fit(ident, {"skeleton": body})
+        if self._last_image is not None:
+            self._emit(
+                {
+                    "type": "frame",
+                    **self._frame_payload(self._last_image, self._last_overlay_kps),
+                }
+            )
+        return self.character_fit()
+
+    def _install_fit_keypoints(self, keypoints: np.ndarray) -> None:
+        from .character_fit import replace_pack_keypoints
+
+        kps = np.asarray(keypoints, dtype=np.float32).copy()
+        self._last_overlay_kps = kps
+        self._driven_keypoints = kps.copy()
+        self._last_good_keypoints = kps.copy()
+        try:
+            self.engine.adopt_ref_keypoints(kps, persist=False, pose_source="fit")
+        except Exception as exc:
+            print(f"Fit pose did not install: {exc}")
+        path = self._ref_path
+        if path is not None and path.suffix.lower() == ".vtm" and path.is_file():
+            try:
+                replace_pack_keypoints(path, kps)
+            except Exception as exc:
+                print(f"Fit pose did not save into the character: {exc}")
+
+    def _apply_character_fit(self) -> bool:
+        """Put a saved hair paint and skeleton back after Track Lab re-detects."""
+        from .character_fit import norm_hair_to_pixels, read_character_fit
+
+        ident = str(self._status.get("character_id") or "")
+        if not ident:
+            return False
+        saved = read_character_fit(ident)
+        if not saved:
+            return False
+        changed = False
+        skeleton = saved.get("skeleton")
+        if isinstance(skeleton, list) and self._last_overlay_kps is not None:
+            kps = np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
+            moved = False
+            for row in skeleton:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    slot = int(row.get("id", -1))
+                    nx = float(row.get("x"))
+                    ny = float(row.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                if not (31 <= slot <= 36):
+                    continue
+                if (
+                    abs(float(kps[slot, 0]) - nx) > 1e-5
+                    or abs(float(kps[slot, 1]) - ny) > 1e-5
+                    or float(kps[slot, 3]) < 0.5
+                ):
+                    moved = True
+                kps[slot, 0] = nx
+                kps[slot, 1] = ny
+                kps[slot, 2] = max(float(kps[slot, 2]), 0.85)
+                kps[slot, 3] = 1.0
+                try:
+                    px, py = self._norm_to_lab_px(nx, ny)
+                    self._lab_ack("set_skeleton_point", {"id": slot, "x": px, "y": py})
+                except Exception:
+                    pass
+            if moved:
+                self._install_fit_keypoints(kps)
+                changed = True
+        hair = saved.get("hair")
+        if isinstance(hair, list) and hair:
+            self._last_lab_hair = hair
+            self._lab_rest_hair = [dict(seg) for seg in hair]
+            self._hair_capture_done = True
+            self._hair_rig = None
+            changed = True
+            image = self._last_image
+            lab = getattr(self, "_lab_image_wh", None)
+            if image is not None:
+                lw, lh = (int(lab[0]), int(lab[1])) if lab else image.size
+                try:
+                    self._lab_ack(
+                        "set_hair",
+                        {"hair": norm_hair_to_pixels(hair, lw, lh)},
+                    )
+                except Exception:
+                    pass
+        return changed
+
+    def _norm_to_lab_px(self, x: float, y: float) -> tuple[float, float]:
+        image = self._last_image
+        lab = getattr(self, "_lab_image_wh", None)
+        if lab:
+            width, height = int(lab[0]), int(lab[1])
+        elif image is not None:
+            width, height = image.size
+        else:
+            return float(x), float(y)
+        return (float(x) + 1.0) * 0.5 * float(width), (float(y) + 1.0) * 0.5 * float(height)
 
     def _capture_character_hair_mesh(
         self, rest_keypoints: np.ndarray | None = None
@@ -3619,6 +4122,7 @@ class StreamRuntime:
         st = self.status()
         show_mesh = bool(st.get("show_mesh"))
         show_hair = bool(st.get("show_hair", True))
+        show_limiters = bool(st.get("show_limiters"))
         overlay_on = show_mesh or show_hair
         preview = getattr(self, "_travel_preview_kps", None)
         mesh_kps = preview if preview is not None else keypoints
@@ -3649,6 +4153,14 @@ class StreamRuntime:
                         display = draw_hair_overlay(display, hair_segs)
                 except Exception as exc:
                     print(f"Hair overlay draw failed: {exc}")
+        if display is not None and show_limiters:
+            try:
+                raw_box = st.get("travel_box")
+                box = dict(raw_box) if isinstance(raw_box, dict) else {}
+                box["enabled"] = True
+                display = draw_travel_box(display, self._limiter_rest(), box)
+            except Exception as exc:
+                print(f"Limiter overlay draw failed: {exc}")
         payload: dict[str, Any] = {
             "image": _image_to_jpeg_b64(display) if display is not None else None,
             "width": int(display.width) if display is not None else 0,
@@ -3658,6 +4170,16 @@ class StreamRuntime:
         if keypoints is not None:
             payload["keypoints"] = np.asarray(keypoints, dtype=np.float32).tolist()
         return payload
+
+    def current_frame_event(self) -> dict[str, Any] | None:
+        """Still on the desk right now, for a client that connected after boot."""
+        image = getattr(self, "_last_image", None)
+        if image is None:
+            return None
+        return {
+            "type": "frame",
+            **self._frame_payload(image, getattr(self, "_last_overlay_kps", None)),
+        }
 
     def mesh_press(self, x: float, y: float) -> None:
         st = self.status()
@@ -3828,7 +4350,7 @@ class StreamRuntime:
             if saved is not None:
                 print(
                     f"Mesh edits kept — {saved.name} is the new rest pose. "
-                    "Tracking follows this layout. Double-click the cel to undo."
+                    "Tracking follows this layout. Double-click the preview to undo."
                 )
         except Exception as exc:
             print(f"mesh release failed: {exc}")
@@ -3972,6 +4494,25 @@ class StreamRuntime:
         )
         return self.status()
 
+    def _agent_log(self, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+        try:
+            payload = {
+                "sessionId": "286628",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            }
+            with open(
+                r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
+                "a",
+                encoding="utf-8",
+            ) as fh:
+                fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        except Exception:
+            pass
+
     def _track_poll_loop(self) -> None:
         while not self._track_stop.is_set():
             time.sleep(0.05)
@@ -3979,20 +4520,42 @@ class StreamRuntime:
                 continue
             try:
                 if self._lab_drive:
+                    # #region agent log
+                    _now = time.time()
+                    if _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
+                        self._dbg_t = _now
+                        _kps = self._last_overlay_kps
+                        _prev = getattr(self, "_dbg_kps", None)
+                        _motion = 0.0
+                        if _kps is not None and _prev is not None and getattr(_prev, "shape", None) == _kps.shape:
+                            _motion = float(np.max(np.abs(_kps[:, :2] - _prev[:, :2])))
+                        if _kps is not None:
+                            self._dbg_kps = np.asarray(_kps, dtype=np.float32).copy()
+                        self._agent_log(
+                            "E",
+                            "stream.py:_track_poll_loop",
+                            "desk overlay",
+                            {
+                                "streaming": bool(self._streaming),
+                                "frozen": bool(self._pose_frozen),
+                                "preview_age": round(_now - float(self._last_live_preview_t or 0.0), 3),
+                                "motion": round(_motion, 4),
+                                "has_kps": _kps is not None,
+                            },
+                        )
+                    # #endregion
                     with self._lock:
                         mesh_frozen = bool(self._pose_frozen)
                     if not self._streaming and not mesh_frozen:
-                        now = time.time()
-                        if now - self._last_live_preview_t >= 0.12:
-                            self._last_live_preview_t = now
-                            driven = self._lab_overlay_keypoints()
-                            if driven is not None and self._last_image is not None:
-                                self._emit(
-                                    {
-                                        "type": "frame",
-                                        **self._frame_payload(self._last_image, driven),
-                                    }
-                                )
+                        self._last_live_preview_t = time.time()
+                        driven = self._lab_overlay_keypoints()
+                        if driven is not None and self._last_image is not None:
+                            self._emit(
+                                {
+                                    "type": "frame",
+                                    **self._frame_payload(self._last_image, driven),
+                                }
+                            )
                     self._set_status(
                         track_message="Frozen" if self._pose_frozen else "Tracking on",
                         body_label="",
@@ -4014,17 +4577,15 @@ class StreamRuntime:
                     with self._lock:
                         mesh_frozen = bool(self._mesh_edited or self._pose_frozen)
                     if not self._streaming and not mesh_frozen:
-                        now = time.time()
-                        if now - self._last_live_preview_t >= 0.12:
-                            self._last_live_preview_t = now
-                            driven = self._retarget_live_to_character()
-                            if driven is not None and self._last_image is not None:
-                                self._emit(
-                                    {
-                                        "type": "frame",
-                                        **self._frame_payload(self._last_image, driven),
-                                    }
-                                )
+                        self._last_live_preview_t = time.time()
+                        driven = self._retarget_live_to_character()
+                        if driven is not None and self._last_image is not None:
+                            self._emit(
+                                {
+                                    "type": "frame",
+                                    **self._frame_payload(self._last_image, driven),
+                                }
+                            )
                 kind = body_method_kind(method)
                 body_on = body_tracking_active(method, lost=lost)
                 label = (

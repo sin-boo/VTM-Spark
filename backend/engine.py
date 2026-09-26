@@ -630,6 +630,16 @@ def looks_like_greenscreen(rgb: np.ndarray) -> bool:
     return float(np.mean(greenish)) >= 0.25
 
 
+def _reference_rgb(path: Path) -> np.ndarray:
+    """RGB pixels for a still or a character pack preview. Never opens a .vtm as an image."""
+    if path.suffix.lower() == ".vtm":
+        from .character_pack import read_character_pack
+
+        return np.asarray(read_character_pack(path).preview_rgb)
+    image = Image.open(path).convert("RGB")
+    return np.asarray(image)
+
+
 class MissingRefKeypointsError(FileNotFoundError):
     """Reference image has no matching KEYPOINT_SCHEMA sidecar."""
 
@@ -1033,6 +1043,29 @@ def _enable_tf32() -> None:
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
+    _hide_compiler_consoles()
+
+
+def _hide_compiler_consoles() -> None:
+    """torch.compile launches a console per kernel on Windows. Keep those hidden."""
+    if os.name != "nt":
+        return
+    import subprocess
+
+    if getattr(subprocess.Popen, "_vtm_no_window", False):
+        return
+    orig = subprocess.Popen
+    no_window = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+
+    class _QuietPopen(orig):
+        _vtm_no_window = True
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            flags = int(kwargs.get("creationflags") or 0)
+            kwargs["creationflags"] = flags | no_window
+            super().__init__(*args, **kwargs)
+
+    subprocess.Popen = _QuietPopen
 
 
 def _triton_available() -> bool:
@@ -1457,11 +1490,12 @@ class StreamEngine:
         if not self.checkpoint.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint}")
 
-        if self.fast_mode:
-            _enable_tf32()
+        _enable_tf32()
 
         print(f"Loading keypoint DiT from {self.checkpoint} ...")
-        self.model, cfg = build_keypoint_model(self.checkpoint, self.device)
+        self.model, cfg = build_keypoint_model(
+            self.checkpoint, self.device, dtype=torch.float32
+        )
         self._eager_model = self.model
         self._model_compiled = False
         self._compile_failed = False
@@ -1489,7 +1523,10 @@ class StreamEngine:
 
         self._ready = True
         self._gpu_resident = True
-        print(f"Stream model ready ({checkpoint_label(self.checkpoint)} @ {self.image_size}).")
+        print(
+            f"Stream model ready ({checkpoint_label(self.checkpoint)} @ {self.image_size}, "
+            "dtype=float32)."
+        )
 
     def _release_dit_weights(self) -> None:
         """Drop compiled DiT + CUDA graphs so a different checkpoint can load."""
@@ -1607,8 +1644,15 @@ class StreamEngine:
                         f"Could not load {path.name} ({exc}). Restored {previous.name}."
                     ) from exc
                 raise
-            if self._ref_path is not None and self._ref_keypoints is not None:
-                self._set_reference_locked(self._ref_path, self._ref_keypoints)
+            # A .vtm is a character pack, not an image. The desk reloads it
+            # after this returns so Pillow never opens the zip.
+            ref = self._ref_path
+            if (
+                ref is not None
+                and self._ref_keypoints is not None
+                and Path(ref).suffix.lower() != ".vtm"
+            ):
+                self._set_reference_locked(ref, self._ref_keypoints)
             return path
 
     def checkpoint_name(self) -> str:
@@ -1649,8 +1693,7 @@ class StreamEngine:
             raise FileNotFoundError(f"Reference image not found: {path}")
 
         _tick(0.08, "Reading reference…")
-        image = Image.open(path).convert("RGB")
-        arr = np.asarray(image)
+        arr = _reference_rgb(path)
         if skip_crop is None:
             in_train_crop = "train_crop" in str(path).replace("\\", "/")
             skip_crop = not (in_train_crop or looks_like_greenscreen(arr))
@@ -1693,8 +1736,7 @@ class StreamEngine:
             raise FileNotFoundError(f"Reference image not found: {path}")
 
         if image_arr is None:
-            image = Image.open(path).convert("RGB")
-            arr = np.asarray(image)
+            arr = _reference_rgb(path)
         else:
             arr = np.asarray(image_arr)
         if skip_crop is None:
@@ -1932,8 +1974,7 @@ class StreamEngine:
             raise FileNotFoundError("No reference image to calibrate — pick one first.")
         ref_path = Path(ref_path)
 
-        image = Image.open(ref_path).convert("RGB")
-        arr = np.asarray(image)
+        arr = _reference_rgb(ref_path)
         in_train_crop = "train_crop" in str(ref_path).replace("\\", "/")
         skip_crop = not (in_train_crop or looks_like_greenscreen(arr))
 
@@ -1943,7 +1984,8 @@ class StreamEngine:
         )
         # CPU avoids racing LivePoser iris YOLO / DiT on the same CUDA context.
         fitted = fit_keypoints_to_reference(
-            ref_path,
+            None if ref_path.suffix.lower() == ".vtm" else ref_path,
+            image_rgb=arr,
             skip_crop=bool(skip_crop),
             image_size=self.image_size,
             flip_tta=bool(flip_tta),
@@ -1956,7 +1998,9 @@ class StreamEngine:
         with self._cuda_lock:
             # Force encode even if path matches (keypoints changed).
             self._ref_path = None
-            self._set_reference_locked(ref_path, kps, skip_crop=bool(skip_crop))
+            self._set_reference_locked(
+                ref_path, kps, skip_crop=bool(skip_crop), image_arr=arr
+            )
             self._ref_pose_source = "calibrated"
             saved = save_sidecar_keypoints(ref_path, kps)
             self._ref_kps_path = saved

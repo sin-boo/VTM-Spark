@@ -384,22 +384,22 @@ function Clear-DistSoft {
   }
 
   if ($ForceBundle) {
-    Write-Host "    refreshing dist except models/ (-ForceBundle)"
+    Write-Host "    refreshing dist except models/ and characters/ (-ForceBundle)"
     Get-ChildItem -LiteralPath $DistDir -Force -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -ne "models" } |
+      Where-Object { $_.Name -ne "models" -and $_.Name -ne "characters" } |
       ForEach-Object {
         Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
       }
     return
   }
 
-  # Keep runtime/ and models/ (user DiT drops, refs, session). Wipe the rest.
+  # Keep runtime/, models/, and characters/ (user DiT drops, VTM packs, session). Wipe the rest.
   Get-ChildItem -LiteralPath $DistDir -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ne "runtime" -and $_.Name -ne "models" } |
+    Where-Object { $_.Name -ne "runtime" -and $_.Name -ne "models" -and $_.Name -ne "characters" } |
     ForEach-Object {
       Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
-  Write-Host "    overwriting package (kept runtime/ and models/ - use -ForceBundle to refresh runtime)"
+  Write-Host "    overwriting package (kept runtime/, models/, characters/ - use -ForceBundle to refresh runtime)"
 }
 
 Clear-DistSoft -DistDir $Out
@@ -475,6 +475,14 @@ if (Test-Path (Join-Path $Root "models\refs")) {
     -Source (Join-Path $Root "models\refs") `
     -Dest (Join-Path $Out "models\refs") `
     -Label "Syncing models/refs/" `
+    -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $Out "characters") | Out-Null
+if (Test-Path (Join-Path $Root "characters")) {
+  $null = Invoke-RobocopyWithProgress `
+    -Source (Join-Path $Root "characters") `
+    -Dest (Join-Path $Out "characters") `
+    -Label "Syncing characters/" `
     -ExtraArgs @("/E", "/XO", "/XF", ".gitkeep")
 }
 $sourcesJson = Join-Path $Root "models\model_sources.json"

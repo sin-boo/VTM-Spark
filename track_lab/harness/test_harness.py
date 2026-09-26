@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from harness.dispatch import bind, handle
-from harness.hub import HarnessHub, LatestSlot, hub
+from harness.hub import HarnessHub, LatestSlot, PacketMailbox, hub
 from harness.pack import pack_frame, pack_keypoints, pack_status
 from harness.protocol import COMMANDS, NUM_KEYPOINTS, ack, parse_command
 
@@ -241,6 +241,18 @@ def test_latest_slot_drops_stale_items() -> None:
     assert slot.take(0.0) is None
 
 
+def test_packet_mailbox_keeps_status_beside_newer_frame() -> None:
+    box = PacketMailbox()
+    box.put({"type": "packet", "packet": {"type": "status", "source": "ifm"}})
+    box.put({"type": "packet", "packet": {"type": "frame", "n": 1}})
+    box.put({"type": "packet", "packet": {"type": "frame", "n": 2}})
+    batch = box.take(0.0)
+    assert [item["packet"]["type"] for item in batch] == ["status", "frame"]
+    assert batch[0]["packet"]["source"] == "ifm"
+    assert batch[1]["packet"]["n"] == 2
+    assert box.take(0.0) == []
+
+
 def test_hub_command_requires_bind() -> None:
     local = HarnessHub()
     reply = local.command({"op": "stop"})
@@ -343,6 +355,12 @@ class _FakeBench:
         self.error = ""
         return self.status()
 
+    def set_hair(self, body: object) -> dict[str, object]:
+        if isinstance(body, dict):
+            self.hair = body.get("hair")
+        self.error = ""
+        return self.status()
+
 
 def test_dispatch_set_feel_and_start() -> None:
     bench = _FakeBench()
@@ -389,6 +407,9 @@ def test_dispatch_set_source_reads_path(tmp_path) -> None:
     assert bench.source_name == "char.png"
     assert bench.source_bytes == len(b"\x89PNG fake")
     assert bench.live is False
+    assert isinstance(reply.get("frame"), dict)
+    assert reply["frame"].get("type") == "frame"
+    assert reply["frame"].get("generation") == 1
 
 
 def test_dispatch_set_point_and_reset(tmp_path) -> None:
@@ -400,6 +421,14 @@ def test_dispatch_set_point_and_reset(tmp_path) -> None:
     assert cleared["ok"] is True
     assert bench.cleared == "all"
     assert bench.points == {}
+
+
+def test_dispatch_set_hair() -> None:
+    bench = _FakeBench()
+    hair = [{"class": "hair_middle", "polygon": [[0, 0], [10, 0], [10, 10]]}]
+    reply = handle(bench, {"op": "set_hair", "body": {"hair": hair}})
+    assert reply["ok"] is True
+    assert bench.hair == hair
 
 
 def test_lab_http_exposes_overlay_point() -> None:

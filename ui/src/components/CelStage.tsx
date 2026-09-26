@@ -107,7 +107,7 @@ export function CelStage({ image, live, frozen = false, stillId = '' }: Props) {
   return (
     <section className="stage">
       <div className="stage-head">
-        <h2 className="stage-title">Cel</h2>
+        <h2 className="stage-title">Preview</h2>
         <div className="stage-pills">
           {frozen ? <span className="stage-flag">Frozen</span> : null}
           {live && !frozen ? <span className="stage-flag is-live">Live</span> : null}

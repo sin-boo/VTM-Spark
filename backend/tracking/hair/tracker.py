@@ -1,4 +1,4 @@
-"""Hair-part polygons from animeseg_hair3.pt (fallback: hair_seg.pt)."""
+"""Hair-part polygons from animeseg_hair3.pt."""
 
 from __future__ import annotations
 
