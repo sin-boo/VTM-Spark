@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
-import math
 import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -1538,7 +1536,7 @@ class StreamEngine:
         if not bool(cfg.get("use_keypoint_conditioning", False)):
             raise RuntimeError(
                 f"{self.checkpoint.name} is not keypoint-conditioned; "
-                "VTM Noble requires use_keypoint_conditioning=True"
+                "VTM Studio requires use_keypoint_conditioning=True"
             )
         from .model_layout import keypoint_layout_from_config
 

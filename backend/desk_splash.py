@@ -299,7 +299,7 @@ def _window_hwnd(window: object | None) -> int:
         user32 = ctypes.windll.user32  # type: ignore[attr-defined]
         user32.FindWindowW.restype = ctypes.c_void_p
         user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
-        found = user32.FindWindowW(None, "VTM Noble")
+        found = user32.FindWindowW(None, "VTM Studio")
         return int(found or 0)
     except Exception:
         return 0
@@ -1444,8 +1444,8 @@ def create_splash_window(
     if js_api is not None:
         kw["js_api"] = js_api
     if url is not None:
-        return webview.create_window("VTM Noble", url, **kw)
-    return webview.create_window("VTM Noble", html=html, **kw)
+        return webview.create_window("VTM Studio", url, **kw)
+    return webview.create_window("VTM Studio", html=html, **kw)
 
 
 WEBVIEW2_ARGS = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
@@ -1532,6 +1532,40 @@ def _webview2_cmdline_is_ours(cmd: str, folders: list[Path]) -> bool:
         if needle and needle in text:
             return True
     return False
+
+
+WEBVIEW2_RUNTIME_KEY = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+WEBVIEW2_MIN_BUILD = (86, 0, 622, 0)
+
+
+def webview2_version() -> str | None:
+    """Installed WebView2 runtime version, or None when it is missing.
+
+    Mirrors pywebview's check. Without the runtime pywebview silently falls
+    back to the IE engine, which cannot run the desk UI (blank window).
+    """
+    if os.name != "nt":
+        return None
+    import winreg
+
+    paths = (
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_KEY}"),
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_KEY}"),
+        (winreg.HKEY_CURRENT_USER, rf"Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_RUNTIME_KEY}"),
+    )
+    for hive, path in paths:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                build = str(winreg.QueryValueEx(key, "pv")[0])
+        except OSError:
+            continue
+        try:
+            parts = tuple(int(p) for p in build.split("."))
+        except ValueError:
+            continue
+        if parts >= WEBVIEW2_MIN_BUILD:
+            return build
+    return None
 
 
 def kill_orphan_webview2() -> list[int]:
@@ -1909,7 +1943,7 @@ def early_splash_html(
 <head>
   <meta charset="utf-8" />
   <link rel="icon" type="image/png" href="splash-mark.png" />
-  <title>VTM Noble</title>
+  <title>VTM Studio</title>
   <style>
     html, body {{
       margin: 0;
@@ -2058,7 +2092,7 @@ def early_splash_html(
       <header>
         {mark_html}
         <p class="kicker">VTM</p>
-        <h1>Noble</h1>
+        <h1>Studio</h1>
         <p class="ver">{version}</p>
       </header>
       <div class="status">

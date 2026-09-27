@@ -134,7 +134,7 @@ def _blocked_by_existing(host: str, port: int) -> str | None:
     if probe_existing_api(host, port):
         url = health_url(host, port).rsplit("/api/", 1)[0]
         return (
-            f"VTM Noble already running at {url}. "
+            f"VTM Studio already running at {url}. "
             "Close the other window, or menu [K] Kill leftovers."
         )
     if _port_in_use(host, port):
@@ -261,7 +261,7 @@ def _shutdown_all(*, exit_code: int = 0) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="VTM Noble desktop app")
+    parser = argparse.ArgumentParser(description="VTM Studio desktop app")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--port",
@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             return blocked
         if not acquire_single_instance():
             msg = (
-                "Another VTM Noble instance holds the single-instance lock. "
+                "Another VTM Studio instance holds the single-instance lock. "
                 "Close it or run backend\\packaging\\kill-orphans.ps1."
             )
             _file_log("ERROR: " + msg)
@@ -391,7 +391,19 @@ def main(argv: list[str] | None = None) -> int:
         kill_orphan_webview2,
         mute_webview_microphone,
         patch_webview2_no_microphone,
+        webview2_version,
     )
+
+    if sys.platform == "win32" and webview2_version() is None:
+        # pywebview would open a blank IE-engine window instead. run.exe
+        # installs WebView2 before starting us; exit code 3 means that failed.
+        _file_log(
+            "Microsoft Edge WebView2 runtime is missing and could not be installed "
+            "automatically; the desk window needs it. Check your internet connection "
+            "and open VTM Studio again."
+        )
+        _shutdown_all(exit_code=3)
+        return 3
 
     mute_webview_microphone()
     patch_webview2_no_microphone()

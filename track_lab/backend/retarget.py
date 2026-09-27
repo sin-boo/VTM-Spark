@@ -13,9 +13,9 @@ from __future__ import annotations
 import numpy as np
 
 from .feel import feel
-from .eye_bits import EYE_ALL, bits as eye_bits
+from .eye_bits import bits as eye_bits
 from .mouth_bits import MOUTH_ALL, bits as mouth_bits
-from .presets import apply_open_offset, lip_gap
+from .presets import apply_open_offset
 from .sides import mirror_map, mirror_osf, mirror_slot, mirror_sources, x_sign
 from .visemes import rest_stamp, session_rest_locked
 

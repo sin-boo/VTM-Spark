@@ -1,4 +1,4 @@
-# VTM Noble
+# VTM Studio
 
 Windows desktop app for real-time pose-driven anime generation (keypoint DiT + live tracking).
 
@@ -6,15 +6,18 @@ Windows desktop app for real-time pose-driven anime generation (keypoint DiT + l
 
 - Windows 10/11
 - NVIDIA GeForce RTX 30 / 40 / 50 with a current NVIDIA driver (CUDA). No AMD / macOS / Linux package yet.
-- [Node.js LTS](https://nodejs.org/) (builds the UI)
-- Python 3 is optional — `install.bat` fetches one through **uv** if none is found
-- [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (usually already installed)
-- Internet on first setup (downloads model weights from Hugging Face — **no API key**)
+- Internet on first setup (downloads tools and model weights — **no API key**)
+
+Nothing else to install by hand. `install.bat` sets up everything inside the app folder:
+
+- **Python** — through [uv](https://docs.astral.sh/uv/) into `.venv-build` (uses an existing Python 3.10+ if you have one)
+- **Node.js** — a portable copy in `.tools\node`, only used to build the UI (your system Node, if any, is untouched)
+- **WebView2** — Microsoft's runtime for the app window, installed only if missing (already built into Windows 11)
 
 **Quick start**
 
 1. Clone this repo.
-2. Double-click `install.bat` the first time (creates `.venv-build` with **uv**, installs deps, builds the UI, sets up Track Lab, downloads models).
+2. Double-click `install.bat` the first time (sets up Python, Node.js and WebView2, installs deps, builds the UI, sets up Track Lab, downloads models).
 3. Double-click `run.exe` (hat icon) to open the desk.
 
 Models download automatically into:
@@ -46,6 +49,6 @@ Vendor code is committed under `vendor/`. Only pass `-SyncVendor` to `backend\pa
 
 **License**
 
-Apache License 2.0 covers VTM Noble source and **our** original / fine-tune training work — see [LICENSE](LICENSE). That grant does **not** cover third-party model weights, and it does not apply to models added later.
+Apache License 2.0 covers VTM Studio source and **our** original / fine-tune training work — see [LICENSE](LICENSE). That grant does **not** cover third-party model weights, and it does not apply to models added later.
 
 Third-party weights keep the official license of the publisher who released them. Inventory and source URLs: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenSeeFace binary library notices: `vendor/tools/openseeface/Licenses/`.

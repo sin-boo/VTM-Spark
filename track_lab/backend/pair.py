@@ -85,11 +85,22 @@ def _bind_to_job() -> None:
     _job = job  # Never closed: the handle dies with us, and takes the UI along.
 
 
+def _find_npm() -> str | None:
+    """Portable Node from install.bat first, then a system Node on PATH."""
+    portable = UI_DIR.parents[1] / ".tools" / "node" / "npm.cmd"
+    if portable.is_file():
+        return str(portable)
+    return shutil.which("npm")
+
+
 def _start_ui() -> subprocess.Popen[bytes]:
-    npm = shutil.which("npm")
+    npm = _find_npm()
     if npm is None:
-        raise FileNotFoundError("npm not found on PATH; install Node.js")
-    return subprocess.Popen([npm, "run", "dev"], cwd=str(UI_DIR))
+        raise FileNotFoundError("Node.js missing (.tools\\node); run install.bat")
+    env = os.environ.copy()
+    node_dir = str(Path(npm).parent)
+    env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
+    return subprocess.Popen([npm, "run", "dev"], cwd=str(UI_DIR), env=env)
 
 
 def _stop_ui(ui: subprocess.Popen[bytes] | None) -> None:

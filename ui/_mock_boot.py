@@ -350,7 +350,7 @@ def status() -> dict:
         "compile_status": "",
         "compile_detail": "",
         "virtual_cam": False,
-        "virtual_cam_device": "VTM Noble Cam",
+        "virtual_cam_device": "VTM Studio Cam",
         "virtual_cam_error": "",
         "virtual_cam_width": 0,
         "virtual_cam_height": 0,
@@ -469,7 +469,7 @@ class H(BaseHTTPRequestHandler):
                 "font:14px Segoe UI,sans-serif;padding:24px'>"
                 "This is the Vite mock API on port 8765, not the operator desk. "
                 "Open <a href='http://127.0.0.1:5173'>http://127.0.0.1:5173</a>, "
-                "or close this process and launch VTM Noble."
+                "or close this process and launch VTM Studio."
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
         else:

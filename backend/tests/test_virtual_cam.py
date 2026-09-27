@@ -76,7 +76,7 @@ def test_pump_resends_reference_still() -> None:
         width = 32
         height = 32
         fps = 30
-        device = "VTM Noble Cam"
+        device = "VTM Studio Cam"
         backend = "unitycapture"
 
         def send(self, frame: np.ndarray) -> None:

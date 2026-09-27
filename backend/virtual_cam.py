@@ -1,4 +1,4 @@
-"""Push generated frames to the bundled 'VTM Noble Cam' virtual webcam."""
+"""Push generated frames to the bundled 'VTM Studio Cam' virtual webcam."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def cover_rgb(arr: np.ndarray, width: int, height: int) -> np.ndarray:
 
 
 class VirtualCameraOut:
-    """Thread-safe pyvirtualcam wrapper for VTM Noble Cam.
+    """Thread-safe pyvirtualcam wrapper for VTM Studio Cam.
 
     A pump thread keeps resending the latest picture at camera FPS so OBS
     stays live on the reference still — Unity Capture goes black if we only
@@ -135,7 +135,7 @@ class VirtualCameraOut:
         *,
         source: _FrameSource | None = None,
     ) -> str:
-        """Open VTM Noble Cam at the generated-frame resolution and pump frames."""
+        """Open VTM Studio Cam at the generated-frame resolution and pump frames."""
         w, h = vcam_even_size(width, height)
         rate = float(max(1.0, min(60.0, fps)))
         self._stop_pump()

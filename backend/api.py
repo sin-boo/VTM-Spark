@@ -1,4 +1,4 @@
-"""FastAPI surface for the VTM Noble desktop app."""
+"""FastAPI surface for the VTM Studio desktop app."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ PORT = 8765
 
 __all__ = ["app", "configure_runtime", "mount_frontend", "shutdown_runtime"]
 
-app = FastAPI(title="VTM Noble", version="0.1.0")
+app = FastAPI(title="VTM Studio", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*", "null"],

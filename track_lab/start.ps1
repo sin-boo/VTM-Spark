@@ -20,6 +20,14 @@ if (-not (Test-Path $Py)) {
 }
 
 $env:PYTHONPATH = $Root
+# Portable Node from install.bat (.tools\node); a system Node is the fallback.
+$NodeDir = Join-Path $Repo ".tools\node"
+if (Test-Path (Join-Path $NodeDir "npm.cmd")) {
+  $env:PATH = "$NodeDir;$env:PATH"
+  $env:npm_config_cache = Join-Path $Repo ".tools\npm-cache"
+} elseif (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  throw "Node.js missing (.tools\node). Run install.bat at the repo root first."
+}
 
 Set-Location $Root
 if (-not (Test-Path $OsfPy)) {

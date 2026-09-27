@@ -34,11 +34,15 @@ internal static class Program
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
     private const uint GW_OWNER = 4;
 
-    private const string DeskTitle = "VTM Noble";
+    private const string DeskTitle = "VTM Studio";
     private const string DeskMutex = "Local\\VTMNobleSingleInstance";
     // Held by run.exe while it launches, before the desk takes DeskMutex.
     private const string LaunchMutex = "Local\\VTMNobleLauncher";
     private const int DeskPort = 8765;
+    // backend/__main__.py exits with this when WebView2 is not installed.
+    private const int WebView2MissingCode = 3;
+    private const string WebView2RuntimeKey = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    private const string WebView2Bootstrapper = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
 
     private const uint MB_YESNO = 0x00000004;
     private const uint MB_ICONWARNING = 0x00000030;
@@ -90,7 +94,7 @@ internal static class Program
                     return 0;
                 }
                 Log("single-instance lock held but no desk window found");
-                if (!Ask("VTM Noble looks like it is already running, but its window cannot be found.\n\n"
+                if (!Ask("VTM Studio looks like it is already running, but its window cannot be found.\n\n"
                     + "Clean up leftover processes and start it again?"))
                 {
                     return 0;
@@ -133,6 +137,11 @@ internal static class Program
         if (MaybeLeftovers())
         {
             KillOrphans(true);
+        }
+        // install.bat installs WebView2; this covers a skipped or failed step.
+        if (!WebView2Installed())
+        {
+            InstallWebView2();
         }
         return StartDesk(pyw);
     }
@@ -214,6 +223,11 @@ internal static class Program
                     return null;
                 }
                 Log("desk exited with code " + p.ExitCode + " before its window opened");
+                if (p.ExitCode == WebView2MissingCode)
+                {
+                    return "The Microsoft Edge WebView2 runtime could not be installed automatically.\n\n"
+                        + "Check your internet connection and open VTM Studio again.";
+                }
                 return "The desk exited before its window opened (code " + p.ExitCode + ").";
             }
             if (FindDeskWindow(true) != IntPtr.Zero)
@@ -223,6 +237,79 @@ internal static class Program
         }
         Log("desk window did not appear within 60 s");
         return null;
+    }
+
+    // Same registry keys as pywebview and start-menu.ps1 Test-WebView2.
+    private static bool WebView2Installed()
+    {
+        string client = @"Microsoft\EdgeUpdate\Clients\" + WebView2RuntimeKey;
+        string[] keys =
+        {
+            @"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\" + client,
+            @"HKEY_LOCAL_MACHINE\SOFTWARE\" + client,
+            @"HKEY_CURRENT_USER\Software\" + client,
+        };
+        foreach (string key in keys)
+        {
+            string pv = Microsoft.Win32.Registry.GetValue(key, "pv", null) as string;
+            if (!string.IsNullOrEmpty(pv) && pv != "0.0.0.0")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Microsoft's Evergreen bootstrapper, silent: per-user first (no UAC),
+    // then system-wide once if that did not take.
+    private static void InstallWebView2()
+    {
+        Log("WebView2 runtime missing - installing");
+        string exe = Path.Combine(Path.GetTempPath(), "vtm-webview2-" + Guid.NewGuid().ToString("N") + ".exe");
+        try
+        {
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; // TLS 1.2
+            using (WebClient web = new WebClient())
+            {
+                web.DownloadFile(WebView2Bootstrapper, exe);
+            }
+            RunWebView2Installer(exe, false);
+            if (!WebView2Installed())
+            {
+                RunWebView2Installer(exe, true);
+            }
+            Log(WebView2Installed() ? "WebView2 runtime installed" : "WebView2 runtime still missing");
+        }
+        catch (Exception ex)
+        {
+            Log("WebView2 install failed: " + ex.Message);
+        }
+        finally
+        {
+            try { File.Delete(exe); } catch (Exception) { }
+        }
+    }
+
+    private static void RunWebView2Installer(string exe, bool elevated)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo
+        {
+            FileName = exe,
+            Arguments = "/silent /install",
+            UseShellExecute = elevated,
+            CreateNoWindow = true,
+        };
+        if (elevated)
+        {
+            psi.Verb = "runas";
+        }
+        using (Process p = Process.Start(psi))
+        {
+            if (p != null)
+            {
+                p.WaitForExit((int)TimeSpan.FromMinutes(10).TotalMilliseconds);
+            }
+        }
     }
 
     // Rebuild ui/dist hidden. True = ui/dist is usable (fresh, or the last
@@ -268,6 +355,13 @@ internal static class Program
                 CreateNoWindow = true,
             };
             psi.EnvironmentVariables["PYTHONPATH"] = Root;
+            // Portable Node from install.bat (.tools\node) wins over a system one.
+            string node = Path.Combine(Root, ".tools", "node");
+            if (File.Exists(Path.Combine(node, "npm.cmd")))
+            {
+                psi.EnvironmentVariables["PATH"] = node + ";" + psi.EnvironmentVariables["PATH"];
+                psi.EnvironmentVariables["npm_config_cache"] = Path.Combine(Root, ".tools", "npm-cache");
+            }
             using (Process p = Process.Start(psi))
             {
                 if (p == null)
@@ -415,7 +509,7 @@ internal static class Program
         return true;
     }
 
-    // A visible top-level "VTM Noble" window from another process. With
+    // A visible top-level "VTM Studio" window from another process. With
     // pythonOnly, only the desk's own windows count.
     private static IntPtr FindDeskWindow(bool pythonOnly)
     {

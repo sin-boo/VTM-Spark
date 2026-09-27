@@ -161,6 +161,7 @@ export function CharacterLibrary(props: Props) {
     nameId,
     libraryOpen,
     createOpen,
+    localStill,
   ])
 
   useEffect(() => {

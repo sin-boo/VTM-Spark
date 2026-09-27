@@ -1,3 +1,3 @@
-"""VTM Noble desktop backend (FastAPI + DiT engine + LivePoser)."""
+"""VTM Studio desktop backend (FastAPI + DiT engine + LivePoser)."""
 
 __version__ = "0.1.0"

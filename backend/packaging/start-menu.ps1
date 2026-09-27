@@ -1,4 +1,4 @@
-﻿# VTM Noble — install.bat / run.exe
+﻿# VTM Studio — install.bat / run.exe
 param(
   [ValidateSet("install", "run")]
   [string]$Action = "run"
@@ -20,10 +20,11 @@ $Esc = [char]27
 
 . (Join-Path $PSScriptRoot "console-progress.ps1")
 . (Join-Path $PSScriptRoot "venv-home.ps1")
+. (Join-Path $PSScriptRoot "node-tools.ps1")
 
 function Enable-PrettyConsole {
   try {
-    $Host.UI.RawUI.WindowTitle = "VTM Noble"
+    $Host.UI.RawUI.WindowTitle = "VTM Studio"
   } catch {}
 
   try {
@@ -246,12 +247,12 @@ function Invoke-EnsureModel {
   return $false
 }
 
-function Invoke-EnsureVtmNobleCam {
-  # Register bundled DirectShow filter as 'VTM Noble Cam' (UAC once).
-  $installBat = Join-Path $Root "vendor\tools\vtm_noble_cam\Install-VTMNobleCam.bat"
-  $dll64 = Join-Path $Root "vendor\tools\vtm_noble_cam\UnityCaptureFilter64.dll"
+function Invoke-EnsureVtmStudioCam {
+  # Register bundled DirectShow filter as 'VTM Studio Cam' (UAC once).
+  $installBat = Join-Path $Root "vendor\tools\vtm_studio_cam\Install-VTMStudioCam.bat"
+  $dll64 = Join-Path $Root "vendor\tools\vtm_studio_cam\UnityCaptureFilter64.dll"
   if (-not (Test-Path -LiteralPath $installBat) -or -not (Test-Path -LiteralPath $dll64)) {
-    Write-Ansi "==> VTM Noble Cam filters missing under vendor\tools\vtm_noble_cam" amber
+    Write-Ansi "==> VTM Studio Cam filters missing under vendor\tools\vtm_studio_cam" amber
     return $false
   }
   if (-not (Test-Path -LiteralPath $VenvPy)) {
@@ -279,12 +280,12 @@ function Invoke-EnsureVtmNobleCam {
 
   if ($ready) {
     Write-Ansi "==> Virtual camera ready:" cyan -NoNewline
-    Write-Ansi " VTM Noble Cam" mint
+    Write-Ansi " VTM Studio Cam" mint
     return $true
   }
 
   Write-Host ""
-  Write-Ansi "==> Installing virtual camera: VTM Noble Cam" cyan
+  Write-Ansi "==> Installing virtual camera: VTM Studio Cam" cyan
   Write-Ansi "    Approve the Windows UAC prompt once (DirectShow register)." slate
   Write-Host ""
   $prev = $ErrorActionPreference
@@ -319,10 +320,66 @@ function Invoke-EnsureVtmNobleCam {
   }
 
   if ($ready) {
-    Write-Ansi "VTM Noble Cam installed." green
+    Write-Ansi "VTM Studio Cam installed." green
     return $true
   }
-  Write-Ansi "VTM Noble Cam not detected yet — open Virtual camera in the app after Start." amber
+  Write-Ansi "VTM Studio Cam not detected yet — open Virtual camera in the app after Start." amber
+  return $false
+}
+
+function Test-WebView2 {
+  # Same registry keys pywebview checks. Without the runtime pywebview falls
+  # back to the IE engine, which cannot run the desk UI (blank window).
+  $guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+  $keys = @(
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid",
+    "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$guid",
+    "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$guid"
+  )
+  foreach ($key in $keys) {
+    $pv = (Get-ItemProperty -LiteralPath $key -Name pv -ErrorAction SilentlyContinue).pv
+    if ($pv -and $pv -ne "0.0.0.0") { return $true }
+  }
+  return $false
+}
+
+function Invoke-EnsureWebView2 {
+  if (Test-WebView2) {
+    Write-Ansi "==> WebView2 runtime present" cyan
+    return $true
+  }
+  Write-Host ""
+  Write-Ansi "==> Installing Microsoft Edge WebView2 runtime (the desk window needs it)" cyan
+  # Microsoft's Evergreen bootstrapper, run silently. Unelevated it installs
+  # per-user with no UAC; if that is blocked, retry once system-wide (one UAC).
+  $url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+  $exe = Join-Path $env:TEMP ("vtm-webview2-" + [guid]::NewGuid().ToString("N") + ".exe")
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+      Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+    } finally {
+      $ProgressPreference = $prevProgress
+    }
+    $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Wait -PassThru
+    Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
+    if (-not (Test-WebView2)) {
+      Write-Ansi "    Retrying system-wide - approve the Windows prompt." slate
+      $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Verb RunAs -Wait -PassThru
+      Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
+    }
+  } catch {
+    Write-Ansi "WebView2 install failed: $_" amber
+  } finally {
+    Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-WebView2) {
+    Write-Ansi "WebView2 runtime installed." green
+    return $true
+  }
+  Write-Ansi "WebView2 runtime still missing." amber
   return $false
 }
 
@@ -359,8 +416,8 @@ function Invoke-EnsureTrackLab {
 
   if (Test-Path -LiteralPath (Join-Path $labUi "node_modules")) {
     Write-Ansi "    track_lab\ui\node_modules present - skipping npm" slate
-  } elseif (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-    Write-Ansi "npm not found on PATH - Track Lab UI packages not installed." amber
+  } elseif (-not (Use-VtmNode -RepoRoot $Root)) {
+    Write-Ansi "Node.js missing (.tools\node) - Track Lab UI packages not installed." amber
     $ok = $false
   } else {
     $npmCode = 1
@@ -447,10 +504,10 @@ function Invoke-SmartBuild {
     Write-Host ""
     Write-Ansi "Install failed during the app build (exit $code). Review the message above." rose
     Write-Ansi "  Common causes:" slate
-    Write-Ansi "    - No internet connection (uv, PyTorch and npm download packages)" slate
-    Write-Ansi "    - Node.js missing - install Node.js LTS, then open a new terminal" slate
+    Write-Ansi "    - No internet connection (uv, Node.js, PyTorch and npm download packages)" slate
+    Write-Ansi "    - A proxy or firewall blocking nodejs.org, github.com or pypi.org" slate
     Write-Ansi "    - No NVIDIA driver - the CUDA check needs a recent NVIDIA GPU driver" slate
-    Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Noble / pause AV and retry" slate
+    Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Studio / pause AV and retry" slate
     Write-Ansi "  Re-running install.bat is safe; it keeps what finished and retries the rest." slate
     Write-Host ""
     Write-Ansi "Press Enter to return..." slate
@@ -459,22 +516,27 @@ function Invoke-SmartBuild {
     return
   }
 
+  # The desk window is WebView2; without it pywebview shows a blank IE window.
+  $webviewOk = [bool](@(Invoke-EnsureWebView2)[-1])
+
   # Track Lab (face-tracking bench): OSF Python copy + lab UI npm packages.
+  # Uses the portable Node build.ps1 put in .tools\node.
   $trackLabOk = [bool](@(Invoke-EnsureTrackLab)[-1])
 
   # Explicit setup step: fetch DiT weights into models\dit if missing.
   $modelsOk = [bool](@(Invoke-EnsureModel)[-1])
 
-  # Register bundled DirectShow virtual camera (VTM Noble Cam) once.
-  $vcamOk = [bool](@(Invoke-EnsureVtmNobleCam)[-1])
+  # Register bundled DirectShow virtual camera (VTM Studio Cam) once.
+  $vcamOk = [bool](@(Invoke-EnsureVtmStudioCam)[-1])
 
-  $allOk = $modelsOk -and $vcamOk -and $trackLabOk
+  $allOk = $webviewOk -and $modelsOk -and $vcamOk -and $trackLabOk
   Write-Host ""
   Write-Ansi "==> Install summary" cyan
   Write-InstallStep "App build" $true
-  Write-InstallStep "Models" $modelsOk "Check your internet and re-run install.bat, or place a .pt file in models\dit."
+  Write-InstallStep "WebView2" $webviewOk "Check your internet. run.exe installs it automatically on the next start."
+  Write-InstallStep "Models" $modelsOk "Check your internet. Missing models download automatically when you start the app."
   Write-InstallStep "Virtual camera" $vcamOk "Re-run install.bat and approve UAC, or click Virtual camera in the app."
-  Write-InstallStep "Track Lab" $trackLabOk "Needs Node.js for the lab UI. Re-run install.bat or run track_lab\start.bat."
+  Write-InstallStep "Track Lab" $trackLabOk "Check your internet and re-run install.bat, or run track_lab\start.bat."
   Write-Host ""
   if ($allOk) {
     Write-Ansi "Install finished." green
@@ -503,8 +565,8 @@ function Test-UiStale {
 function Invoke-BuildDeskUi {
   Write-Ansi "Building desk UI from current source…" cyan
   $uiDir = Join-Path $Root "ui"
-  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-    Write-Ansi "npm not found on PATH. Install Node.js or run install.bat." rose
+  if (-not (Use-VtmNode -RepoRoot $Root)) {
+    Write-Ansi "Node.js missing (.tools\node). Run install.bat." rose
     return 1
   }
   $buildCode = 1
@@ -531,7 +593,7 @@ function Invoke-BuildDeskUi {
 
 function Test-VtmDeskWindow {
   $named = Get-Process -Name pythonw,python,VTMNoble -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'Noble' }
+    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'VTM Studio' }
   if ($named) { return $true }
   try {
     if (-not ("Win32.FindVtm" -as [type])) {
@@ -540,7 +602,7 @@ function Test-VtmDeskWindow {
 public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
 "@
     }
-    $hwnd = [Win32.FindVtm]::FindWindowW($null, "VTM Noble")
+    $hwnd = [Win32.FindVtm]::FindWindowW($null, "VTM Studio")
     return ($hwnd -ne [IntPtr]::Zero)
   } catch {
     return $false

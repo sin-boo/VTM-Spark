@@ -6,7 +6,6 @@ from backend.iris import (
     IrisHit,
     catchlight_pupil,
     eye_crop_box,
-    from_eye_mid,
     from_look,
     map_crop_to_frame,
     map_into_eye,

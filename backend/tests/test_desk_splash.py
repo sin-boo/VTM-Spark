@@ -1,5 +1,8 @@
 from pathlib import Path
 import os
+import sys
+
+import pytest
 
 from backend.desk_splash import (
     EARLY_SPLASH_NAME,
@@ -30,7 +33,7 @@ def test_ui_public_files_maps_splash_art(tmp_path: Path) -> None:
 
 def test_early_splash_html_is_local_and_named() -> None:
     page = early_splash_html(label="Loading model")
-    assert "VTM Noble" in page or "Noble" in page
+    assert "Studio" in page
     assert "krita-splash" in page
     assert "Loading model" in page
     assert "splash-art.png" in page
@@ -236,6 +239,63 @@ def test_main_patches_webview_after_import() -> None:
     assert "kill_orphan_webview2" in text
 
 
+def test_main_refuses_ie_fallback_without_webview2() -> None:
+    src = Path(__file__).resolve().parents[1] / "__main__.py"
+    text = src.read_text(encoding="utf-8")
+    guard = text.index("webview2_version() is None")
+    assert guard < text.index("webview.start(")
+    assert "exit_code=3" in text[guard : guard + 600]
+    stub = src.parent / "packaging" / "run-stub.cs"
+    assert "WebView2MissingCode = 3" in stub.read_text(encoding="utf-8")
+
+
+def _fake_winreg(values: dict[str, str]):
+    import types
+
+    class _Key:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+    def open_key(hive, path):
+        if path not in values:
+            raise OSError("missing")
+        return _Key(path)
+
+    def query(key, name):
+        return values[key.path], 1
+
+    return types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2, OpenKey=open_key, QueryValueEx=query
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows registry check")
+@pytest.mark.parametrize(
+    ("pv", "expected"),
+    [("128.0.2739.42", "128.0.2739.42"), ("0.0.0.0", None), ("80.0.1.0", None), ("junk", None)],
+)
+def test_webview2_version_reads_runtime_key(monkeypatch, pv, expected) -> None:
+    from backend import desk_splash
+
+    path = rf"Software\Microsoft\EdgeUpdate\Clients\{desk_splash.WEBVIEW2_RUNTIME_KEY}"
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg({path: pv}))
+    assert desk_splash.webview2_version() == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows registry check")
+def test_webview2_version_none_when_no_keys(monkeypatch) -> None:
+    from backend import desk_splash
+
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg({}))
+    assert desk_splash.webview2_version() is None
+
+
 def test_mute_webview_microphone_keeps_existing_args(monkeypatch) -> None:
     from backend.desk_splash import WEBVIEW2_ARGS, mute_webview_microphone
 
@@ -268,7 +328,7 @@ def test_create_splash_window_skips_webview2_hang_flags() -> None:
         height=562,
         js_api=bridge,
     )
-    assert window["title"] == "VTM Noble"
+    assert window["title"] == "VTM Studio"
     assert "transparent" not in window
     assert "frameless" not in window
     assert window["js_api"] is bridge

@@ -8,7 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 ICO_SIZES = (16, 24, 32, 48, 64, 256)
-APP_USER_MODEL_ID = "VTM.Noble"
+APP_USER_MODEL_ID = "VTM.Studio"
 
 
 def hat_png_path() -> Path | None:

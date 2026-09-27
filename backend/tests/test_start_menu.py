@@ -100,7 +100,7 @@ def test_install_exits_with_script_exit_code() -> None:
 def test_install_summary_uses_step_results() -> None:
     body = _function_body("Invoke-SmartBuild")
     assert "[void](Invoke-EnsureModel)" not in body
-    assert "[void](Invoke-EnsureVtmNobleCam)" not in body
+    assert "[void](Invoke-EnsureVtmStudioCam)" not in body
     assert "$modelsOk" in body
     assert "$vcamOk" in body
     assert "$trackLabOk" in body
@@ -199,3 +199,26 @@ def test_run_stub_never_opens_a_console_on_its_own() -> None:
     assert "kill-orphans.ps1" in stub
     assert "npm run build" in stub
     assert stub.count('-Action run"') == 1
+
+
+def test_install_never_hands_the_user_a_manual_step() -> None:
+    import re
+
+    menu = _start_menu_text()
+    for hint in re.findall(r'Write-InstallStep "[^"]+" \$\w+ "([^"]*)"', menu):
+        assert "http" not in hint, hint
+        assert "place a" not in hint, hint
+    # WebView2: per-user silent install, then one system-wide retry.
+    body = menu[menu.index("function Invoke-EnsureWebView2") :]
+    body = body[: body.index("\nfunction ")]
+    assert '"/silent", "/install"' in body
+    assert "-Verb RunAs" in body
+
+
+def test_run_exe_installs_webview2_before_starting_the_desk() -> None:
+    stub = (_root() / "backend" / "packaging" / "run-stub.cs").read_text(encoding="utf-8")
+    boot = stub[stub.index("private static string Boot(") :]
+    boot = boot[: boot.index("\n    }\n")]
+    assert boot.index("InstallWebView2()") < boot.index("StartDesk(pyw)")
+    assert '"/silent /install"' in stub
+    assert 'psi.Verb = "runas"' in stub

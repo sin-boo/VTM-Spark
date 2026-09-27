@@ -45,7 +45,7 @@ from .offsets import dump as dump_offsets
 from .offsets import nudge as nudge_offset
 from .offsets import parse as parse_offsets
 from .osf_cam import OsfCam, OsfFrame
-from .skeleton import follow_skeleton, skeleton_from_face, skeleton_from_still
+from .skeleton import follow_skeleton, skeleton_from_still
 from .travel_box import (
     apply_limits,
     lab_feel_caps,

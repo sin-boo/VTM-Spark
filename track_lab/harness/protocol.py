@@ -1,6 +1,6 @@
 """Harness packet and command schema.
 
-A consumer (later: VTM Noble) talks to Track Lab over this protocol instead
+A consumer (later: VTM Studio) talks to Track Lab over this protocol instead
 of embedding the tracker. Frames carry the character-space overlay mesh.
 Commands mutate the same settings the lab UI already exposes.
 """

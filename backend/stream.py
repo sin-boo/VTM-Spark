@@ -3550,7 +3550,7 @@ class StreamRuntime:
         return self._last_image
 
     def start_virtual_cam(self) -> None:
-        """Open VTM Noble Cam and keep the current still/gen picture pumping."""
+        """Open VTM Studio Cam and keep the current still/gen picture pumping."""
         from .vcam_device import DEVICE_NAME
         from .virtual_cam import VCAM_FPS, get_virtual_cam
 

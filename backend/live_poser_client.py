@@ -1,4 +1,4 @@
-"""Headless LivePoser tracker for VTM Noble.
+"""Headless LivePoser tracker for VTM Studio.
 
 Embeds tools/live-poser camera + OSF → KEYPOINT_SCHEMA (37,4) bridge.
 """
@@ -6,11 +6,9 @@ Embeds tools/live-poser camera + OSF → KEYPOINT_SCHEMA (37,4) bridge.
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -31,7 +29,6 @@ from cameras import (  # noqa: E402
     resolve_openseeface,
     uninit_com,
 )
-from label_schema import normalize_mouth_osf_map  # noqa: E402
 from tracking_filters import FilterSettings, MotionSmoother  # noqa: E402
 
 from .tracking import (  # noqa: E402

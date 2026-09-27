@@ -1,4 +1,4 @@
-# VTM Noble — local / package artifacts (do not push)
+# VTM Studio — local / package artifacts (do not push)
 .venv/
 .venv-build/
 __pycache__/
@@ -77,3 +77,7 @@ models/trackers/*.pt
 models/trackers/*.pth
 models/trackers/*.onnx
 models/trackers/*.task
+
+# OpenSeeFace weights also download via install.bat (only model 3 is used).
+vendor/tools/openseeface/models/*.onnx
+vendor/tools/openseeface/models/priorbox_640x640.json

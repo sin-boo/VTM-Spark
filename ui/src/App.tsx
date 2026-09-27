@@ -294,7 +294,7 @@ export default function App() {
         }}
       >
         <img className="desk-caption-mark" src="/splash-mark.png" width={16} height={16} alt="" />
-        <span className="desk-caption-title">VTM Noble</span>
+        <span className="desk-caption-title">VTM Studio</span>
         <WindowDots />
       </div>
       <div className="desk">

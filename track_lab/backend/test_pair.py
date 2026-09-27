@@ -79,3 +79,18 @@ def test_ui_exit_stops_the_api(monkeypatch) -> None:
     monkeypatch.setattr(uvicorn, "Config", lambda *a, **k: None)
     assert pair.main() == 0
     assert stopped and stopped[0] is not None
+
+
+def test_find_npm_prefers_portable_node(tmp_path: Path, monkeypatch) -> None:
+    from backend import pair
+
+    ui = tmp_path / "track_lab" / "ui"
+    ui.mkdir(parents=True)
+    monkeypatch.setattr(pair, "UI_DIR", ui)
+    monkeypatch.setattr(pair.shutil, "which", lambda _name: r"C:\system\npm.cmd")
+    assert pair._find_npm() == r"C:\system\npm.cmd"
+
+    portable = tmp_path / ".tools" / "node" / "npm.cmd"
+    portable.parent.mkdir(parents=True)
+    portable.write_text("", encoding="utf-8")
+    assert pair._find_npm() == str(portable)

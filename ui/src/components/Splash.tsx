@@ -72,7 +72,7 @@ export function Splash(props: Props) {
           <header className="krita-splash-brand">
             <img className="krita-splash-mark" src="/splash-mark.png?alpha=1" width={72} height={72} alt="" />
             <p className="krita-splash-kicker">VTM</p>
-            <h1>Noble</h1>
+            <h1>Studio</h1>
             <p className="krita-splash-ver">{APP_VERSION}</p>
           </header>
           <div className="krita-splash-status">

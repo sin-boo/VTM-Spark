@@ -1,1 +1,1 @@
-# VTM Noble regression tests
+# VTM Studio regression tests

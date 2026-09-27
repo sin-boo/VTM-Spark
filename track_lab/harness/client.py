@@ -1,6 +1,6 @@
 """HTTP client for the Track Lab harness.
 
-Use this from another process (VTM Noble) to read tracking packets and
+Use this from another process (VTM Studio) to read tracking packets and
 change settings. Live push is `ws://127.0.0.1:8780/harness/ws`.
 """
 

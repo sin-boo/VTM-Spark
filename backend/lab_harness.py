@@ -1,4 +1,4 @@
-"""HTTP client from VTM Noble to the Track Lab harness."""
+"""HTTP client from VTM Studio to the Track Lab harness."""
 
 from __future__ import annotations
 

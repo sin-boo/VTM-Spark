@@ -19,7 +19,7 @@ from harness.hub import hub
 from harness.pack import warming_status
 from harness.server import attach as attach_harness
 
-from .ports import HOST, PORT, SERVICE
+from .ports import PORT, SERVICE
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_DIR = ROOT / "input"

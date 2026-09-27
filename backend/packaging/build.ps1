@@ -1,4 +1,4 @@
-﻿# VTM Noble setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
+﻿# VTM Studio setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
 # run.exe runs the desk from source with that venv.
 # DiT weights download into models/dit on install.bat / first launch.
 param(
@@ -23,6 +23,7 @@ $ManagedPythonVersion = "3.13"
 
 . (Join-Path $PSScriptRoot "console-progress.ps1")
 . (Join-Path $PSScriptRoot "venv-home.ps1")
+. (Join-Path $PSScriptRoot "node-tools.ps1")
 
 function Get-UvExe {
   $cmd = Get-Command uv -ErrorAction SilentlyContinue
@@ -60,7 +61,7 @@ function Get-UvExe {
 $script:UvExe = Get-UvExe
 Write-Host "==> Using uv: $($script:UvExe)"
 
-Write-Host "==> VTM Noble setup (UI + .venv-build)"
+Write-Host "==> VTM Studio setup (UI + .venv-build)"
 
 # --- NVIDIA GPU / driver (warn only: cu128 wheels still install without one) ---
 function Test-NvidiaDriver {
@@ -74,13 +75,13 @@ if (Test-NvidiaDriver) {
 } else {
   Write-Host ""
   Write-Host "    WARNING: nvidia-smi not found - no NVIDIA GPU driver detected."
-  Write-Host "    WARNING: VTM Noble needs an NVIDIA GPU + current NVIDIA driver to run CUDA torch."
+  Write-Host "    WARNING: VTM Studio needs an NVIDIA GPU + current NVIDIA driver to run CUDA torch."
   Write-Host "    WARNING: Setup will continue (CUDA torch wheels still install), but the desk will not"
   Write-Host "    WARNING: run until you install a driver from https://www.nvidia.com/Download/index.aspx"
   Write-Host ""
 }
 
-Write-Host "==> Killing leftover VTM Noble / backend processes"
+Write-Host "==> Killing leftover VTM Studio / backend processes"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "kill-orphans.ps1")
 
 # --- Vendor: use committed vendor/ by default (opt-in -SyncVendor for monorepo) ----
@@ -105,27 +106,42 @@ if (-not (Test-Path (Join-Path $Root "vendor\tools\live-poser\live_poser.py"))) 
 }
 
 # --- UI --------------------------------------------------------------------
-if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-  throw "Node.js is required to build the UI but 'npm' is not on PATH. Install Node.js LTS from https://nodejs.org/ (keep 'Add to PATH' checked), then open a NEW terminal and re-run install.bat."
+if (-not (Use-VtmNode -RepoRoot $Root -Install)) {
+  throw "Could not download Node.js $NodeVersion into .tools\node (needed to build the UI). Check your internet connection / proxy and re-run install.bat."
 }
+Write-Host "==> Using Node.js: $((Get-Command node -ErrorAction SilentlyContinue).Source)"
 Write-Host "==> Building UI (Vite)"
 Push-Location "$Root\ui"
 try {
-  if (-not (Test-Path "node_modules")) {
-    Write-LongStepHint "Installing UI npm packages (first run can take a few minutes)..."
-    $code = Invoke-ProcessWithHeartbeat `
+  function Install-UiPackages {
+    $npmCode = Invoke-ProcessWithHeartbeat `
       -FilePath "cmd.exe" `
       -ArgumentList @("/c", "npm", "ci") `
       -Activity "npm ci" `
       -HeartbeatSeconds 12
-    if ($code -ne 0) {
-      $code = Invoke-ProcessWithHeartbeat `
+    if ($npmCode -ne 0) {
+      $npmCode = Invoke-ProcessWithHeartbeat `
         -FilePath "cmd.exe" `
         -ArgumentList @("/c", "npm", "install") `
         -Activity "npm install" `
         -HeartbeatSeconds 12
     }
-    if ($code -ne 0) { throw "npm install failed - see npm output above. Check your internet connection, delete ui\node_modules, and re-run install.bat." }
+    return [int]$npmCode
+  }
+  function Reset-UiPackages {
+    # A half-finished or corrupt node_modules is the usual npm failure; start clean.
+    if (Test-Path "node_modules") {
+      Write-Host "    Clearing ui\node_modules and retrying..."
+      Remove-Item -LiteralPath "node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return (Install-UiPackages)
+  }
+
+  if (-not (Test-Path "node_modules")) {
+    Write-LongStepHint "Installing UI npm packages (first run can take a few minutes)..."
+    $code = Install-UiPackages
+    if ($code -ne 0) { $code = Reset-UiPackages }
+    if ($code -ne 0) { throw "npm install failed twice - see npm output above. Check your internet connection and re-run install.bat." }
   }
   $UiDist = Join-Path $Root "ui\dist\index.html"
   $NeedUiBuild = $true
@@ -146,7 +162,18 @@ try {
       -ArgumentList @("/c", "npm", "run", "build") `
       -Activity "vite build" `
       -HeartbeatSeconds 10
-    if ($code -ne 0) { throw "UI build failed - see npm output above; try deleting ui\node_modules and re-run install.bat." }
+    if ($code -ne 0) {
+      Write-Host "    UI build failed - reinstalling UI packages and building again"
+      $code = Reset-UiPackages
+      if ($code -eq 0) {
+        $code = Invoke-ProcessWithHeartbeat `
+          -FilePath "cmd.exe" `
+          -ArgumentList @("/c", "npm", "run", "build") `
+          -Activity "vite build (retry)" `
+          -HeartbeatSeconds 10
+      }
+    }
+    if ($code -ne 0) { throw "UI build failed twice - see npm output above. Re-run install.bat; if it keeps failing, report the error above." }
   }
 } finally {
   Pop-Location
@@ -235,7 +262,19 @@ if (-not (Test-Path $Py)) {
     -HeartbeatSeconds 8
   if ($code -is [System.Array]) { $code = $code | Select-Object -Last 1 }
   if ($code -ne 0 -or -not (Test-Path $Py)) {
-    throw "Failed to create build venv with uv (python: $VenvPython, exit $code) - see uv output above. Check your internet connection, delete .venv-build, and re-run install.bat; or install Python $ManagedPythonVersion from https://www.python.org/downloads/ and pass -BasePython <path-to-python.exe>."
+    # A half-made venv or a broken system Python: start clean on uv's own Python.
+    Write-Host "==> Venv creation failed - clearing .venv-build and retrying with uv's managed Python $ManagedPythonVersion"
+    Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+    $VenvPython = $ManagedPythonVersion
+    $code = Invoke-NativeWithHeartbeat `
+      -FilePath $script:UvExe `
+      -ArgumentList @("venv", $VenvDir, "--python", $VenvPython) `
+      -Activity "uv venv (retry)" `
+      -HeartbeatSeconds 8
+    if ($code -is [System.Array]) { $code = $code | Select-Object -Last 1 }
+  }
+  if ($code -ne 0 -or -not (Test-Path $Py)) {
+    throw "Failed to create build venv with uv (python: $VenvPython, exit $code) - see uv output above. Check your internet connection and re-run install.bat."
   }
 }
 

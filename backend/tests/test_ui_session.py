@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from backend.model_download import _is_dit_weight_name, hub_checkpoint_names
 from backend.ui_session import load_ui_session, save_ui_session, session_path

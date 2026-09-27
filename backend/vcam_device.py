@@ -1,4 +1,4 @@
-"""Install / locate the bundled 'VTM Noble Cam' DirectShow virtual camera."""
+"""Install / locate the bundled 'VTM Studio Cam' DirectShow virtual camera."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from pathlib import Path
 
 from .paths import package_root
 
-DEVICE_NAME = "VTM Noble Cam"
+DEVICE_NAME = "VTM Studio Cam"
 
 
 def vcam_bundle_dir() -> Path:
-    return package_root() / "vendor" / "tools" / "vtm_noble_cam"
+    return package_root() / "vendor" / "tools" / "vtm_studio_cam"
 
 
 def filter_dlls() -> list[Path]:
@@ -25,7 +25,7 @@ def filter_dlls() -> list[Path]:
 
 
 def install_script() -> Path:
-    return vcam_bundle_dir() / "Install-VTMNobleCam.bat"
+    return vcam_bundle_dir() / "Install-VTMStudioCam.bat"
 
 
 def device_available() -> bool:
@@ -53,13 +53,13 @@ def device_available() -> bool:
 
 
 def ensure_installed(*, allow_prompt: bool = True) -> None:
-    """Register VTM Noble Cam if missing. May show a UAC prompt once."""
+    """Register VTM Studio Cam if missing. May show a UAC prompt once."""
     if device_available():
         return
     missing = [p for p in filter_dlls() if not p.is_file()]
     if missing:
         raise RuntimeError(
-            "VTM Noble Cam filters missing — re-run install.bat "
+            "VTM Studio Cam filters missing — re-run install.bat "
             f"(expected under {vcam_bundle_dir()})"
         )
     script = install_script()
