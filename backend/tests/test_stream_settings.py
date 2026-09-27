@@ -8,7 +8,9 @@ from backend.engine import (
     _clip_blend,
     _clip_cfg,
     _clip_inbetweens,
+    _clip_max_fps,
     effective_inbetweens,
+    gen_hold_s,
     interpolate_on,
 )
 
@@ -87,3 +89,22 @@ def test_compile_toggle_on_cpu_skips() -> None:
     assert engine.compile_status == "off"
     engine.set_compile_model(True)
     assert engine.compile_status == "skip"
+
+
+def test_max_fps_clip() -> None:
+    assert _clip_max_fps(None) == 0
+    assert _clip_max_fps(-5) == 0
+    assert _clip_max_fps("24") == 24
+    assert _clip_max_fps(999) == 60
+
+
+def test_gen_hold_keeps_keys_under_cap() -> None:
+    # Off, or no key yet: never hold.
+    assert gen_hold_s(0, 10.0, 10.01) == 0.0
+    assert gen_hold_s(10, 0.0, 10.01) == 0.0
+    # 10 keys/s: a key 10 ms after the last waits the other 90 ms.
+    assert abs(gen_hold_s(10, 10.0, 10.01) - 0.09) < 1e-9
+    # Already late: go now.
+    assert gen_hold_s(10, 10.0, 10.5) == 0.0
+    # Batch x2 makes two keys per call, so it gets twice the interval.
+    assert abs(gen_hold_s(10, 10.0, 10.01, batch=2) - 0.19) < 1e-9

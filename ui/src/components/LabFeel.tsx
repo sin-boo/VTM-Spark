@@ -18,31 +18,52 @@ const LIVE_FEEL: FeelSlider[] = [
     title: 'Ease each new pose toward the last one. Higher is smoother. Eyes use the same ease.',
   },
   { key: 'mouth', label: 'Mouth', max: 2 },
-  { key: 'hair_pin', label: 'Hair pin', max: 1 },
 ]
 
-const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E', 'O']
+const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E']
 
 function feelPatch(key: keyof LabFeel, value: number): Partial<LabFeel> {
   if (key === 'smoothing') return { smoothing: value, gaze_smooth: value }
   return { [key]: value }
 }
 
+// Head angles are degrees; the meter is full at this many either way.
+const HEAD_RANGE = 45
+
 function mixRows(lab: LabStatus | null): [string, number][] {
   const weights = lab?.weights ?? ZERO_WEIGHTS
   const look = lab?.look
+  const head = lab?.head
   return [
     ['blink L', lab?.blink?.l ?? 0],
     ['blink R', lab?.blink?.r ?? 0],
     ['look X', look?.x ?? 0],
     ['look Y', look?.y ?? 0],
+    ['yaw', head?.yaw ?? 0],
+    ['pitch', head?.pitch ?? 0],
+    ['roll', head?.roll ?? 0],
     ...METERS.map((name) => [name, weights[name] ?? 0] as [string, number]),
   ]
 }
 
+const HEAD_ROWS = new Set(['yaw', 'pitch', 'roll'])
+
+/** Centred meters: look is -1..1, head is degrees. */
+function isCentred(name: string) {
+  return name.startsWith('look') || HEAD_ROWS.has(name)
+}
+
 function meterFill(name: string, value: number) {
-  const n = name.startsWith('look') ? (value + 1) / 2 : value
+  const n = HEAD_ROWS.has(name)
+    ? (value / HEAD_RANGE + 1) / 2
+    : name.startsWith('look')
+      ? (value + 1) / 2
+      : value
   return `${Math.round(Math.min(1, Math.max(0, n)) * 100)}%`
+}
+
+function meterText(name: string, value: number) {
+  return HEAD_ROWS.has(name) ? `${Math.round(value)}°` : value.toFixed(2)
 }
 
 // Status arrives every ~250 ms; ease the meters toward each sample per frame so
@@ -61,7 +82,7 @@ function useEasedMeters(rows: [string, number][]) {
   const paint = (name: string, value: number) => {
     const el = els.current.get(name)
     if (el?.bar) el.bar.style.width = meterFill(name, value)
-    if (el?.num) el.num.textContent = value.toFixed(2)
+    if (el?.num) el.num.textContent = meterText(name, value)
   }
 
   const step = (now: number) => {
@@ -107,13 +128,13 @@ function MixLane(props: {
       {rows.map(([name, value]) => {
         const v = meters.initial(name, value)
         return (
-          <li key={name} className={name.startsWith('look') ? 'is-look' : undefined}>
+          <li key={name} className={isCentred(name) ? 'is-look' : undefined}>
             <span>{name}</span>
             <i>
               <b ref={meters.bind(name, 'bar')} style={{ width: meterFill(name, v) }} />
             </i>
             <em ref={meters.bind(name, 'num')} className="mono">
-              {v.toFixed(2)}
+              {meterText(name, v)}
             </em>
           </li>
         )
@@ -127,7 +148,8 @@ export function MixMeters({ lab }: { lab: LabStatus | null }) {
   const rows = mixRows(lab)
   const meters = useEasedMeters(rows)
   const eyes = rows.slice(0, 4)
-  const mouth = rows.slice(4)
+  const head = rows.slice(4, 7)
+  const mouth = rows.slice(7)
   return (
     <section className={`desk-mix${live ? ' is-live' : ''}`} aria-label="Live">
       <div className="char-stage-bar">
@@ -137,6 +159,8 @@ export function MixMeters({ lab }: { lab: LabStatus | null }) {
       <ul className="lab-meters">
         <li className="meter-kicker">Eyes</li>
         <MixLane rows={eyes} meters={meters} />
+        <li className="meter-kicker">Head</li>
+        <MixLane rows={head} meters={meters} />
         <li className="meter-kicker">Mouth</li>
         <MixLane rows={mouth} meters={meters} />
       </ul>
@@ -161,7 +185,7 @@ function FeelSliders(props: SliderProps) {
   useEffect(() => {
     if (drag.current) return
     setDraft(feel)
-  }, [feel.response, feel.smoothing, feel.mouth, feel.hair_pin, feel.gaze_gain, feel.gaze_smooth])
+  }, [feel.response, feel.smoothing, feel.mouth, feel.gaze_gain, feel.gaze_smooth])
 
   useEffect(() => {
     return () => {
@@ -230,9 +254,6 @@ export function LabFeel(props: Props) {
         </div>
       </div>
       {props.children}
-      {!online ? (
-        <p className="hint">Start Track Lab to edit overlay and rest.</p>
-      ) : null}
       {props.actions}
       <div className={online ? undefined : 'is-offline'}>
         <FeelSliders

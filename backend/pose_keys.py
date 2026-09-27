@@ -175,6 +175,7 @@ def apply_keys(
 
 
 def keys_path_for(ref: Path | None) -> Path | None:
+    """Legacy sidecar path. Character packs keep their keys inside the ``.vtm``."""
     if ref is None:
         return None
     path = Path(ref)
@@ -183,25 +184,102 @@ def keys_path_for(ref: Path | None) -> Path | None:
     return path.with_name(f"{path.stem}_pose_keys.json")
 
 
-def load_keys(ref: Path | None) -> list[dict[str, Any]]:
-    dest = keys_path_for(ref)
+def _is_pack(ref: Path | None) -> bool:
+    return ref is not None and Path(ref).suffix.lower() == ".vtm"
+
+
+def pack_key_sidecars(pack: Path | str) -> list[Path]:
+    """Every place older installs kept a pack's keys (beside it or in its folder)."""
+    path = Path(pack)
+    stem = path.stem
+    out: list[Path] = []
+    for folder in (path.parent, path.parent / stem):
+        for name in (f"{stem}.keys.json", f"{stem}_pose_keys.json"):
+            cand = folder / name
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
+def _valid_keys(items: Any) -> list[dict[str, Any]]:
+    if isinstance(items, dict):
+        items = items.get("keys")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and item.get("delta") is not None]
+
+
+def _read_keys_file(dest: Path | None) -> list[dict[str, Any]]:
     if dest is None or not dest.is_file():
         return []
     try:
         raw = json.loads(dest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    items = raw.get("keys") if isinstance(raw, dict) else raw
-    if not isinstance(items, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in items:
-        if isinstance(item, dict) and item.get("delta") is not None:
-            out.append(item)
-    return out
+    return _valid_keys(raw)
+
+
+def legacy_pack_keys(pack: Path) -> tuple[list[dict[str, Any]], list[Path]]:
+    found = [p for p in pack_key_sidecars(pack) if p.is_file()]
+    keys: list[dict[str, Any]] = []
+    for sidecar in found:
+        keys = _read_keys_file(sidecar)
+        if keys:
+            break
+    return keys, found
+
+
+def _fold_pack_sidecars(pack: Path) -> None:
+    """Move a legacy ``<stem>.keys.json`` into the pack once, then delete it.
+
+    Keys already inside the pack win; the sidecar only fills an empty pack.
+    """
+    from .character_pack import CharacterPackError, upgrade_character_pack
+
+    keys, found = legacy_pack_keys(pack)
+    if not found:
+        return
+    try:
+        upgrade_character_pack(pack, pose_keys=keys)
+    except (CharacterPackError, OSError):
+        return  # keep the sidecar; the pack could not take it
+    for sidecar in found:
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
+
+
+def load_keys(ref: Path | None) -> list[dict[str, Any]]:
+    if _is_pack(ref):
+        from .character_pack import CharacterPackError, read_pack_pose_keys
+
+        pack = Path(ref)  # type: ignore[arg-type]
+        if not pack.is_file():
+            return []
+        _fold_pack_sidecars(pack)
+        try:
+            return _valid_keys(read_pack_pose_keys(pack))
+        except (CharacterPackError, OSError):
+            return legacy_pack_keys(pack)[0]
+    return _read_keys_file(keys_path_for(ref))
 
 
 def save_keys(ref: Path | None, keys: list[dict[str, Any]]) -> Path | None:
+    if _is_pack(ref):
+        from .character_pack import write_pack_pose_keys
+
+        pack = Path(ref)  # type: ignore[arg-type]
+        if not pack.is_file():
+            return None
+        write_pack_pose_keys(pack, list(keys))
+        for sidecar in pack_key_sidecars(pack):
+            if sidecar.is_file():
+                try:
+                    sidecar.unlink()
+                except OSError:
+                    pass
+        return pack
     dest = keys_path_for(ref)
     if dest is None:
         return None

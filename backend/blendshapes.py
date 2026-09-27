@@ -1,10 +1,17 @@
-"""Track Lab plan / blend shapes stored next to character packs.
+"""Track Lab plan / blend shapes: the desk's working plan and each character's.
 
-Location: ``models/blendshapes/``
+- ``models/blendshapes/current.json`` — latest plan copied from Track Lab
+  (read-only for the lab); stays on this machine.
+- A character's snapshot (taken when it was created or last repaired) lives in
+  its ``.vtm`` as ``blendshapes.json`` so it travels with the pack. Older
+  installs kept it as ``models/blendshapes/<character-id>.json``; the first
+  read folds that file into the pack and deletes it. Without a pack the
+  ``<character-id>.json`` file is still used.
 
-- ``current.json`` — latest plan copied from Track Lab (read-only for the lab)
-- ``<character-id>.json`` — snapshot taken when that character was created
-  or last repaired
+A plan made on this desk has ``origin: "desk"``; a plan that arrived inside an
+imported pack is marked ``origin: "imported"``. An imported plan is the
+creator's and is never reported as needing repair just because this desk's
+lab plan differs (see :func:`compatibility`).
 
 VTM Noble reads lab shapes and writes these files. It does not write shapes
 back into Track Lab.
@@ -22,7 +29,9 @@ from .paths import blendshapes_dir, display_path
 FORMAT_ID = "vtm-blendshapes"
 FORMAT_VERSION = 1
 CURRENT_ID = "current"
-SHAPE_IDS = ("rest", "smile", "sad", "A", "I", "U", "E", "O")
+ORIGIN_DESK = "desk"
+ORIGIN_IMPORTED = "imported"
+SHAPE_IDS = ("rest", "smile", "sad", "A", "I", "U", "E")  # same list as Track Lab's authored shapes (track_lab/backend/presets.py PRESET_IDS)
 INCOMPATIBLE_MESSAGE = (
     "Incompatible. This character's blend shapes do not match the current plan. "
     "Would you like us to repair this character?"
@@ -166,17 +175,45 @@ def empty_plan(ident: str = CURRENT_ID) -> dict[str, Any]:
     }
 
 
-def write_plan(path: Path | str, shapes: object, *, ident: str) -> dict[str, Any]:
-    dest = Path(path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+def plan_payload(shapes: object, *, ident: str, origin: str = "") -> dict[str, Any]:
     norm = normalize_shapes(shapes)
-    payload = {
+    payload: dict[str, Any] = {
         "format": FORMAT_ID,
         "version": FORMAT_VERSION,
-        "id": str(ident or dest.stem),
+        "id": str(ident),
         "fingerprint": fingerprint(norm),
         "shapes": norm,
     }
+    if origin:
+        payload["origin"] = str(origin)
+    return payload
+
+
+def _plan_from_raw(raw: object, ident: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return empty_plan(ident)
+    shapes = normalize_shapes(raw.get("shapes"))
+    out: dict[str, Any] = {
+        "format": FORMAT_ID,
+        "version": FORMAT_VERSION,
+        "id": str(raw.get("id") or ident),
+        # Recomputed, not read back: a plan saved with a since-dropped shape (O)
+        # carries a fingerprint over shapes it no longer has.
+        "fingerprint": fingerprint(shapes),
+        "shapes": shapes,
+    }
+    origin = str(raw.get("origin") or "")
+    if origin:
+        out["origin"] = origin
+    return out
+
+
+def write_plan(
+    path: Path | str, shapes: object, *, ident: str, origin: str = ""
+) -> dict[str, Any]:
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = plan_payload(shapes, ident=str(ident or dest.stem), origin=origin)
     dest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
 
@@ -189,17 +226,48 @@ def read_plan(path: Path | str) -> dict[str, Any]:
         raw = json.loads(file_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return empty_plan(file_path.stem)
-    if not isinstance(raw, dict):
-        return empty_plan(file_path.stem)
-    shapes = normalize_shapes(raw.get("shapes"))
-    ident = str(raw.get("id") or file_path.stem)
-    return {
-        "format": FORMAT_ID,
-        "version": FORMAT_VERSION,
-        "id": ident,
-        "fingerprint": str(raw.get("fingerprint") or fingerprint(shapes)),
-        "shapes": shapes,
-    }
+    return _plan_from_raw(raw, file_path.stem)
+
+
+def character_pack_path(ident: str) -> Path | None:
+    """The character's ``.vtm`` by exact id (no name search), or None."""
+    from .paths import characters_dir
+
+    stem = Path(str(ident or "").strip()).name
+    if not stem or stem in {".", ".."}:
+        return None
+    folder = characters_dir()
+    for cand in (folder / f"{stem}.vtm", folder / stem / f"{stem}.vtm"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _fold_legacy_plan(ident: str, pack: Path) -> None:
+    """Move ``models/blendshapes/<id>.json`` into the pack once, then delete it.
+
+    A plan already inside the pack wins; the file only fills an empty one.
+    """
+    from .character_pack import CharacterPackError, upgrade_character_pack
+
+    legacy = character_plan_path(ident)
+    if not legacy.is_file():
+        return
+    plan = read_plan(legacy)
+    if has_plan(plan.get("shapes")):
+        payload = plan_payload(
+            plan["shapes"],
+            ident=pack.stem,
+            origin=str(plan.get("origin") or ORIGIN_DESK),
+        )
+        try:
+            upgrade_character_pack(pack, blendshapes=payload)
+        except (CharacterPackError, OSError):
+            return  # keep the file; the pack could not take it
+    try:
+        legacy.unlink()
+    except OSError:
+        pass
 
 
 def load_current() -> dict[str, Any]:
@@ -207,18 +275,55 @@ def load_current() -> dict[str, Any]:
 
 
 def load_character_plan(ident: str) -> dict[str, Any]:
-    return read_plan(character_plan_path(ident))
+    from .character_pack import CharacterPackError, read_pack_blendshapes
+
+    pack = character_pack_path(ident)
+    if pack is None:
+        return read_plan(character_plan_path(ident))
+    _fold_legacy_plan(ident, pack)
+    try:
+        raw = read_pack_blendshapes(pack)
+    except (CharacterPackError, OSError):
+        return read_plan(character_plan_path(ident))
+    return _plan_from_raw(raw, pack.stem) if raw else empty_plan(pack.stem)
 
 
 def save_current(shapes: object) -> dict[str, Any]:
     return write_plan(current_plan_path(), shapes, ident=CURRENT_ID)
 
 
-def save_character(ident: str, shapes: object) -> dict[str, Any]:
-    return write_plan(character_plan_path(ident), shapes, ident=ident)
+def save_character(ident: str, shapes: object, *, origin: str = ORIGIN_DESK) -> dict[str, Any]:
+    """Store a character's plan: inside its ``.vtm`` when there is one."""
+    from .character_pack import write_pack_blendshapes
+
+    pack = character_pack_path(ident)
+    if pack is None:
+        return write_plan(character_plan_path(ident), shapes, ident=ident, origin=origin)
+    payload = plan_payload(shapes, ident=pack.stem, origin=origin)
+    write_pack_blendshapes(pack, payload)
+    legacy = character_plan_path(ident)
+    if legacy.is_file():
+        legacy.unlink()
+    return payload
+
+
+def mark_plan_imported(pack: Path | str) -> bool:
+    """An imported pack's plan is the creator's: tag it so repair never replaces it."""
+    from .character_pack import read_pack_blendshapes, write_pack_blendshapes
+
+    path = Path(pack)
+    raw = read_pack_blendshapes(path)
+    plan = _plan_from_raw(raw, path.stem) if raw else empty_plan(path.stem)
+    if not has_plan(plan.get("shapes")) or plan.get("origin") == ORIGIN_IMPORTED:
+        return False
+    write_pack_blendshapes(
+        path, plan_payload(plan["shapes"], ident=path.stem, origin=ORIGIN_IMPORTED)
+    )
+    return True
 
 
 def delete_character_plan(ident: str) -> None:
+    """Drop the legacy plan file. A pack's own plan goes with the pack."""
     path = character_plan_path(ident)
     if path.is_file():
         path.unlink()
@@ -249,11 +354,21 @@ def apply_current_to_character(ident: str) -> dict[str, Any]:
     current = load_current()
     if not has_plan(current.get("shapes")):
         raise ValueError("No current blend shapes to repair this character with")
+    mine = load_character_plan(ident)
+    if has_plan(mine.get("shapes")) and mine.get("origin") == ORIGIN_IMPORTED:
+        raise ValueError("This character's blend shapes came with its pack and are kept")
     return save_character(ident, current["shapes"])
 
 
 def compatibility(ident: str, current: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Compare a character snapshot to the current plan."""
+    """Compare a character snapshot to the current plan.
+
+    Repair is offered only when this desk's lab plan has moved on from a plan
+    the character took from this desk, or the character has none while the
+    desk has one. A plan that came inside an imported pack is the creator's:
+    a different (or missing) plan here does not break it and repair must not
+    replace it. ``matches_current`` still reports whether the two agree.
+    """
     plan = current if isinstance(current, dict) else load_current()
     cur_shapes = plan.get("shapes") if isinstance(plan.get("shapes"), dict) else {}
     char = load_character_plan(ident)
@@ -262,16 +377,19 @@ def compatibility(ident: str, current: dict[str, Any] | None = None) -> dict[str
     character_fp = fingerprint(char_shapes)
     has_current = bool(current_fp)
     has_character = bool(character_fp)
-    compatible = (not has_current) or (
-        has_character and plans_match(cur_shapes, char_shapes)
-    )
+    imported = has_character and char.get("origin") == ORIGIN_IMPORTED
+    matches = has_current and has_character and plans_match(cur_shapes, char_shapes)
+    compatible = (not has_current) or imported or matches
+    pack = character_pack_path(ident)
     return {
-        "compatible": compatible,
+        "compatible": bool(compatible),
         "has_current_plan": has_current,
         "has_character_plan": has_character,
+        "imported_plan": bool(imported),
+        "matches_current": bool(matches),
         "current_fingerprint": current_fp,
         "character_fingerprint": character_fp,
-        "path": display_path(character_plan_path(ident)),
+        "path": display_path(pack if pack is not None else character_plan_path(ident)),
         "current_path": display_path(current_plan_path()),
     }
 

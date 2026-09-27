@@ -93,12 +93,59 @@ def test_keys_roundtrip(tmp_path) -> None:
         name="Lip",
     )
     ref = tmp_path / "hero.vtm"
-    ref.write_bytes(b"x")
-    save_keys(ref, [key])
+    _write_pack(ref)
+    assert save_keys(ref, [key]) == ref
+    assert not (tmp_path / "hero.keys.json").exists()
     loaded = load_keys(ref)
     assert len(loaded) == 1
     assert loaded[0]["name"] == "Lip"
     assert 21 in loaded[0]["slots"]
+    from backend.character_pack import read_character_pack
+
+    assert read_character_pack(ref).pose_keys[0]["name"] == "Lip"
+
+    still = tmp_path / "hero.png"
+    save_keys(still, [key])
+    assert (tmp_path / "hero_pose_keys.json").is_file()
+    assert load_keys(still)[0]["name"] == "Lip"
+
+
+def _write_pack(dest) -> None:
+    import numpy as np
+
+    from backend.character_pack import write_character_pack
+
+    write_character_pack(
+        dest,
+        name="Hero",
+        preview_rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        keypoints=neutral_keypoints(),
+        ref_latent=np.zeros((4, 8, 8), dtype=np.float16),
+        ref_face_latent=None,
+        image_size=64,
+        skip_crop=True,
+    )
+
+
+def test_legacy_key_sidecar_folds_into_pack_once(tmp_path) -> None:
+    import json
+
+    from backend.character_pack import read_character_pack, write_pack_pose_keys
+
+    ref = tmp_path / "hero.vtm"
+    _write_pack(ref)
+    sidecar = tmp_path / "hero.keys.json"
+    sidecar.write_text(json.dumps({"keys": [{"id": "a", "delta": [[0.1, 0.0]]}]}), encoding="utf-8")
+    assert [k["id"] for k in load_keys(ref)] == ["a"]
+    assert not sidecar.exists()
+    assert read_character_pack(ref).version == 2
+    assert [k["id"] for k in read_character_pack(ref).pose_keys] == ["a"]
+
+    # Keys already in the pack win over a stale sidecar (which is still removed).
+    write_pack_pose_keys(ref, [{"id": "pack", "delta": [[0.0, 0.2]]}])
+    sidecar.write_text(json.dumps({"keys": [{"id": "old", "delta": [[1, 1]]}]}), encoding="utf-8")
+    assert [k["id"] for k in load_keys(ref)] == ["pack"]
+    assert not sidecar.exists()
 
 
 def test_rest_bake_still_isolates_pointer_delta() -> None:

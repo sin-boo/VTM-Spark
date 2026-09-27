@@ -159,3 +159,42 @@ def test_old_pack_adopts_current_limiters(tmp_path: Path, monkeypatch) -> None:
     rt._status["travel_box"] = {**default_travel_box(), "down": 0.4}
     StreamRuntime._apply_character_limiters(rt)
     assert read_character_pack(tmp_path / "old.vtm").fit["travel_box"]["down"] == 0.4
+
+
+def test_sidecar_folds_into_pack_once_and_is_deleted(tmp_path: Path) -> None:
+    import json
+    import zipfile
+
+    from backend.character_fit import character_fit_path
+    from backend.character_pack import FIT_NAME, peek_character_manifest
+
+    dest = tmp_path / "hero.vtm"
+    write_character_pack(dest, **_tiny_pack_payload(), fit={"travel_box": {**default_travel_box(), "left": 0.2}})
+    legacy = character_fit_path("hero", dest_dir=tmp_path)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        json.dumps({"travel_box": {"left": 0.8}, "skeleton": [{"id": 31, "x": 1.0, "y": 2.0}]}),
+        encoding="utf-8",
+    )
+    fit = read_character_fit("hero", dest_dir=tmp_path)
+    assert not legacy.exists()
+    assert fit["travel_box"]["left"] == 0.2  # the pack is the source of truth
+    assert fit["skeleton"][0]["id"] == 31
+    with zipfile.ZipFile(dest) as zf:
+        inside = json.loads(zf.read(FIT_NAME))
+    assert inside == fit
+    assert peek_character_manifest(dest)["version"] == 2
+    stamp = dest.stat().st_mtime_ns
+    assert read_character_fit("hero", dest_dir=tmp_path) == fit
+    assert dest.stat().st_mtime_ns == stamp  # later reads do not rewrite
+
+
+def test_sidecar_kept_when_pack_is_broken(tmp_path: Path) -> None:
+    from backend.character_fit import character_fit_path
+
+    (tmp_path / "hero.vtm").write_bytes(b"not a zip")
+    legacy = character_fit_path("hero", dest_dir=tmp_path)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text('{"hair": []}', encoding="utf-8")
+    assert read_character_fit("hero", dest_dir=tmp_path) == {"hair": []}
+    assert legacy.exists()

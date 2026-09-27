@@ -202,7 +202,7 @@ function MouthSection({
       </div>
       {editing ? (
         <ul className="presets">
-          {presets.filter((preset) => preset.id !== 'O').map((preset) => (
+          {presets.map((preset) => (
             <li key={preset.id}>
               <label className={selected === preset.id ? 'on' : ''}>
                 <input

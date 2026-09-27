@@ -20,7 +20,7 @@ from harness.points import BODY_END, BODY_START, FACE_COUNT, NUM_KEYPOINTS
 
 from .paths import REPO
 
-SHAPES = ("smile", "sad", "A", "I", "U", "E", "O")
+SHAPES = ("smile", "sad", "A", "I", "U", "E")
 BENCHMARK = REPO.parent / "post-prosesing" / "fine-tuning" / "benchmark" / "recordings"
 
 

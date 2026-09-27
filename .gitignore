@@ -41,6 +41,8 @@ models/blendshapes/**
 models/*.lock
 models/extra_checkpoint_dirs.json
 models/session.json
+# Measured load / warmup stage times on this PC (progress bars)
+models/load_timings.json
 
 # Leftover pre-layout folder
 /data/

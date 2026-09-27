@@ -6,6 +6,9 @@ import {
   type CameraInfo,
   type CatalogOffer,
   type CharacterCard,
+  type CharacterExportResult,
+  type CharacterInfo,
+  type CharacterMeta,
   type Checkpoint,
   type LabFeel as LabFeelValues,
   type LabIfm,
@@ -41,6 +44,11 @@ type Props = {
   ) => Promise<CharacterLoadResult | void | undefined>
   onRemoveCharacter: (id: string) => void
   onRenameCharacter: (id: string, name: string) => void
+  onImportCharacter: (file: File) => Promise<CharacterCard>
+  onExportCharacter: (id: string, name: string) => Promise<CharacterExportResult>
+  onRevealCharacter: (id: string) => Promise<unknown>
+  onCharacterInfo: (id: string) => Promise<CharacterInfo>
+  onCharacterMeta: (meta: CharacterMeta) => Promise<CharacterCard>
   onSettings: (patch: Partial<AppStatus>) => void
   onToggleTracking: () => void
   onCalibrate: () => void
@@ -66,21 +74,32 @@ function clampSteps(raw: string): number | null {
   return Math.max(1, Math.min(50, Math.round(n)))
 }
 
-const STREAM_DEFAULTS = {
+/** How the character looks: the model's own knobs. */
+const TUNE_DEFAULTS = {
   steps: 1,
   pose_cfg: 1,
   id_cfg: 1,
   frame_blend: 0.58,
-  inbetweens: 1,
-  interpolate: true,
   hold_last: true,
 }
+
+/** How fast it runs and how much GPU it takes. Compile is left alone: turning it on recompiles. */
+const PERF_DEFAULTS = {
+  max_fps: 0,
+  interpolate: true,
+  inbetweens: 1,
+}
+
+const STREAM_DEFAULTS = { ...TUNE_DEFAULTS, ...PERF_DEFAULTS }
 
 const HOLD_LAST_TITLE =
   'Start each gen from a light mix of the last picture. Small moves stay consistent; a turn or new character drops the mix so the old face does not stick. Off = every frame is a fresh still from noise.'
 
 const INBETWEENS_TITLE =
   'How many extra pictures to print between generated keys. 0 = keys only. 1 = one mid frame. Ignored when Interpolate is off.'
+
+const MAX_FPS_TITLE =
+  'Cap on generated frames per second. The GPU idles between frames, so a cap leaves headroom for games or OBS. Off = as fast as the GPU goes.'
 
 const INTERPOLATE_TITLE =
   'Print optical-flow frames between DiT keys so motion looks smoother. Off = keys only. Runs off the generate thread so it does not steal Generate FPS.'
@@ -223,6 +242,10 @@ export function ControlRail(props: Props) {
     }
   }
 
+  function resetPerfDefaults() {
+    props.onSettings({ ...PERF_DEFAULTS })
+  }
+
   function resetStreamDefaults() {
     if (cfgTimer.current != null) window.clearTimeout(cfgTimer.current)
     cfgDrag.current = false
@@ -232,7 +255,7 @@ export function ControlRail(props: Props) {
       id_cfg: STREAM_DEFAULTS.id_cfg,
       frame_blend: STREAM_DEFAULTS.frame_blend,
     })
-    props.onSettings({ ...STREAM_DEFAULTS })
+    props.onSettings({ ...TUNE_DEFAULTS })
   }
 
   function commitCfg(key: 'pose_cfg' | 'id_cfg' | 'frame_blend', value: number) {
@@ -495,9 +518,9 @@ export function ControlRail(props: Props) {
                   </div>
                 ) : (
                   <label className="field track-cam-field">
-                    <span>Camera</span>
                     <select
                       className="camera-select"
+                      aria-label="Camera"
                       value={trackCameraIndex}
                       onChange={(e) => props.onCamera(Number(e.target.value))}
                       onFocus={() => {
@@ -559,6 +582,11 @@ export function ControlRail(props: Props) {
               onRemove={props.onRemoveCharacter}
               onRename={props.onRenameCharacter}
               onCreate={props.onCreateCharacter}
+              onImport={props.onImportCharacter}
+              onExport={props.onExportCharacter}
+              onReveal={props.onRevealCharacter}
+              onInfo={props.onCharacterInfo}
+              onMeta={props.onCharacterMeta}
               onRefresh={props.onRefreshCharacters}
               travel={s?.travel_box}
               onTravel={(travel_box) => props.onSettings({ travel_box })}
@@ -587,7 +615,7 @@ export function ControlRail(props: Props) {
             {showProgress &&
             (s?.progress_kind === 'warmup' || s?.progress_kind === 'compile') ? (
               <ProgressMeter
-                label={s.progress_label || 'Compiling… please wait'}
+                label={s.progress_label || 'Preparing stream'}
                 value={progress}
               />
             ) : null}
@@ -632,14 +660,6 @@ export function ControlRail(props: Props) {
             {s?.virtual_cam_error ? (
               <p className="status-error">{s.virtual_cam_error}</p>
             ) : null}
-            {s?.fast_warming ? (
-              <p className="hint">
-                Please wait —{' '}
-                {s?.compile_model
-                  ? 'torch.compile is still running.'
-                  : 'Fast warmup is still running.'}
-              </p>
-            ) : null}
           </section>
           </div>
         ) : (
@@ -651,7 +671,7 @@ export function ControlRail(props: Props) {
                   type="button"
                   className="btn ghost compact"
                   onClick={resetStreamDefaults}
-                  title="Steps 1, Pose follow 1.0, Reference lock 1.0, Snap 0.58, Inbetweens 1, Hold last on"
+                  title="Steps 1, Pose follow 1.0, Reference lock 1.0, Snap 0.58, Hold last on"
                 >
                   Defaults
                 </button>
@@ -693,6 +713,46 @@ export function ControlRail(props: Props) {
                     <em className="mono">{cfgDraft[row.key].toFixed(2)}</em>
                   </li>
                 ))}
+              </ul>
+              <div className="stream-compile">
+                <Toggle
+                  label="Hold last"
+                  checked={s?.hold_last !== false}
+                  onChange={(v) => props.onSettings({ hold_last: v })}
+                  title={HOLD_LAST_TITLE}
+                />
+              </div>
+            </section>
+            <section className="group stream-perf">
+              <div className="group-head">
+                <h2 className="group-title">Performance</h2>
+                <button
+                  type="button"
+                  className="btn ghost compact"
+                  onClick={resetPerfDefaults}
+                  title="Max FPS off, Interpolate on, Inbetweens 1"
+                >
+                  Defaults
+                </button>
+              </div>
+              <ul className="lab-sliders stream-sliders">
+                <li>
+                  <span title={MAX_FPS_TITLE}>Max FPS</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={60}
+                    step={1}
+                    value={s?.max_fps ?? STREAM_DEFAULTS.max_fps}
+                    title={MAX_FPS_TITLE}
+                    onChange={(e) => props.onSettings({ max_fps: Number(e.target.value) })}
+                  />
+                  <em className="mono">
+                    {(s?.max_fps ?? STREAM_DEFAULTS.max_fps) > 0
+                      ? s?.max_fps ?? STREAM_DEFAULTS.max_fps
+                      : 'Off'}
+                  </em>
+                </li>
                 <li>
                   <span title={INBETWEENS_TITLE}>Inbetweens</span>
                   <input
@@ -710,9 +770,6 @@ export function ControlRail(props: Props) {
                   <em className="mono">{s?.inbetweens ?? STREAM_DEFAULTS.inbetweens}</em>
                 </li>
               </ul>
-            </section>
-            <section className="group">
-              <h2 className="group-title">Output</h2>
               <div className="stream-compile">
                 <Toggle
                   label="Interpolate"
@@ -721,16 +778,10 @@ export function ControlRail(props: Props) {
                   title={INTERPOLATE_TITLE}
                 />
                 <Toggle
-                  label="Hold last"
-                  checked={s?.hold_last !== false}
-                  onChange={(v) => props.onSettings({ hold_last: v })}
-                  title={HOLD_LAST_TITLE}
-                />
-                <Toggle
                   label="Compile"
                   checked={Boolean(s?.compile_model)}
                   onChange={(v) => props.onSettings({ compile_model: v })}
-                  title="torch.compile the DiT. Queued until a model and reference are ready. First on can take a few minutes; off uses eager Fast."
+                  title="Speed boost: builds a version of the model tuned for your GPU when the stream starts. The first build can take a minute; off runs at normal speed."
                   light={
                     !s?.compile_model
                       ? 'off'
@@ -745,16 +796,16 @@ export function ControlRail(props: Props) {
                   lightTitle={
                     s?.compile_detail ||
                     (s?.compile_on
-                      ? 'torch.compile verified'
+                      ? 'Speed boost on'
                       : s?.fast_warming
-                        ? 'Compiling / testing…'
+                        ? 'Building the speed boost'
                         : s?.compile_status === 'fail'
-                          ? 'torch.compile unavailable — eager Fast'
+                          ? 'Speed boost unavailable — running at normal speed'
                           : s?.compile_status === 'skip'
-                            ? 'torch.compile skipped (CPU)'
+                            ? 'Speed boost needs an NVIDIA GPU'
                             : s?.compile_model
-                              ? 'torch.compile pending — apply a reference to test'
-                              : 'torch.compile off')
+                              ? 'Speed boost builds when the stream starts'
+                              : 'Speed boost off')
                   }
                 />
               </div>

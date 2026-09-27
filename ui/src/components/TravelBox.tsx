@@ -174,11 +174,6 @@ export function TravelBox(props: Props) {
           />
         </div>
       </div>
-      <p className="hint travel-hint">
-        Walls are fixed to the character's rest pose. The head and the body each stop at their own wall;
-        turn and tilt have a cap per side. Drag these while tracking is on — the character takes the new
-        limit immediately.
-      </p>
 
       <div className="travel-limits">
         <div className="travel-block">

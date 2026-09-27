@@ -1,28 +1,23 @@
 type Props = {
   fps: number
   genFps?: number
-  timing: string
   checkpoint: string
 }
 
-export function MetricStrip({ fps, genFps = 0, timing, checkpoint }: Props) {
+export function MetricStrip({ fps, genFps = 0, checkpoint }: Props) {
   return (
     <div className="metrics">
       <div className="metric">
-        <span className="metric-label" title="Pictures that landed on the preview, including in-betweens">
-          Shown
+        <span className="metric-label" title="Frames shown on the preview per second, including in-betweens">
+          FPS
         </span>
         <span className="metric-value mono">{fps > 0 ? fps.toFixed(1) : '—'}</span>
       </div>
       <div className="metric">
-        <span className="metric-label" title="Generated keys that landed on the preview. Shown should be at least this.">
-          Generated
+        <span className="metric-label" title="Frames the model generated per second. FPS should be at least this.">
+          Gen
         </span>
         <span className="metric-value mono">{genFps > 0 ? genFps.toFixed(1) : '—'}</span>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Timing</span>
-        <span className="metric-value mono">{timing || '—'}</span>
       </div>
       <div className="metric">
         <span className="metric-label">Model</span>

@@ -189,3 +189,13 @@ def test_start_split_into_install_and_run() -> None:
     menu = _start_menu_text()
     assert '[ValidateSet("install", "run")]' in menu
     assert "function Show-Menu" not in menu
+
+
+def test_run_stub_never_opens_a_console_on_its_own() -> None:
+    stub = (_root() / "backend" / "packaging" / "run-stub.cs").read_text(encoding="utf-8")
+    # Children run hidden; a failed start asks in a dialog before the console shows.
+    assert "CreateNoWindow = true" in stub
+    assert "MessageBoxW" in stub
+    assert "kill-orphans.ps1" in stub
+    assert "npm run build" in stub
+    assert stub.count('-Action run"') == 1

@@ -79,10 +79,12 @@
   overflow: hidden;
 }
 
+/* The one part of the desk rail that gives: when height runs short the
+   picture shrinks, so the controls above and the meters below never scroll. */
 .char-stage {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   min-height: 0;
   margin: 0 6px;
   background: #2b2b2b;
@@ -108,6 +110,20 @@
   cursor: pointer;
 }
 
+.char-preview:not(.is-empty) {
+  position: relative;
+  flex: 0 1 auto;
+  min-height: 88px;
+  aspect-ratio: 1;
+}
+
+.char-preview:not(.is-empty) img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
 button.char-preview:hover:not(:disabled),
 button.char-preview:focus-visible {
   box-shadow: inset 0 0 0 1px var(--mark);
@@ -122,7 +138,8 @@ button.char-preview:focus-visible {
 }
 
 .char-preview.is-empty {
-  min-height: 148px;
+  flex: 0 1 auto;
+  min-height: 88px;
   aspect-ratio: 1;
 }
 
@@ -183,6 +200,8 @@ button.char-preview:focus-visible {
   border: 1px solid var(--line);
 }
 
+/* Rows stay packed at a fixed height; when the box is shorter than the list,
+   only this list scrolls (the rest of the desk rail never does). */
 .desk-mix .lab-meters {
   flex: 1 1 auto;
   min-height: 0;
@@ -198,10 +217,12 @@ button.char-preview:focus-visible {
   scrollbar-gutter: stable;
 }
 
+/* Rows may grow a little (to 22 px) to take up spare height, never more:
+   past that they read as spread apart rather than a list. */
 .desk-mix .lab-meters li {
-  flex: 0 0 18px;
+  flex: 1 0 18px;
   min-height: 18px;
-  max-height: 18px;
+  max-height: 22px;
   padding-right: 4px;
 }
 
@@ -224,6 +245,10 @@ button.char-preview:focus-visible {
   background: transparent;
 }
 
+.desk-mix .lab-meters .meter-kicker:first-child {
+  margin-top: 0;
+}
+
 .desk-mix .lab-meters .meter-kicker::before,
 .desk-mix .lab-meters .meter-kicker::after {
   content: '';
@@ -231,10 +256,6 @@ button.char-preview:focus-visible {
   min-width: 12px;
   height: 1px;
   background: var(--line);
-}
-
-.desk-mix .lab-meters .meter-kicker:first-child {
-  margin-top: 0;
 }
 
 .desk-mix .lab-meters i {
@@ -301,12 +322,19 @@ button.char-preview:focus-visible {
 }
 
 .rail-desk > .desk-mix {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 1 0;
+  min-height: 96px;
 }
 
 .rail-desk > .rail-controls {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.group > .lab-feel {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .rail-controls {
@@ -424,6 +452,33 @@ button.char-preview:focus-visible {
   color: var(--mute);
   font-size: 11px;
   flex-shrink: 0;
+}
+
+.progress-secs {
+  margin-right: 8px;
+  opacity: 0.7;
+}
+
+.progress-quip {
+  font-style: italic;
+  animation: progress-quip-in 280ms ease-out;
+}
+
+@keyframes progress-quip-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-quip {
+    animation: none;
+  }
 }
 
 .progress-track {
@@ -731,11 +786,6 @@ button.char-preview:focus-visible {
   gap: 8px;
 }
 
-.travel-hint {
-  margin: 0;
-  color: var(--mute);
-  font-size: 11px;
-}
 
 .travel-swatch {
   width: 10px;
@@ -945,7 +995,8 @@ button.char-preview:focus-visible {
   background: radial-gradient(circle at center, #6a6a6a 0 4px, transparent 4.5px);
 }
 
-.stream-tune {
+.stream-tune,
+.stream-perf {
   gap: 6px;
 }
 
@@ -1933,23 +1984,119 @@ button.char-preview:focus-visible {
   flex: 0 0 auto;
 }
 
-@media (min-height: 880px) {
-  .desk-mix .lab-meters {
-    justify-content: space-evenly;
+.char-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 10px;
+  background: var(--slate);
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+}
+
+.char-details-main {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.char-details-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.char-details-fields textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 56px;
+  padding: 4px 6px;
+  resize: vertical;
+  background: #262626;
+  border: 1px solid var(--line-soft);
+  border-radius: 0;
+  color: var(--paper);
+  font: inherit;
+  transition: border-color var(--ease);
+}
+
+.char-details-fields textarea:hover {
+  border-color: #5a5a5a;
+}
+
+.char-details-fields textarea:focus-visible {
+  outline: 1px solid var(--mark);
+  outline-offset: 1px;
+}
+
+.char-details-warn {
+  margin: 0;
+  padding: 6px 8px;
+  color: #e0c080;
+  font-size: 11px;
+  background: #3a3326;
+  border: 1px solid #6a5a36;
+}
+
+.char-details-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  background: #2a2a2a;
+  border: 1px solid var(--line);
+}
+
+.char-details-facts section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.char-details-facts dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.char-details-facts dt {
+  color: var(--mute);
+}
+
+.char-details-facts dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.char-details-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.char-details-actions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .char-details-main {
+    grid-template-columns: 1fr;
   }
 
-  .desk-mix .lab-meters li {
-    flex: 1 1 18px;
-    max-height: 28px;
-  }
-
-  .desk-mix .lab-meters .meter-kicker {
-    flex: 0 0 16px;
-    max-height: 22px;
-  }
-
-  .desk-mix .lab-meters i {
-    height: 5px;
+  .char-details-facts {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -9,7 +9,6 @@ export type MixWeights = {
   I: number
   U: number
   E: number
-  O: number
   smile: number
   sad: number
   rest?: number

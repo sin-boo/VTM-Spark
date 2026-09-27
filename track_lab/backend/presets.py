@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PRESET_PATH = ROOT / "output" / "mouth_presets.json"
 
 MOUTH_SLOTS = tuple(range(20, 28))
-VOWEL_IDS = ("A", "I", "U", "E", "O")
+VOWEL_IDS = ("A", "I", "U", "E")
 FORM_IDS = ("smile", "sad")
 PRESET_IDS = ("rest",) + FORM_IDS + VOWEL_IDS
-# O still drives live speech. It is not an authored blend shape.
-AUTHOR_IDS = tuple(name for name in PRESET_IDS if name != "O")
+# Every shape in PRESET_IDS is authored. O was folded into U (rounded lips).
+AUTHOR_IDS = PRESET_IDS
 PRESET_LABELS = {
     "rest": "Rest",
     "smile": "Smile",
@@ -24,7 +24,6 @@ PRESET_LABELS = {
     "I": "I",
     "U": "U",
     "E": "E",
-    "O": "O",
 }
 
 
@@ -138,12 +137,12 @@ def _along(
 
 
 # Independent tracking setups. Each bank has its own geometry scale, then
-# all banks mix. Corners (smile/sad) stay coarse; spread/round (I E / U O)
-# can use the smaller lip differences without being swamped by Oh/Smile.
+# all banks mix. Corners (smile/sad) stay coarse; spread/round (I E / U)
+# can use the smaller lip differences without being swamped by Smile.
 MOUTH_BANKS = (
     ("corners", "Corners", ("smile", "sad")),
     ("spread", "Spread", ("I", "E")),
-    ("round", "Round", ("U", "O")),
+    ("round", "Round", ("U",)),
     ("open", "Open", ("A",)),
 )
 _STALE_IDS = {"closed", "open", "mouth_open", "mouth_closed"}
@@ -209,7 +208,6 @@ _DRAFT = {
     "I": {"open": 0.07, "spread": 0.20, "lift": 0.04},
     "U": {"open": 0.12, "spread": -0.16, "lift": 0.0},
     "E": {"open": 0.12, "spread": 0.16, "lift": 0.02},
-    "O": {"open": 0.24, "spread": -0.12, "lift": 0.0},
 }
 _OPEN_FRAC = 0.46
 _OPEN_UP = ((20, 0.45), (21, 0.50), (22, 0.45))
@@ -243,13 +241,13 @@ def lip_gap(pts: np.ndarray | None) -> float:
 
 
 def open_amount(weights: dict[str, float] | None) -> float:
-    """How far the live mouth should split. A is the jaw; O/E still open."""
+    """How far the live mouth should split. A is the jaw; U/E still open."""
     if not weights:
         return 0.0
     a = float(np.clip(weights.get("A") or 0.0, 0.0, 1.0))
-    o = float(np.clip(weights.get("O") or 0.0, 0.0, 1.0))
+    u = float(np.clip(weights.get("U") or 0.0, 0.0, 1.0))
     e = float(np.clip(weights.get("E") or 0.0, 0.0, 1.0))
-    return float(np.clip(a + 0.45 * o + 0.20 * e, 0.0, 1.0))
+    return float(np.clip(a + 0.20 * u + 0.20 * e, 0.0, 1.0))
 
 
 def apply_open_offset(
@@ -283,7 +281,7 @@ def apply_open_offset(
 
 
 def draft_mouth(name: str, rest: np.ndarray) -> np.ndarray:
-    """Move rest lips into a starting A / I / U / E / O / smile / sad pose."""
+    """Move rest lips into a starting A / I / U / E / smile / sad pose."""
     out = copy_pts(rest)
     spec = _DRAFT.get(name)
     if spec is None or len(out) < 28:

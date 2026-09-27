@@ -72,6 +72,10 @@ STREAM_INBETWEENS = 1
 STREAM_MAX_INBETWEENS = 3
 # Master switch for print / inbetween. Slider still picks the count.
 STREAM_INTERPOLATE = True
+# Cap on generated keys per second (0 = as fast as the GPU goes). Idle time
+# between keys is real idle time, so a cap leaves GPU for other apps.
+STREAM_MAX_GEN_FPS = 0
+STREAM_MAX_GEN_FPS_LIMIT = 60
 STREAM_MIN_BLEND = 0.05
 STREAM_MAX_BLEND = 1.0
 # Start the next DiT sample from the last generated latent (img2img hold).
@@ -124,6 +128,29 @@ def interpolate_on(value: object) -> bool:
     if value is None:
         return STREAM_INTERPOLATE
     return bool(value)
+
+
+def _clip_max_fps(value: object) -> int:
+    """0 = uncapped; otherwise 1..STREAM_MAX_GEN_FPS_LIMIT keys per second."""
+    try:
+        raw = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return STREAM_MAX_GEN_FPS
+    if raw <= 0:
+        return 0
+    return min(raw, STREAM_MAX_GEN_FPS_LIMIT)
+
+
+def gen_hold_s(max_fps: object, last_start: float, now: float, *, batch: int = 1) -> float:
+    """Seconds to wait before the next DiT call so keys stay under ``max_fps``.
+
+    A batch×2 call yields two keys, so it is allowed twice the interval.
+    """
+    cap = _clip_max_fps(max_fps)
+    if cap <= 0 or last_start <= 0.0:
+        return 0.0
+    interval = float(max(1, int(batch))) / float(cap)
+    return max(0.0, interval - (float(now) - float(last_start)))
 
 
 def effective_inbetweens(enabled: object, count: object) -> int:
@@ -1033,6 +1060,19 @@ from inference_keypoint import (  # noqa: E402
 )
 
 
+# ``on_stage(key, label)``: a named step of a load or warmup has started.
+StageCallback = Callable[[str, str], None]
+
+
+def _announce(on_stage: StageCallback | None, key: str, label: str) -> None:
+    if on_stage is None:
+        return
+    try:
+        on_stage(key, label)
+    except Exception:
+        pass
+
+
 def _enable_tf32() -> None:
     if not torch.cuda.is_available():
         return
@@ -1255,31 +1295,19 @@ class StreamEngine:
 
     @property
     def compile_detail(self) -> str:
-        """Human reason for the compile light (UI tooltip / status line)."""
+        """Plain-words reason for the Compile light (UI tooltip)."""
         st = self.compile_status
         if st == "on":
-            mode = self._compile_mode_active or STREAM_COMPILE_MODE
-            return f"torch.compile verified ({mode})"
+            return "Speed boost on"
         if st == "pending":
-            return "torch.compile pending — apply a reference to compile + test"
+            return "Speed boost builds when the stream starts"
         if st == "skip":
-            return "torch.compile skipped (CUDA required)"
+            return "Speed boost needs an NVIDIA GPU"
         if st == "off":
-            if not self.compile_model:
-                return "torch.compile off"
-            if not self.fast_mode:
-                return "Fast off — compile idle"
-            return "torch.compile off"
-        if not hasattr(torch, "compile"):
-            return "torch.compile unavailable in this PyTorch build"
+            return "Speed boost off"
         if not _triton_available():
-            return (
-                "triton missing — install triton-windows "
-                "(pip install \"triton-windows>=3.6,<3.7\")"
-            )
-        if self._compile_failed:
-            return "torch.compile failed — using eager Fast"
-        return "torch.compile unavailable"
+            return "Speed boost unavailable — Triton is not installed (run install.bat)"
+        return "Speed boost unavailable — running at normal speed"
 
     def set_fast_mode(self, enabled: bool) -> None:
         self.fast_mode = bool(enabled)
@@ -1486,12 +1514,18 @@ class StreamEngine:
                 id_cfg = 1.0
         return steps, pose_cfg, id_cfg
 
-    def load(self) -> None:
+    def load(self, on_stage: StageCallback | None = None) -> None:
+        """Read the DiT (+ SD-VAE the first time).
+
+        ``on_stage(key, label)`` fires as each stage starts (``dit``, ``vae``)
+        so the desk can time its bar against earlier runs.
+        """
         if not self.checkpoint.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint}")
 
         _enable_tf32()
 
+        _announce(on_stage, "dit", "Loading model")
         print(f"Loading keypoint DiT from {self.checkpoint} ...")
         self.model, cfg = build_keypoint_model(
             self.checkpoint, self.device, dtype=torch.float32
@@ -1516,6 +1550,7 @@ class StreamEngine:
         self.image_size = int(cfg.get("image_resolution", IMAGE_SIZE))
 
         if self.vae is None:
+            _announce(on_stage, "vae", "Loading image decoder")
             print("Loading SD-VAE ...")
             vae_dtype = preferred_sd_vae_dtype(self.device)
             self.vae = load_sd_vae(self.device, dtype=vae_dtype)
@@ -1617,7 +1652,9 @@ class StreamEngine:
             self._model_compiled = False
             self._compile_verified = False
 
-    def set_checkpoint(self, path: Path | str) -> Path:
+    def set_checkpoint(
+        self, path: Path | str, on_stage: StageCallback | None = None
+    ) -> Path:
         """Swap DiT weights. Keeps VAE; re-encodes reference if present."""
         path = Path(path)
         if not path.is_file():
@@ -1631,7 +1668,7 @@ class StreamEngine:
             self._compile_failed = False
             self.checkpoint = path
             try:
-                self.load()
+                self.load(on_stage=on_stage)
             except Exception as exc:
                 if previous != path and previous.is_file():
                     print(f"Reload previous checkpoint after failed swap: {previous.name}")
@@ -1848,12 +1885,35 @@ class StreamEngine:
             face = (
                 self._ref_face_latent.detach().float().cpu().numpy().astype(np.float16)
             )
+        latent = self._ref_latent.detach().float().cpu().numpy().astype(np.float16)
+        model = self.model_identity()
+        model["latent_shape"] = [int(v) for v in latent.shape]
         return {
-            "ref_latent": self._ref_latent.detach().float().cpu().numpy().astype(np.float16),
+            "ref_latent": latent,
             "ref_face_latent": face,
             "keypoints": np.asarray(self._ref_keypoints, dtype=np.float32).copy(),
             "image_size": int(self.image_size),
             "skip_crop": bool(self._ref_skip_crop),
+            "model": model,
+        }
+
+    def model_identity(self) -> dict[str, Any]:
+        """What a ``.vtm``'s latents must match to be reused: checkpoint file
+        name, image size, and the reference latent shape this DiT expects."""
+        ckpt = getattr(self, "checkpoint", None)
+        shape: list[int] = []
+        model = getattr(self, "model", None)
+        try:
+            chans = int(getattr(model, "in_channels", 0) or 0)
+            side = int(getattr(model, "input_size", 0) or 0)
+        except (TypeError, ValueError):
+            chans = side = 0
+        if chans > 0 and side > 0:
+            shape = [1, chans, side, side]
+        return {
+            "checkpoint": Path(ckpt).name if ckpt else "",
+            "image_size": int(getattr(self, "image_size", 0) or 0),
+            "latent_shape": shape,
         }
 
     def load_encoded_reference(
@@ -1922,7 +1982,8 @@ class StreamEngine:
         """Replace the character rest pose without re-encoding the identity VAE.
 
         Used after a mesh drag so the next live retarget starts from the edited
-        layout. Writes ``<ref_stem>_keypoints.npy`` when ``persist`` is set.
+        layout. With ``persist`` the edit is kept: inside the character's
+        ``.vtm`` (so it travels with the pack), else ``<ref_stem>_keypoints.npy``.
         """
         kps = _as_keypoints37(keypoints).copy()
         self._ref_keypoints = kps
@@ -1931,6 +1992,14 @@ class StreamEngine:
 
         self._ref_rig = build_reference_rig(kps)
         saved: Path | None = None
+        ref = self._ref_path
+        if persist and ref is not None and Path(ref).suffix.lower() == ".vtm" and Path(ref).is_file():
+            from .character_fit import replace_pack_keypoints
+
+            replace_pack_keypoints(Path(ref), kps)
+            self._ref_pose_source = str(pose_source or "manual")
+            print(f"Saved mesh edits → {Path(ref).name}")
+            return Path(ref)
         if persist and self._ref_path is not None and self._ref_path.suffix.lower() != ".vtm":
             saved = save_sidecar_keypoints(self._ref_path, kps)
             self._ref_kps_path = saved
@@ -2013,77 +2082,52 @@ class StreamEngine:
             print("[calibrate] Done")
         return kps
 
-    def plan_warmup_stages(
-        self,
-        *,
-        batch_size: int | None = None,
-        include_compile: bool | None = None,
-    ) -> list[str]:
-        """Named stages for a single ``warmup`` call (for UI progress)."""
-        warm_batch = int(
-            batch_size if batch_size is not None else self.stream_batch_size
-        )
-        warm_batch = max(1, min(warm_batch, STREAM_BATCH_MAX))
-        stages: list[str] = []
+    def warmup_plan(self, *, batch_size: int | None = None) -> list[str]:
+        """Stage keys one ``warmup`` call will announce, in order (for the bar)."""
+        del batch_size
+        keys: list[str] = []
         if self.fast_mode and STREAM_FAST_TINY_VAE and self.vae_tiny is None:
-            stages.append("TinyVAE")
-        do_compile = (
-            self.fast_mode
-            if include_compile is None
-            else bool(include_compile)
-        )
-        if (
-            do_compile
-            and self.compile_model
-            and self.device.type == "cuda"
-            and not self._model_compiled
-            and not self._compile_failed
-        ):
-            stages.append("Compiling…")
-        # Denoise runs: compile path uses STREAM_COMPILE_WARMUP_RUNS; else 1.
+            keys.append("tiny_vae")
         will_compile = (
-            do_compile
+            self.fast_mode
             and self.compile_model
             and self.device.type == "cuda"
             and not self._compile_failed
         )
-        runs = (
-            max(1, int(STREAM_COMPILE_WARMUP_RUNS))
-            if (self._model_compiled or will_compile)
-            else 1
-        )
-        for i in range(runs):
-            stages.append(f"Warmup {i + 1}/{runs}")
-        stages.append("Decode warmup…")
-        return stages
+        if will_compile and not self._model_compiled:
+            keys.append("compile_wrap")
+        runs = max(1, int(STREAM_COMPILE_WARMUP_RUNS)) if will_compile else 1
+        keys.append("compile_run" if will_compile else "warm_run")
+        if runs > 1:
+            keys.append("warm_run")
+        keys.append("decode")
+        if will_compile:
+            keys.append("verify")
+        return keys
 
     def warmup(
         self,
         num_steps: int | None = None,
         *,
         batch_size: int | None = None,
-        on_progress=None,
+        on_stage: StageCallback | None = None,
     ) -> None:
         """Compile (optional) + prime kernels for Fast path.
 
         ``batch_size`` primes a specific DiT batch (needed when Batch×2 is on
         and torch.compile was captured at batch=1).
 
-        ``on_progress(done, total, label)`` reports completed stage count.
+        ``on_stage(key, label)`` fires as each stage of :meth:`warmup_plan`
+        starts, then ``("done", …)``.
         """
         warm_batch = int(
             batch_size if batch_size is not None else self.stream_batch_size
         )
         warm_batch = max(1, min(warm_batch, STREAM_BATCH_MAX))
-        stages = self.plan_warmup_stages(batch_size=warm_batch)
-        total = max(1, len(stages))
-        done = 0
+        stages = self.warmup_plan(batch_size=warm_batch)
 
-        def _tick(label: str) -> None:
-            nonlocal done
-            done = min(done + 1, total)
-            if on_progress is not None:
-                on_progress(done, total, label)
+        def _stage(key: str, label: str) -> None:
+            _announce(on_stage, key, label)
 
         with self._cuda_lock:
             if not self._ready or self._ref_latent is None or self.model is None:
@@ -2094,43 +2138,17 @@ class StreamEngine:
                 self._ref_keypoints_model = keypoints_for_model(
                     self._ref_keypoints, self.keypoint_layout
                 )
-            if self.fast_mode and "TinyVAE" in stages:
-                self._ensure_tiny_vae()
-                _tick("TinyVAE")
-            elif self.fast_mode:
+            if self.fast_mode:
+                if "tiny_vae" in stages:
+                    _stage("tiny_vae", "Loading fast decoder")
                 self._ensure_tiny_vae()
 
         # Compile outside the lock — inductor can take a long time and was
         # blocking Apply ref ("Encoding reference…") the whole time.
         if self.fast_mode:
-            if "Compiling…" in stages:
-                if on_progress is not None:
-                    on_progress(float(done), total, "Compiling… please wait")
-                stop_hb = threading.Event()
-
-                def _compile_heartbeat() -> None:
-                    t0 = time.perf_counter()
-                    while not stop_hb.wait(0.4):
-                        if on_progress is None:
-                            continue
-                        # Asymptote toward the end of this stage so the bar
-                        # keeps moving during the long inductor compile.
-                        elapsed = time.perf_counter() - t0
-                        soft = float(done) + min(0.92, 1.0 - math.exp(-elapsed / 22.0))
-                        on_progress(soft, total, "Compiling… please wait")
-
-                hb = threading.Thread(
-                    target=_compile_heartbeat, name="rs-compile-hb", daemon=True
-                )
-                hb.start()
-                try:
-                    self._maybe_compile_model(STREAM_COMPILE_MODE)
-                finally:
-                    stop_hb.set()
-                    hb.join(timeout=1.5)
-                _tick("Compiling…")
-            else:
-                self._maybe_compile_model(STREAM_COMPILE_MODE)
+            if "compile_wrap" in stages:
+                _stage("compile_wrap", "Compiling model")
+            self._maybe_compile_model(STREAM_COMPILE_MODE)
 
         with self._cuda_lock:
             if not self._ready or self._ref_latent is None or self.model is None:
@@ -2150,9 +2168,12 @@ class StreamEngine:
                     kps_target = np.stack([kps_target] * bsz, axis=0)
                 with torch.inference_mode():
                     for i in range(runs):
-                        label = f"Warmup {i + 1}/{runs}"
-                        if on_progress is not None:
-                            on_progress(done, total, label)
+                        # The first compiled run is where inductor really
+                        # compiles (~10 s, longer with a cold cache).
+                        if i == 0 and self._model_compiled:
+                            _stage("compile_run", "Compiling model")
+                        else:
+                            _stage("warm_run", "Warming up")
                         latents = denoise_keypoint(
                             self.model,
                             keypoints_target=kps_target,
@@ -2170,7 +2191,6 @@ class StreamEngine:
                             torch.cuda.synchronize()
                         if self._model_compiled:
                             print(f"compile warmup {i + 1}/{runs} (batch={bsz})")
-                        _tick(label)
                 return latents
 
             def _try_compiled_warmups(bsz: int) -> torch.Tensor | None:
@@ -2200,8 +2220,7 @@ class StreamEngine:
                 recovered = False
                 for mode in ladder:
                     self._compile_failed = False
-                    if on_progress is not None:
-                        on_progress(done, total, f"Compiling ({mode})…")
+                    _stage("compile_run", "Compiling model")
                     if not self._maybe_compile_model(mode):
                         continue
                     try:
@@ -2221,18 +2240,16 @@ class StreamEngine:
 
             if latents is not None:
                 with torch.inference_mode():
-                    if on_progress is not None:
-                        on_progress(done, total, "Decode warmup…")
+                    # First decode at this size sets up GPU kernels (~7 s).
+                    _stage("decode", "Preparing decoder")
                     _images, decode_kind = self._decode_latents(latents)
                     if self.device.type == "cuda":
                         torch.cuda.synchronize()
                     print(f"decode warmup ({decode_kind}, batch={warm_batch})")
-                    _tick("Decode warmup…")
 
             # One-shot compile verification so the UI green light is truthful.
             if self.fast_mode and self.compile_model and self.device.type == "cuda":
-                if on_progress is not None:
-                    on_progress(done, total, "Compile test…")
+                _stage("verify", "Checking the speed boost")
                 ok = self.verify_compile()
                 if ok:
                     print("[compile] Fast torch.compile verified — green light")
@@ -2241,10 +2258,7 @@ class StreamEngine:
                         f"[compile] Fast torch.compile not active "
                         f"(status={self.compile_status})"
                     )
-                if on_progress is not None:
-                    on_progress(total, total, "Ready" if ok else "Compile off")
-            elif on_progress is not None and done < total:
-                on_progress(total, total, "Ready")
+            _stage("done", "Ready")
 
     def generate_from_keypoints(
         self,

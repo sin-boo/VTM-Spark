@@ -395,8 +395,7 @@ def _heuristic_bank(feat: dict[str, float], bank_id: str) -> dict[str, float]:
         return out
     if bank_id == "round":
         rounded = max(-fine, 0.0)
-        out["U"] = gain * rounded * (1.0 - high)
-        out["O"] = gain * rounded * high
+        out["U"] = gain * rounded
         return out
     return out
 

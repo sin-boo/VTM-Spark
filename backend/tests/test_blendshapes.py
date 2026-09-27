@@ -128,7 +128,7 @@ def test_plan_rebased_onto_another_face_stays_compatible(tmp_path: Path, monkeyp
 
 def test_repair_copies_current_plan(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
-    save_current(_shapes(("rest", 0.0), ("O", 4.0)))
+    save_current(_shapes(("rest", 0.0), ("E", 4.0)))
     save_character("Gigi", _shapes(("rest", 9.0)))
     apply_current_to_character("Gigi")
     assert compatibility("Gigi")["compatible"] is True
@@ -260,7 +260,7 @@ def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, mon
     eng._compile_failed = False
     opened: list[str] = []
     eng._release_dit_weights = lambda: None
-    eng.load = lambda: None
+    eng.load = lambda **_k: None
     eng._set_reference_locked = lambda *_a, **_k: opened.append("image")
     assert StreamEngine.set_checkpoint(eng, ckpt) == ckpt
     assert opened == []
@@ -273,13 +273,25 @@ def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, mon
     rt._batch2_auto_tried = True
     rt._set_status = lambda **_k: None
     rt._clear_progress = lambda **_k: order.append("ready")
-    rt._run_with_ram_progress = lambda fn, **_k: fn()
+
+    class _Meter:
+        def __enter__(self) -> "_Meter":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def stage(self, _key: str, _label: str) -> None:
+            return None
+
+    rt._stage_meter = lambda *_a, **_k: _Meter()
 
     class _Engine:
         checkpoint = ckpt
         image_size = 768
+        vae = object()
 
-        def set_checkpoint(self, _path: Path) -> None:
+        def set_checkpoint(self, _path: Path, on_stage: object = None) -> None:
             order.append("model")
 
         def set_stream_batch_size(self, _n: int) -> None:

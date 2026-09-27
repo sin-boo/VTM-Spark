@@ -29,6 +29,17 @@ def test_pack_batch2_uses_mid_and_now_not_replay() -> None:
     np.testing.assert_allclose(maps[1], hair_now)
 
 
+def test_pack_batch2_first_call_keeps_the_warmed_batch_size() -> None:
+    now = neutral_keypoints()
+    now[:, 0] = 0.3
+    hair = np.ones((3, 4, 4), dtype=np.float32)
+    kps, maps = pack_stream_batch(now, hair, None, None, 2)
+    assert kps.shape == (2, *now.shape)
+    np.testing.assert_allclose(kps[0], now)
+    np.testing.assert_allclose(kps[1], now)
+    assert maps.shape == (2, *hair.shape)
+
+
 def test_lerp_keeps_parked_point_when_only_one_side_visible() -> None:
     prev = neutral_keypoints()
     now = prev.copy()

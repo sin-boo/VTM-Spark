@@ -43,6 +43,8 @@ export type AppStatus = {
   frame_blend: number
   inbetweens?: number
   interpolate?: boolean
+  /** Cap on generated keys per second; 0 = as fast as the GPU goes. */
+  max_fps?: number
   hold_last?: boolean
   track_fps: number
   drive_pose: boolean
@@ -144,9 +146,129 @@ export type CharacterCard = {
   name: string
   path: string
   preview_url: string
+  thumb_url?: string
+  author?: string
+  version?: number
   shapes_compatible?: boolean
   has_shapes?: boolean
   shapes_path?: string
+}
+
+export type CharacterInfo = {
+  id: string
+  name: string
+  version: number
+  created_at: string
+  updated_at: string
+  author: string
+  license: string
+  description: string
+  model: {
+    checkpoint: string
+    image_size: number
+    latent_shape: number[]
+  }
+  model_match: boolean
+  includes: {
+    pose_keys: number
+    blendshapes: boolean
+    hair: boolean
+    skeleton: boolean
+    travel_box: boolean
+    source_image: boolean
+  }
+  size_bytes: number
+}
+
+export type CharacterMeta = {
+  id: string
+  name?: string
+  author?: string
+  license?: string
+  description?: string
+}
+
+/** Small grid image; older backends only serve the full preview. */
+export function characterThumb(card: CharacterCard): string {
+  return card.thumb_url || card.preview_url
+}
+
+export function characterExportUrl(id: string): string {
+  return `/api/characters/${encodeURIComponent(id)}/export`
+}
+
+function attachmentName(res: Response, fallback: string): string {
+  const header = res.headers.get('Content-Disposition') || ''
+  const star = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(header)
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''))
+    } catch {
+      /* fall through */
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header)
+  return plain ? plain[1].trim() : fallback
+}
+
+/**
+ * Fetch the .vtm first so a server error shows in the desk instead of landing
+ * on disk, then hand the bytes to the browser / WebView2 as a download.
+ * In pywebview this needs webview.settings['ALLOW_DOWNLOADS'] = True, which
+ * opens a native Save dialog for the file.
+ */
+async function downloadCharacter(id: string, name: string): Promise<string> {
+  const res = await fetch(characterExportUrl(id))
+  if (!res.ok) await json<unknown>(res)
+  const blob = await res.blob()
+  const filename = attachmentName(res, `${name || id}.vtm`)
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  return filename
+}
+
+export type CharacterExportResult = {
+  /** Where the file went: a full path (native dialog) or the download name. */
+  saved: string
+  native: boolean
+  cancelled: boolean
+}
+
+/**
+ * Prefer the desk's native Save dialog (pywebview); older backends lack the
+ * endpoint, so a 404/405 (or a reply without `ok`) falls back to a download.
+ */
+async function exportCharacter(id: string, name: string): Promise<CharacterExportResult> {
+  const res = await fetch('/api/characters/export-save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (res.status !== 404 && res.status !== 405) {
+    const body = await json<{ ok?: boolean; path?: string; cancelled?: boolean; error?: string }>(res)
+    if (body && typeof body.ok === 'boolean') {
+      if (body.ok) return { saved: body.path || '', native: true, cancelled: false }
+      if (body.cancelled) return { saved: '', native: true, cancelled: true }
+      throw new Error(body.error || 'Export failed')
+    }
+  }
+  const saved = await downloadCharacter(id, name)
+  return { saved, native: false, cancelled: false }
+}
+
+/** One line for the desk after an export; empty when the user cancelled. */
+export function exportNote(name: string, res: CharacterExportResult): string {
+  if (res.cancelled) return ''
+  if (res.native) return res.saved ? `Saved ${name} to ${res.saved}` : `Saved ${name}.`
+  return `Exported ${name} as ${res.saved}.`
 }
 
 export type CharacterLoadResult = {
@@ -163,7 +285,6 @@ export type MixWeights = {
   I: number
   U: number
   E: number
-  O: number
   smile: number
   sad: number
 }
@@ -281,7 +402,6 @@ export const ZERO_WEIGHTS: MixWeights = {
   I: 0,
   U: 0,
   E: 0,
-  O: 0,
   smile: 0,
   sad: 0,
 }
@@ -485,6 +605,37 @@ export const api = {
       json<{
         ok: boolean
         status: AppStatus
+        characters: CharacterCard[]
+      }>(r),
+    ),
+  importCharacter: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return fetch('/api/characters/add', { method: 'POST', body: fd }).then((r) =>
+      json<{ ok: boolean; character: CharacterCard; status?: AppStatus }>(r),
+    )
+  },
+  exportCharacter: (id: string, name = '') => exportCharacter(id, name),
+  /** Open Explorer with the character's .vtm selected. */
+  revealCharacter: (id: string) =>
+    fetch('/api/characters/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then((r) => json<{ ok: boolean; path: string }>(r)),
+  characterInfo: (id: string) =>
+    fetch(`/api/characters/${encodeURIComponent(id)}/info`).then((r) =>
+      json<CharacterInfo>(r),
+    ),
+  characterMeta: (body: CharacterMeta) =>
+    fetch('/api/characters/meta', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) =>
+      json<{
+        ok: boolean
+        character: CharacterCard
         characters: CharacterCard[]
       }>(r),
     ),

@@ -117,6 +117,7 @@ class SettingsBody(BaseModel):
     frame_blend: float | None = None
     inbetweens: int | None = None
     interpolate: bool | None = None
+    max_fps: int | None = None
     hold_last: bool | None = None
     track_fps: float | None = None
     drive_pose: bool | None = None
@@ -153,6 +154,18 @@ class CharacterIdBody(BaseModel):
 class CharacterRenameBody(BaseModel):
     id: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
+
+
+class CharacterMetaBody(BaseModel):
+    id: str = Field(..., min_length=1)
+    name: str | None = None
+    author: str | None = None
+    license: str | None = None
+    description: str | None = None
+
+
+class CharacterExportBody(BaseModel):
+    id: str = Field(..., min_length=1)
 
 
 class MeshBody(BaseModel):
@@ -460,6 +473,128 @@ def character_preview(ident: str) -> Response:
         media_type="image/png",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/api/characters/{ident}/thumb")
+def character_thumb(ident: str) -> Response:
+    from .character_pack import (
+        CharacterPackError,
+        read_character_thumb_png,
+        resolve_character_id,
+    )
+
+    try:
+        data = read_character_thumb_png(resolve_character_id(ident))
+    except CharacterPackError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/characters/{ident}/info")
+def character_info(ident: str) -> dict[str, Any]:
+    try:
+        return get_runtime().character_info(ident)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/characters/meta")
+def character_meta(body: CharacterMetaBody) -> dict[str, Any]:
+    try:
+        result = get_runtime().update_character_meta(
+            body.id,
+            name=body.name,
+            author=body.author,
+            license=body.license,
+            description=body.description,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+def _attachment_header(filename: str) -> str:
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "ignore").decode("ascii") or "character.vtm"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
+@app.get("/api/characters/{ident}/export")
+def character_export(ident: str) -> Response:
+    try:
+        filename, data = get_runtime().export_character_bytes(ident)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": _attachment_header(filename),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _desk_window() -> Any:
+    """The pywebview desk window, or None when the UI runs in a browser."""
+    try:
+        import webview
+    except Exception:
+        return None
+    windows = list(getattr(webview, "windows", None) or [])
+    return windows[0] if windows else None
+
+
+def _save_dialog_kind() -> Any:
+    import webview
+
+    dialog = getattr(webview, "FileDialog", None)
+    if dialog is not None and hasattr(dialog, "SAVE"):
+        return dialog.SAVE
+    return webview.SAVE_DIALOG
+
+
+@app.post("/api/characters/reveal")
+def character_reveal(body: CharacterExportBody) -> dict[str, Any]:
+    try:
+        return get_runtime().reveal_character(body.id)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/characters/export-save")
+def character_export_save(body: CharacterExportBody) -> dict[str, Any]:
+    """Native Save dialog in the desk. 404 without a window so the UI downloads instead."""
+    window = _desk_window()
+    if window is None:
+        raise HTTPException(404, "No desk window; use the download export")
+    try:
+        filename, data = get_runtime().export_character_bytes(body.id)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        picked = window.create_file_dialog(
+            _save_dialog_kind(),
+            save_filename=filename,
+            file_types=("VTM character (*.vtm)", "All files (*.*)"),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"Could not open the save dialog: {exc}"}
+    if not picked:
+        return {"ok": False, "cancelled": True}
+    target = Path(picked[0] if isinstance(picked, (list, tuple)) else picked)
+    if target.suffix.lower() != ".vtm":
+        target = target.with_name(f"{target.name}.vtm")
+    try:
+        target.write_bytes(data)
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not save {target.name}: {exc}"}
+    return {"ok": True, "path": str(target)}
 
 
 @app.post("/api/characters/create")

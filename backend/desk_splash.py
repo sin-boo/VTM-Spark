@@ -337,6 +337,46 @@ def _win32_show(window: object, cmd: int) -> None:
         pass
 
 
+def _bring_to_front(window: object) -> None:
+    """Put the window in front with focus. Call on the GUI thread.
+
+    open_desk hides the splash while the desk loads; Windows hands focus to
+    another app meanwhile and then refuses a plain show() the foreground, so
+    the desk only flashed on the taskbar. Joining the foreground window's
+    input queue for the call is the sanctioned way to take it back.
+    """
+    hwnd = _window_hwnd(window)
+    if hwnd <= 0 or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        user32.IsIconic.argtypes = [ctypes.c_void_p]
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+        user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        front = user32.GetForegroundWindow()
+        if front and int(front) == hwnd:
+            return
+        ours = kernel32.GetCurrentThreadId()
+        theirs = user32.GetWindowThreadProcessId(front, None) if front else 0
+        joined = bool(theirs and theirs != ours and user32.AttachThreadInput(ours, theirs, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if joined:
+                user32.AttachThreadInput(ours, theirs, False)
+    except Exception:
+        pass
+
+
 def _colorref(rgb: tuple[int, int, int]) -> int:
     r, g, b = rgb
     return int(r) | (int(g) << 8) | (int(b) << 16)
@@ -1338,6 +1378,7 @@ def open_desk(
             # show() / load_url re-apply Sizable chrome after the splash retries
             # have already finished. Strip it again on this reveal.
             hide_native_caption(window, resizable=True)
+            _bring_to_front(window)
             _retry_caption(window)
 
         _run_on_gui(window, _do)

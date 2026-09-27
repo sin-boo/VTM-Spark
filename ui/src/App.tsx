@@ -369,6 +369,22 @@ export default function App() {
             setCharacters(res.characters ?? [])
           })
         }
+        onImportCharacter={async (file) => {
+          const res = await api.importCharacter(file)
+          if (res.status) applyStatus(res.status)
+          await refreshCharacters()
+          return res.character
+        }}
+        onExportCharacter={(id, name) => api.exportCharacter(id, name)}
+        onRevealCharacter={(id) => api.revealCharacter(id)}
+        onCharacterInfo={(id) => api.characterInfo(id)}
+        onCharacterMeta={async (meta) => {
+          const res = await api.characterMeta(meta)
+          if (res.characters) setCharacters(res.characters)
+          else await refreshCharacters()
+          void api.status().then(applyStatus).catch(() => undefined)
+          return res.character
+        }}
         onUploadRef={(file) =>
           run('Reference', async () => {
             const res = await api.uploadRef(file)
@@ -515,7 +531,6 @@ export default function App() {
         <MetricStrip
           fps={status?.show_fps || status?.gen_fps || 0}
           genFps={status?.gen_fps ?? 0}
-          timing={status?.timing ?? ''}
           checkpoint={status?.checkpoint ?? ''}
         />
       </main>

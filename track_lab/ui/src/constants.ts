@@ -11,14 +11,13 @@ export type Busy =
   | 'gen'
   | ''
 
-export const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E', 'O']
+export const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E']
 
 export const ZERO_WEIGHTS: MixWeights = {
   A: 0,
   I: 0,
   U: 0,
   E: 0,
-  O: 0,
   smile: 0,
   sad: 0,
 }

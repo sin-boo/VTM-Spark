@@ -36,7 +36,6 @@ _HINTS = {
     "I": "Hold 'ee' until capture finishes",
     "U": "Hold 'oo' until capture finishes",
     "E": "Hold 'eh' until capture finishes",
-    "O": "Hold 'oh' until capture finishes",
 }
 
 

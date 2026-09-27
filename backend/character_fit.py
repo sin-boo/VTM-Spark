@@ -1,8 +1,9 @@
 """Still-space hair, skeleton, and limiter boxes for the create fit step.
 
 The fit (hair mask, skeleton, limiters) lives in the character's ``.vtm`` as
-``fit.json``. Older installs kept it beside the preview still; that sidecar is
-still read and folds into the pack on the next save.
+``fit.json``; the pack is the source of truth. Older installs kept it beside
+the preview still: the first read folds that sidecar into the pack (pack keys
+win) and deletes it.
 """
 
 from __future__ import annotations
@@ -14,11 +15,13 @@ from typing import Any
 import numpy as np
 
 from .character_pack import (
+    KEYPOINTS_NAME,
     CharacterPackError,
     character_still_path,
     read_pack_fit,
     replace_pack_members,
     resolve_character_id,
+    upgrade_character_pack,
     write_pack_fit,
 )
 from .pose_controller import face_height
@@ -65,15 +68,31 @@ def _read_sidecar(ident: str, dest_dir: Path | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _fold_sidecar(ident: str, pack: Path, dest_dir: Path | None) -> None:
+    """Move a legacy ``fit.json`` sidecar into the pack once, then delete it."""
+    sidecar = character_fit_path(ident, dest_dir=dest_dir)
+    if not sidecar.is_file():
+        return
+    legacy = _read_sidecar(ident, dest_dir)
+    try:
+        upgrade_character_pack(pack, fit=legacy)
+    except (CharacterPackError, OSError):
+        return  # keep the sidecar; the pack could not take it
+    try:
+        sidecar.unlink()
+    except OSError:
+        pass
+
+
 def read_character_fit(ident: str, *, dest_dir: Path | None = None) -> dict[str, Any]:
-    data = _read_sidecar(ident, dest_dir)
     pack = _pack_path(ident, dest_dir)
-    if pack is not None:
-        try:
-            data.update(read_pack_fit(pack))
-        except CharacterPackError:
-            pass
-    return data
+    if pack is None:
+        return _read_sidecar(ident, dest_dir)
+    _fold_sidecar(ident, pack, dest_dir)
+    try:
+        return read_pack_fit(pack)
+    except CharacterPackError:
+        return _read_sidecar(ident, dest_dir)
 
 
 def write_character_fit(ident: str, data: dict[str, Any], *, dest_dir: Path | None = None) -> Path:
@@ -222,8 +241,6 @@ def build_fit_view(
 def replace_pack_keypoints(path: Path, keypoints: np.ndarray) -> None:
     """Swap ``keypoints.npy`` inside a ``.vtm`` without touching the latents."""
     import io
-
-    from .character_pack import KEYPOINTS_NAME
 
     kps = np.asarray(keypoints, dtype=np.float32)
     if kps.shape != (37, 4):

@@ -512,7 +512,7 @@ def _dead(value: float, dead: float = 0.12) -> float:
 
 
 def weights_from_arkit(packet: IfmPacket) -> dict[str, float]:
-    """Map iPhone blendshapes onto the shared smile/sad/A I U E O set."""
+    """Map iPhone blendshapes onto the shared smile/sad/A I U E set."""
     g = packet.get
     jaw = _clip(g("jawOpen") * (1.0 - 0.65 * _clip(g("mouthClose"))))
     smile = _dead(_clip(0.5 * (_clip(g("mouthSmile_L")) + _clip(g("mouthSmile_R")))))
@@ -532,8 +532,7 @@ def weights_from_arkit(packet: IfmPacket) -> dict[str, float]:
     spread = stretch * response
     out["I"] = _clip(spread * (1.0 - high))
     out["E"] = _clip(spread * high)
-    out["U"] = _clip((pucker * (1.0 - high) + 0.35 * funnel * (1.0 - high)) * response)
-    out["O"] = _clip((funnel * high + 0.35 * pucker * high) * response)
+    out["U"] = _clip((pucker + 0.35 * funnel) * (1.0 - high) * response + (funnel + 0.35 * pucker) * high * response)
     out["smile"] = _clip(smile * (1.0 - 0.55 * opened), 0.0, 0.7)
     out["sad"] = _clip(sad * (1.0 - 0.55 * opened), 0.0, 0.7)
     if out["smile"] >= out["sad"]:
@@ -577,8 +576,7 @@ def _procedural_mouth(rest: np.ndarray, weights: dict[str, float]) -> np.ndarray
     smile = float(weights.get("smile") or 0.0)
     sad = float(weights.get("sad") or 0.0)
     spread = float(weights.get("I") or 0.0) + float(weights.get("E") or 0.0)
-    rounded = float(weights.get("U") or 0.0) + float(weights.get("O") or 0.0)
-    oh = float(weights.get("O") or 0.0)
+    rounded = float(weights.get("U") or 0.0)
     if len(out) > 2:
         out[2, 1] += 0.10 * span * a
     if len(out) > 25:
@@ -592,7 +590,7 @@ def _procedural_mouth(rest: np.ndarray, weights: dict[str, float]) -> np.ndarray
         out[23, 1] += span * (0.03 * sad - 0.03 * smile)
         out[26, 0] += span * (0.04 * smile + 0.03 * spread - 0.025 * rounded)
         out[26, 1] += span * (0.03 * sad - 0.03 * smile)
-        out[25, 1] += 0.04 * span * oh
+        out[25, 1] += 0.02 * span * rounded
     return out
 
 

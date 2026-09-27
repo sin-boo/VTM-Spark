@@ -38,6 +38,7 @@ from .engine import (
     STREAM_HOLD_LAST,
     STREAM_INBETWEENS,
     STREAM_INTERPOLATE,
+    STREAM_MAX_GEN_FPS,
     STREAM_TEMPORAL_EMA,
     StreamEngine,
     apply_live_deltas_to_ref,
@@ -52,12 +53,17 @@ from .engine import (
     _clip_blend,
     _clip_cfg,
     _clip_inbetweens,
+    _clip_max_fps,
     effective_inbetweens,
+    gen_hold_s,
     interpolate_on,
 )
+from .load_timing import StageClock, StageMeter
 from .frame_interp import (
     PLAYOUT_QUEUE_MAX,
+    SHOW_FPS_MAX,
     inbetween_frames,
+    inbetween_pacing,
     playout_gap,
     print_inbetween_count,
     lerp_stream_hair,
@@ -142,16 +148,27 @@ def pack_stream_batch(
 
     Batch×2 used to stack [prev, current], which re-drew the pose already on
     screen and popped. Mid + now continues the motion with two unseen poses.
+
+    The first call of a stream has no previous pose; it still sends two (now,
+    now). torch.compile and the decoder were warmed at this batch size, and a
+    lone batch-1 call first recompiled both — ~14 s with no frame on screen.
     """
     now = np.asarray(current, dtype=np.float32)
     hair = np.asarray(current_hair, dtype=np.float32)
-    if int(batch_n) <= 1 or prev is None:
+    if int(batch_n) <= 1:
         return now, hair
+    if prev is None:
+        return np.stack([now, now], axis=0), np.stack([hair, hair], axis=0)
     mid = lerp_stream_pose(prev, now, 0.5)
     mid_hair = lerp_stream_hair(prev_hair, hair, 0.5)
     return np.stack([mid, now], axis=0), np.stack([mid_hair, hair], axis=0)
 
 Listener = Callable[[dict[str, Any]], None]
+
+# Start stream's one bar: moving weights back to the GPU, then warmup, then
+# "Starting stream…" until the first picture.
+GPU_MOVE_SHARE = 0.10
+WARMUP_SHARE_END = 0.95
 
 
 def _process_rss_bytes() -> int:
@@ -226,13 +243,6 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     return "out of memory" in msg or "cuda oom" in msg
 
 
-def _estimate_model_load_bytes(ckpt: Path) -> int:
-    """Expected RAM gain while loading DiT + SD-VAE (rough, for progress UI)."""
-    ckpt_bytes = ckpt.stat().st_size if ckpt.is_file() else 400_000_000
-    # Working set usually tracks checkpoint size plus ~1.5–2 GB for SD-VAE.
-    return max(int(ckpt_bytes * 0.95 + 1.7e9), int(2.8e9))
-
-
 def _runtime_log(msg: str) -> None:
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     try:
@@ -254,15 +264,14 @@ def _image_to_jpeg_b64(image: Image.Image, quality: int = 85) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-_LAB_SHAPE_IDS = ("rest", "smile", "sad", "A", "I", "U", "E", "O")
-
-
 def lab_keeps_authored(probe: dict[str, Any] | None) -> bool:
     """True when Track Lab already has rest or mouth end-shapes. Do not wipe."""
+    from .blendshapes import SHAPE_IDS
+
     if not isinstance(probe, dict):
         return False
     shapes = probe.get("shapes") if isinstance(probe.get("shapes"), dict) else {}
-    if any(name in shapes for name in _LAB_SHAPE_IDS):
+    if any(name in shapes for name in SHAPE_IDS):
         return True
     return bool(probe.get("ready"))
 
@@ -321,6 +330,7 @@ class StreamRuntime:
             "frame_blend": STREAM_TEMPORAL_EMA,
             "inbetweens": STREAM_INBETWEENS,
             "interpolate": STREAM_INTERPOLATE,
+            "max_fps": STREAM_MAX_GEN_FPS,
             "hold_last": STREAM_HOLD_LAST,
             "paused": False,
             "track_fps": 2.0,
@@ -402,6 +412,8 @@ class StreamRuntime:
         self._streaming = False
         self._paused = False
         self._frame_in_flight = False
+        self._last_gen_start = 0.0
+        self._gen_hold_pending = False
         self._tracking = False
         self._lab_drive = False
         self._lab_seen_online = False
@@ -435,6 +447,10 @@ class StreamRuntime:
         self._batch2_auto_tried: bool = False
         self._gen_busy: bool = False
         self._offload_pending: bool = False
+        # Start stream keeps its bar up until the first picture is on screen.
+        self._first_frame_pending = False
+        # How long each load / warmup stage took on this PC (drives the bars).
+        self._stage_clock = StageClock()
         self._vcam_wanted: bool = False
         self._gen_queue: queue.Queue = queue.Queue(maxsize=1)
         self._display_queue: queue.Queue = queue.Queue()
@@ -500,6 +516,8 @@ class StreamRuntime:
         self._status["interpolate"] = (
             STREAM_INTERPOLATE if raw_interp is None else interpolate_on(raw_interp)
         )
+        raw_cap = session.get("max_fps")
+        self._status["max_fps"] = STREAM_MAX_GEN_FPS if raw_cap is None else _clip_max_fps(raw_cap)
         self.engine.set_hold_last(hold_last)
         self.engine.num_steps = steps
         self.engine.set_guidance(pose_cfg=pose_cfg, id_cfg=id_cfg)
@@ -1086,43 +1104,41 @@ class StreamRuntime:
             except Exception as exc:
                 print(f"Skeleton model load failed: {exc}", flush=True)
 
-    def _run_with_ram_progress(
+    def _stage_meter(
         self,
-        fn: Callable[[], Any],
+        keys: list[str],
         *,
-        label: str,
         kind: str,
-        target_bytes: int,
-    ) -> Any:
-        """Poll process RAM while ``fn`` runs and map gain → progress 0..~0.92."""
-        baseline = _process_rss_bytes()
-        target = max(int(target_bytes), 1)
-        stop = threading.Event()
-        started = time.monotonic()
-        expected_s = 40.0 if kind == "model" else 18.0
-        self._set_progress(0.03, label=label, kind=kind)
+        lo: float = 0.0,
+        hi: float = 1.0,
+        ckpt: Path | None = None,
+        label: str = "",
+        **status_kwargs: Any,
+    ) -> StageMeter:
+        """A bar timed against this PC's earlier runs of the same stages.
 
-        def _poll() -> None:
-            while not stop.wait(0.12):
+        With ``ckpt``, the ``dit`` stage also counts real bytes: process RAM
+        grows by about the checkpoint's size while it is read.
+        """
+        gb = 1.0
+        inner = None
+        if ckpt is not None and ckpt.is_file():
+            size = max(ckpt.stat().st_size, 1)
+            gb = size / 1e9
+            baseline = _process_rss_bytes()
+
+            def inner(key: str) -> float | None:
+                if key != "dit" or baseline <= 0:
+                    return None
                 rss = _process_rss_bytes()
-                ram_frac = 0.0
-                if rss > 0:
-                    gained = max(0, rss - baseline)
-                    ram_frac = min(0.92, gained / target)
-                elapsed = time.monotonic() - started
-                time_frac = min(0.88, elapsed / expected_s)
-                frac = max(0.03, ram_frac, time_frac)
-                self._set_progress(frac, label=label, kind=kind)
+                return None if rss <= 0 else max(0, rss - baseline) / size
 
-        poller = threading.Thread(target=_poll, name="rs-ram-progress", daemon=True)
-        poller.start()
-        try:
-            result = fn()
-            self._set_progress(1.0, label=label, kind=kind, message=f"{label} done")
-            return result
-        finally:
-            stop.set()
-            poller.join(timeout=1.0)
+        def report(value: float, label: str) -> None:
+            self._set_progress(value, label=label, kind=kind, **status_kwargs)
+
+        return StageMeter(
+            self._stage_clock, keys, report, lo=lo, hi=hi, gb=gb, inner=inner, label=label
+        )
 
     def _load_model(self, *, clear_busy: bool = True) -> None:
         try:
@@ -1167,15 +1183,10 @@ class StreamRuntime:
                     )
                     raise FileNotFoundError(msg)
 
-            def _do_load() -> None:
-                self.engine.load()
-
-            self._run_with_ram_progress(
-                _do_load,
-                label="Loading model",
-                kind="model",
-                target_bytes=_estimate_model_load_bytes(ckpt),
-            )
+            keys = ["dit"] if self.engine.vae is not None else ["dit", "vae"]
+            with self._stage_meter(keys, kind="model", ckpt=ckpt, label="Loading model") as meter:
+                self.engine.load(on_stage=meter.stage)
+                meter.stage("done", "Model ready")
             device = str(getattr(self.engine, "device", ""))
             self._clear_progress(
                 state="ready",
@@ -1196,15 +1207,35 @@ class StreamRuntime:
             )
             raise
 
-    def ensure_model(self, *, keep_busy: bool = False) -> None:
-        """Load DiT+VAE once, on demand (not at UI open)."""
+    def ensure_model(self, *, keep_busy: bool = False, keep_bar: bool = False) -> None:
+        """Load DiT+VAE once, on demand (not at UI open).
+
+        ``keep_bar``: a warmup follows (Start stream, Generate once), so the
+        GPU-move slice stays on screen and the warmup bar carries on from it.
+        """
         with self._model_load_lock:
             if not getattr(self.engine, "_ready", False) or self.engine.model is None:
                 self._load_model(clear_busy=not keep_busy)
-            try:
-                self.engine.ensure_gpu()
-            except Exception:
-                pass
+            # Stop stream moves the weights to RAM; say so while they come back.
+            # The first slice of the warmup bar, so Start reads as one bar.
+            if not bool(getattr(self.engine, "_gpu_resident", True)):
+                was_busy = bool(self.status().get("busy"))
+                with self._stage_meter(
+                    ["gpu_move"], kind="warmup", hi=GPU_MOVE_SHARE, label="Moving model to GPU"
+                ) as meter:
+                    meter.stage("gpu_move", "Moving model to GPU")
+                    try:
+                        self.engine.ensure_gpu()
+                    except Exception:
+                        pass
+                    meter.stage("done", "")
+                if not keep_bar:
+                    self._clear_progress(busy=was_busy or keep_busy)
+            else:
+                try:
+                    self.engine.ensure_gpu()
+                except Exception:
+                    pass
             if bool(self.status().get("model_ready")):
                 return
             self._set_status(
@@ -1235,8 +1266,7 @@ class StreamRuntime:
         from .character_pack import read_character_pack
 
         pack = read_character_pack(ref)
-        engine_size = int(getattr(self.engine, "image_size", 0) or 0)
-        if pack.image_size and pack.image_size == engine_size:
+        if self._pack_latents_usable(pack):
             self.engine.load_encoded_reference(
                 keypoints=pack.keypoints,
                 ref_latent=pack.ref_latent,
@@ -1247,10 +1277,22 @@ class StreamRuntime:
             return
         from .paths import refs_dir
 
-        tmp = refs_dir() / "_character_fallback.png"
-        Image.fromarray(pack.preview_rgb).save(tmp)
-        self.engine.set_reference(tmp, pack.keypoints, skip_crop=pack.skip_crop)
+        if pack.source_bytes:
+            tmp = refs_dir() / f"_character_fallback{pack.source_suffix or '.png'}"
+            tmp.write_bytes(pack.source_bytes)
+        else:
+            tmp = refs_dir() / "_character_fallback.png"
+            Image.fromarray(pack.preview_rgb).save(tmp)
+        try:
+            self.engine.set_reference(tmp, pack.keypoints, skip_crop=pack.skip_crop)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            discard_sidecar_keypoints(tmp)
         self.engine._ref_path = ref
+        self._store_reencoded_latents(ref)
 
     def set_checkpoint(self, path: str | Path) -> None:
         ckpt = resolve_user_path(path).resolve()
@@ -1264,17 +1306,22 @@ class StreamRuntime:
         with self._model_load_lock:
             self._set_status(busy=True, message="Switching model…", error="")
             try:
-                def _swap() -> None:
-                    self.engine.set_checkpoint(ckpt)
-
-                # Re-encode path inside set_checkpoint may add more RAM; estimate fresh load.
-                self._run_with_ram_progress(
-                    _swap,
-                    label="Loading model",
-                    kind="model",
-                    target_bytes=_estimate_model_load_bytes(ckpt),
-                )
-                self._reload_character_after_model()
+                has_pack = self._ref_path is not None and self._ref_path.suffix.lower() == ".vtm"
+                keys = ["dit"]
+                if self.engine.vae is None:
+                    keys.append("vae")
+                if has_pack:
+                    keys.append("character")
+                with self._stage_meter(
+                    keys, kind="model", ckpt=ckpt, label="Loading model"
+                ) as meter:
+                    self.engine.set_checkpoint(ckpt, on_stage=meter.stage)
+                    if has_pack:
+                        # The open character goes onto the new model (a
+                        # re-encode when its latents came from another one).
+                        meter.stage("character", "Loading character on the new model")
+                    self._reload_character_after_model()
+                    meter.stage("done", "Model ready")
                 self._fast_warmed = False
                 self._batch2_auto_tried = False
                 try:
@@ -1465,12 +1512,20 @@ class StreamRuntime:
             raise
 
     def list_characters(self) -> list[dict[str, Any]]:
-        from .character_pack import ensure_character_still, list_character_files
+        from .character_pack import (
+            FORMAT_VERSION,
+            ensure_character_still,
+            list_character_files,
+            peek_character_manifest,
+        )
 
         self._refresh_blend_current()
         cards: list[dict[str, Any]] = []
         for path in list_character_files():
             try:
+                # One-time: older packs take in their sidecars and become v2.
+                if int(peek_character_manifest(path).get("version") or 0) < FORMAT_VERSION:
+                    self._migrate_character_pack(path)
                 ensure_character_still(path)
                 cards.append(self._character_card_safe(path))
             except Exception:
@@ -1574,6 +1629,8 @@ class StreamRuntime:
         if not src.is_file():
             raise FileNotFoundError(f"Reference image not found: {src}")
         label = str(name or src.stem).strip() or src.stem
+        # The clean original travels in the pack so another model can re-encode it.
+        source_bytes = src.read_bytes()
         try:
             frame = self.apply_reference(src, silent=True, warmup=False)
             exported = self.engine.export_encoded_reference()
@@ -1599,8 +1656,13 @@ class StreamRuntime:
                     ref_face_latent=exported["ref_face_latent"],
                     image_size=int(exported["image_size"]),
                     skip_crop=bool(exported["skip_crop"]),
-                    source_name=src.name,
+                    source_name=f"{label}{src.suffix.lower()}",
                     fit={"travel_box": normalize_travel_box(self._status.get("travel_box"))},
+                    source_bytes=source_bytes,
+                    source_suffix=src.suffix or ".png",
+                    pose_keys=[],
+                    model=exported.get("model"),
+                    meta={},
                 )
                 if getattr(self, "_lab_overlay_gen", None) is not None:
                     self._snapshot_character_shapes(dest.stem)
@@ -1635,11 +1697,25 @@ class StreamRuntime:
         src = resolve_user_path(pack_path)
         if not src.is_file():
             raise FileNotFoundError(f"Character pack not found: {src}")
+        from .blendshapes import mark_plan_imported
+        from .character_pack import export_character_pack_bytes
+
+        # Hash-checked read: a tampered or truncated pack is refused here.
         manifest = validate_character_pack(src)
         folder = dest_dir if dest_dir is not None else characters_dir()
         dest = unique_character_path(str(manifest.get("name") or src.stem), dest_dir=folder)
-        dest.write_bytes(src.read_bytes())
-        return {"character": self._character_card_safe(dest), "status": self.status()}
+        # v1 imports are stored as v2 so they carry everything from now on.
+        dest.write_bytes(export_character_pack_bytes(src))
+        try:
+            # The creator's blend shapes come with the pack; never "repair" them away.
+            mark_plan_imported(dest)
+        except Exception:
+            pass
+        return {
+            "character": self._character_card_safe(dest),
+            "status": self.status(),
+            "characters": self.list_characters(),
+        }
 
     def load_character(
         self,
@@ -1655,6 +1731,7 @@ class StreamRuntime:
         if self._streaming and not quiet:
             raise RuntimeError("Stop the stream before loading a character")
         path = resolve_character_id(ident)
+        self._migrate_character_pack(path)
         pack = read_character_pack(path)
         if not quiet:
             self._set_status(busy=True, message=f"Loading {pack.name}…", error="")
@@ -1662,8 +1739,7 @@ class StreamRuntime:
         try:
             if not getattr(self.engine, "_ready", False):
                 self.ensure_model(keep_busy=True)
-            engine_size = int(getattr(self.engine, "image_size", 0) or 0)
-            can_reuse = bool(pack.image_size) and pack.image_size == engine_size
+            can_reuse = self._pack_latents_usable(pack)
             if can_reuse:
                 self.engine.load_encoded_reference(
                     keypoints=pack.keypoints,
@@ -1673,17 +1749,33 @@ class StreamRuntime:
                     path=path,
                 )
             else:
+                # Made with another model (or size): re-encode, preferring the
+                # clean original over the processed preview, then store the new
+                # latents so the next load is instant.
                 from .paths import refs_dir
 
-                tmp = refs_dir() / "_character_fallback.png"
-                Image.fromarray(pack.preview_rgb).save(tmp)
-                self.engine.set_reference(
-                    tmp,
-                    pack.keypoints,
-                    skip_crop=pack.skip_crop,
-                    on_progress=None,
-                )
+                if pack.source_bytes:
+                    suffix = pack.source_suffix or ".png"
+                    tmp = refs_dir() / f"_character_fallback{suffix}"
+                    tmp.write_bytes(pack.source_bytes)
+                else:
+                    tmp = refs_dir() / "_character_fallback.png"
+                    Image.fromarray(pack.preview_rgb).save(tmp)
+                try:
+                    self.engine.set_reference(
+                        tmp,
+                        pack.keypoints,
+                        skip_crop=pack.skip_crop,
+                        on_progress=None,
+                    )
+                finally:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    discard_sidecar_keypoints(tmp)
                 self.engine._ref_path = path
+                self._store_reencoded_latents(path)
             kps = getattr(self.engine, "_ref_keypoints", None)
             if kps is None:
                 raise RuntimeError("Character pack did not install a rest pose")
@@ -1795,16 +1887,150 @@ class StreamRuntime:
             self._forget_character(message="Character removed")
         return {"ok": True, "status": self.status(), "characters": self.list_characters()}
 
+    def character_info(self, ident: str) -> dict[str, Any]:
+        """What a pack carries, for the sharing panel."""
+        from .character_pack import read_character_pack, resolve_character_id
+
+        path = resolve_character_id(ident)
+        pack = read_character_pack(path)
+        fit = pack.fit if isinstance(pack.fit, dict) else {}
+        model = pack.model if isinstance(pack.model, dict) else {}
+        plan = pack.blendshapes if isinstance(pack.blendshapes, dict) else {}
+        try:
+            model_match = self._pack_latents_usable(pack)
+        except Exception:
+            model_match = False
+        try:
+            size = int(path.stat().st_size)
+        except OSError:
+            size = 0
+        return {
+            "id": path.stem,
+            "name": pack.name,
+            "version": int(pack.version),
+            "created_at": pack.created_at,
+            "updated_at": pack.updated_at,
+            "author": str(pack.meta.get("author") or ""),
+            "license": str(pack.meta.get("license") or ""),
+            "description": str(pack.meta.get("description") or ""),
+            "model": {
+                "checkpoint": str(model.get("checkpoint") or ""),
+                "image_size": int(model.get("image_size") or pack.image_size or 0),
+                "latent_shape": list(model.get("latent_shape") or np.shape(pack.ref_latent)),
+            },
+            "model_match": bool(model_match),
+            "includes": {
+                "pose_keys": len(pack.pose_keys or []),
+                "blendshapes": bool(plan.get("shapes")),
+                "hair": bool(fit.get("hair")),
+                "skeleton": bool(fit.get("skeleton")),
+                "travel_box": bool(fit.get("travel_box")),
+                "source_image": bool(pack.source_bytes),
+            },
+            "size_bytes": size,
+        }
+
+    def update_character_meta(
+        self,
+        ident: str,
+        *,
+        name: str | None = None,
+        author: str | None = None,
+        license: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        from .character_pack import resolve_character_id, update_pack_meta
+
+        path = resolve_character_id(ident)
+        if author is not None or license is not None or description is not None:
+            update_pack_meta(path, author=author, license=license, description=description)
+        if name is not None and name.strip():
+            return self.rename_character(path.stem, name)
+        return {
+            "ok": True,
+            "character": self._character_card_safe(path),
+            "status": self.status(),
+            "characters": self.list_characters(),
+        }
+
+    def export_character_bytes(self, ident: str) -> tuple[str, bytes]:
+        """``(file name, v2 pack bytes)`` with every sidecar folded in first."""
+        from .character_pack import (
+            export_character_pack_bytes,
+            read_character_pack,
+            resolve_character_id,
+            slugify_character_name,
+        )
+
+        path = resolve_character_id(ident)
+        self._migrate_character_pack(path)
+        name = read_character_pack(path).name or path.stem
+        return f"{slugify_character_name(name)}.vtm", export_character_pack_bytes(path)
+
+    def _rename_character_file(self, path: Path, name: str) -> Path:
+        """Name the ``.vtm`` after the character, so the file in the folder is
+        the one you'd send. Its preview folder moves with it."""
+        from .character_pack import (
+            character_still_path,
+            slugify_character_name,
+            unique_character_path,
+        )
+
+        library = characters_dir()
+        try:
+            if path.parent.resolve() != library.resolve():
+                return path  # nested pack folders keep their layout
+        except OSError:
+            return path
+        if slugify_character_name(name).lower() == path.stem.lower():
+            return path
+        dest = unique_character_path(name, dest_dir=library)
+        path.rename(dest)
+        old_dir = character_still_path(path.stem, dest_dir=library).parent
+        new_dir = character_still_path(dest.stem, dest_dir=library).parent
+        if old_dir.is_dir() and not new_dir.exists():
+            try:
+                old_dir.rename(new_dir)
+            except OSError:
+                pass
+        return dest
+
+    def reveal_character(self, ident: str) -> dict[str, Any]:
+        """Open Explorer with the character's ``.vtm`` selected, ready to share."""
+        import subprocess
+
+        from .character_pack import resolve_character_id
+
+        path = resolve_character_id(ident)
+        # Everything the character needs goes into the file before anyone copies it.
+        self._migrate_character_pack(path)
+        target = path.resolve()
+        if sys.platform == "win32":
+            subprocess.Popen(f'explorer /select,"{target}"')
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target.parent)])
+        return {"ok": True, "path": display_path(path)}
+
     def rename_character(self, ident: str, name: str) -> dict[str, Any]:
         from .character_pack import rename_character_pack, resolve_character_id
         from .ui_session import save_ui_session
 
         path = resolve_character_id(ident)
+        # Sidecars are keyed by the old file name: fold them in before it changes.
+        self._migrate_character_pack(path)
         card = rename_character_pack(path, name)
-        if self._ref_path is not None and self._ref_path.resolve() == path.resolve():
+        loaded = self._ref_path is not None and self._ref_path.resolve() == path.resolve()
+        path = self._rename_character_file(path, card["name"])
+        if loaded:
+            self._ref_path = path
+            self.engine._ref_path = path
             self._set_status(
+                character_id=path.stem,
                 character_name=card["name"],
                 reference_name=card["name"],
+                reference_path=display_path(path),
                 message=f"Character: {card['name']}",
             )
             save_ui_session(
@@ -1869,6 +2095,62 @@ class StreamRuntime:
             }
         return None
 
+    def _migrate_character_pack(self, path: Path) -> None:
+        """Fold every legacy sidecar into the pack and make it v2.
+
+        Pose keys, the blend shape snapshot and the fit used to live beside
+        the pack; each reader folds its own file in on first read.
+        """
+        from .blendshapes import load_character_plan
+        from .character_fit import read_character_fit
+        from .character_pack import upgrade_character_pack
+
+        for fold in (
+            lambda: load_keys(path),
+            lambda: load_character_plan(path.stem),
+            lambda: read_character_fit(path.stem),
+        ):
+            try:
+                fold()
+            except Exception:
+                pass
+        try:
+            model = self.engine.model_identity() if getattr(self.engine, "_ready", False) else None
+            upgrade_character_pack(path, model=None if model is None else {
+                k: v for k, v in model.items() if k != "latent_shape"
+            })
+        except Exception:
+            pass
+
+    def _pack_latents_usable(self, pack: Any) -> bool:
+        """Stored latents are reused only for the model and size that made them."""
+        from .character_pack import pack_model_matches
+
+        ident = self.engine.model_identity()
+        return pack_model_matches(
+            pack,
+            checkpoint=str(ident.get("checkpoint") or ""),
+            image_size=int(ident.get("image_size") or 0),
+            # The pack's own latent shape: VAE latents depend on image size,
+            # which is compared above; the model tag guards the rest.
+            latent_shape=np.shape(pack.ref_latent),
+        )
+
+    def _store_reencoded_latents(self, path: Path) -> None:
+        from .character_pack import replace_pack_latents
+
+        try:
+            exported = self.engine.export_encoded_reference()
+            replace_pack_latents(
+                path,
+                ref_latent=exported["ref_latent"],
+                ref_face_latent=exported["ref_face_latent"],
+                image_size=int(exported["image_size"]),
+                model=exported.get("model"),
+            )
+        except Exception as exc:
+            print(f"Could not store re-encoded latents in {path.name}: {exc}")
+
     def _character_card_safe(self, path: Path) -> dict[str, Any]:
         from .blendshapes import plan_card_fields
         from .character_pack import character_card
@@ -1883,8 +2165,8 @@ class StreamRuntime:
     def _run_fast_warmup_if_needed(self, *, force: bool = False) -> None:
         """Compile + prime Fast kernels with a visible progress bar.
 
-        Blocks the caller until compile/warmup finishes. The UI progress bar
-        keeps moving during the long torch.compile stage.
+        Blocks the caller until compile/warmup finishes. The bar is timed
+        against this PC's earlier warmups (``load_timing``), stage by stage.
         """
         if not bool(self.status().get("fast_mode")):
             return
@@ -1907,49 +2189,34 @@ class StreamRuntime:
         except Exception:
             pass
         self._pick_auto_batch2()
-        stages = self.engine.plan_warmup_stages()
-        total = max(1, len(stages))
+        steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
+        # Carry on from the GPU move's slice so Start reads as one bar.
+        with self._lock:
+            carried = (
+                float(self._status.get("progress") or 0.0)
+                if self._status.get("progress_kind") == "warmup"
+                else 0.0
+            )
+        lo = max(0.02, min(carried, GPU_MOVE_SHARE))
+        self._set_status(busy=True, fast_warming=True, message="Preparing stream", error="")
 
-        def _on_warm(done: float | int, total_n: int, label: str) -> None:
-            frac = float(done) / float(max(total_n, 1))
-            # Keep the bar moving while a long stage (compile) is in progress.
-            if float(done) < float(total_n):
-                frac = min(0.97, max(0.04, frac))
-            self._set_progress(
-                frac,
-                label=str(label or "Compiling… please wait"),
+        def _warm(batch: int) -> None:
+            keys = self.engine.warmup_plan(batch_size=batch)
+            with self._stage_meter(
+                keys,
                 kind="warmup",
-                message=str(label or "Compiling… please wait"),
-                busy=True,
+                lo=lo,
+                hi=WARMUP_SHARE_END,
+                label="Preparing stream",
                 fast_warming=True,
-            )
+            ) as meter:
+                self.engine.warmup(num_steps=steps, batch_size=batch, on_stage=meter.stage)
 
-        self._set_status(
-            busy=True,
-            fast_warming=True,
-            message="Compiling… please wait",
-            error="",
-        )
-        self._set_progress(
-            0.04,
-            label="Compiling… please wait",
-            kind="warmup",
-            message="Compiling… please wait",
-            fast_warming=True,
-        )
         try:
-            self.engine.warmup(
-                num_steps=int(self.status().get("steps") or STREAM_DEFAULT_STEPS),
-                batch_size=int(getattr(self.engine, "stream_batch_size", 1) or 1),
-                on_progress=_on_warm,
-            )
+            _warm(int(getattr(self.engine, "stream_batch_size", 1) or 1))
             self._fast_warmed = True
             compile_on = bool(getattr(self.engine, "compile_status", "") == "on")
-            msg = (
-                "Ready — torch.compile on"
-                if compile_on
-                else f"Ready — compile {getattr(self.engine, 'compile_status', 'off')}"
-            )
+            msg = "Ready — speed boost on" if compile_on else "Ready"
             if bool(self.status().get("batch2")):
                 used = gpu_used_fraction(self.engine)
                 if used is not None:
@@ -1976,11 +2243,7 @@ class StreamRuntime:
                     pass
                 self._set_status(batch2=False)
                 try:
-                    self.engine.warmup(
-                        num_steps=int(self.status().get("steps") or STREAM_DEFAULT_STEPS),
-                        batch_size=1,
-                        on_progress=_on_warm,
-                    )
+                    _warm(1)
                     self._fast_warmed = True
                     self._clear_progress(
                         busy=False,
@@ -1996,7 +2259,7 @@ class StreamRuntime:
                 busy=False,
                 fast_warming=False,
                 error=str(exc),
-                message="Compile / warmup failed — continuing eager",
+                message="Speed boost unavailable — running at normal speed",
             )
             print(f"[warmup] failed: {exc}")
 
@@ -2031,7 +2294,7 @@ class StreamRuntime:
         if not bool(self.status().get("fast_mode")):
             return
         if self.status().get("fast_warming"):
-            raise RuntimeError("Compiling… please wait for the progress bar to finish")
+            raise RuntimeError("The stream is still getting ready. Try again in a moment.")
         compile_st = str(getattr(self.engine, "compile_status", "off") or "off")
         if self._fast_warmed and compile_st in {"on", "fail", "skip", "off"}:
             return
@@ -2048,6 +2311,7 @@ class StreamRuntime:
             "frame_blend",
             "inbetweens",
             "interpolate",
+            "max_fps",
             "hold_last",
             "track_fps",
             "drive_pose",
@@ -2103,6 +2367,8 @@ class StreamRuntime:
             updates["interpolate"] = interpolate_on(updates["interpolate"])
         if "inbetweens" in updates:
             updates["inbetweens"] = _clip_inbetweens(updates["inbetweens"])
+        if "max_fps" in updates:
+            updates["max_fps"] = _clip_max_fps(updates["max_fps"])
         old_travel = None
         if "travel_box" in updates:
             old_travel = self._status.get("travel_box")
@@ -2160,6 +2426,7 @@ class StreamRuntime:
                 "frame_blend",
                 "inbetweens",
                 "interpolate",
+                "max_fps",
                 "hold_last",
             )
         ):
@@ -2172,6 +2439,7 @@ class StreamRuntime:
                 frame_blend=self._status.get("frame_blend"),
                 inbetweens=self._status.get("inbetweens"),
                 interpolate=self._status.get("interpolate"),
+                max_fps=self._status.get("max_fps"),
                 hold_last=self._status.get("hold_last"),
             )
         if "hold_last" in updates:
@@ -3185,22 +3453,36 @@ class StreamRuntime:
         if self._frame_in_flight or self._gen_busy:
             raise RuntimeError("Busy — wait for the current generate")
         if self.status().get("fast_warming"):
-            raise RuntimeError("Compiling… please wait for the progress bar to finish")
+            raise RuntimeError("The stream is still getting ready. Try again in a moment.")
         if not self._ensure_ref():
             return
-        self.ensure_model()
+        self.ensure_model(keep_bar=True)
         self._ensure_compile_ready()
+        with self._lock:
+            leftover = self._status.get("progress_kind") == "warmup"
+        if leftover:
+            self._clear_progress()
         kps = self._current_keypoints()
         if kps is None:
             return
         steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
         self._frame_in_flight = True
         self._set_status(busy=True, message="Generating…")
+        current = np.asarray(kps, dtype=np.float32)
+        batch_n = max(1, int(getattr(self.engine, "stream_batch_size", 1) or 1))
+        # Same batch size the model was warmed at, or this one call recompiles.
+        keypoints, hair_maps = pack_stream_batch(
+            current,
+            np.asarray(self._current_hair_maps(current), dtype=np.float32),
+            None,
+            None,
+            batch_n,
+        )
         self._enqueue_generate(
             steps=steps,
             streaming=False,
-            keypoints=kps,
-            hair_maps=self._current_hair_maps(kps),
+            keypoints=keypoints,
+            hair_maps=hair_maps,
         )
 
     def _vcam_frame_size(self) -> tuple[int, int]:
@@ -3273,14 +3555,16 @@ class StreamRuntime:
         if self._streaming:
             return
         if self.status().get("fast_warming"):
-            raise RuntimeError("Compiling… please wait for the progress bar to finish")
+            raise RuntimeError("The stream is still getting ready. Try again in a moment.")
         if not self._ensure_ref():
             return
-        self.ensure_model()
+        self.ensure_model(keep_bar=True)
         self._ensure_compile_ready()
         self._streaming = True
         self._paused = False
         self._frame_in_flight = False
+        self._last_gen_start = 0.0
+        self._gen_hold_pending = False
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -3297,10 +3581,20 @@ class StreamRuntime:
             paused=False,
             show_fps=0.0,
             gen_fps=0.0,
-            message="Streaming",
             busy=False,
         )
+        # "Streaming" only once a picture is out; until then the bar stays.
+        self._first_frame_pending = True
+        self._set_progress(0.96, label="Starting stream", kind="warmup")
         self._schedule_next_frame()
+
+    def _end_first_frame_wait(self, **status: Any) -> None:
+        if not self._first_frame_pending:
+            if status:
+                self._set_status(**status)
+            return
+        self._first_frame_pending = False
+        self._clear_progress(busy=False, **status)
 
     def stop_stream(self) -> None:
         if not self._streaming:
@@ -3334,6 +3628,7 @@ class StreamRuntime:
         self._playout_next = 0.0
         self._drain_display_queue()
         self._offload_pending = True
+        self._end_first_frame_wait()
         self._set_status(
             streaming=False, paused=False, busy=False, message="Stream stopped"
         )
@@ -3367,6 +3662,7 @@ class StreamRuntime:
         if not self._streaming or self._paused:
             return
         self._paused = True
+        self._end_first_frame_wait()
         self._set_status(paused=True, message="Stream paused")
 
     def resume_stream(self) -> None:
@@ -3383,7 +3679,21 @@ class StreamRuntime:
     def _schedule_next_frame(self) -> None:
         if not self._streaming or self._paused or self._frame_in_flight:
             return
+        # Max FPS: hold the next DiT call so the GPU idles between keys.
+        batch_n = max(1, int(getattr(self.engine, "stream_batch_size", 1) or 1))
+        hold = gen_hold_s(
+            self._status.get("max_fps"),
+            self._last_gen_start,
+            time.perf_counter(),
+            batch=batch_n,
+        )
+        if hold > 0.0:
+            if not self._gen_hold_pending:
+                self._gen_hold_pending = True
+                threading.Timer(hold, self._resume_after_gen_hold).start()
+            return
         self._frame_in_flight = True
+        self._last_gen_start = time.perf_counter()
         kps = self._current_keypoints()
         if kps is None:
             self._frame_in_flight = False
@@ -3405,6 +3715,10 @@ class StreamRuntime:
         self._enqueue_generate(
             steps=steps, streaming=True, keypoints=keypoints, hair_maps=hair_maps
         )
+
+    def _resume_after_gen_hold(self) -> None:
+        self._gen_hold_pending = False
+        self._schedule_next_frame()
 
     def _enqueue_generate(
         self,
@@ -3547,6 +3861,8 @@ class StreamRuntime:
                 last_interp_s=self._last_interp_s,
                 gen_fps=float(self._status.get("gen_fps") or 0.0),
             )
+            gen_fps = float(self._status.get("gen_fps") or 0.0)
+            count, gap_s = inbetween_pacing(gen_fps, count if prev is not None else 0)
             if prev is not None and count > 0:
                 started = time.perf_counter()
                 try:
@@ -3561,17 +3877,23 @@ class StreamRuntime:
                     posed = keypoints
                     if prev_kps is not None and keypoints is not None:
                         posed = lerp_stream_pose(prev_kps, keypoints, amount)
-                    self._pace_display()
+                    self._pace_display(gap_s)
                     self._publish_display_frame(mid, posed, key=False)
-            self._pace_display()
+            self._pace_display(gap_s)
             self._publish_display_frame(image, keypoints, key=True)
         finally:
             self._display_busy = False
 
-    def _pace_display(self) -> None:
-        """Show at most 20 fps, after a quarter-second hold at the start of a stream."""
+    def _pace_display(self, gap_s: float = 0.0) -> None:
+        """Hold until the next shown picture is due: ``gap_s`` after the last one
+        (at most 20 fps), after a quarter-second hold at the start of a stream."""
         now = time.perf_counter()
-        wait, nxt = playout_gap(now, float(getattr(self, "_playout_next", 0.0) or 0.0))
+        fps_max = (1.0 / gap_s) if gap_s > 0.0 else SHOW_FPS_MAX
+        wait, nxt = playout_gap(
+            now,
+            float(getattr(self, "_playout_next", 0.0) or 0.0),
+            fps_max=min(SHOW_FPS_MAX, fps_max),
+        )
         self._playout_next = nxt
         if wait <= 0:
             return
@@ -3618,6 +3940,8 @@ class StreamRuntime:
         frame = self._frame_payload(image, posed)
         frame["fps"] = show_fps or gen_fps
         self._emit({"type": "frame", **frame})
+        if key and self._first_frame_pending:
+            self._end_first_frame_wait(message="Streaming")
         if key:
             self._emit({"type": "status", "status": self.status()})
 
@@ -3683,6 +4007,7 @@ class StreamRuntime:
                     self._paused = False
                     self._frame_in_flight = False
                     self._offload_pending = True
+                    self._end_first_frame_wait()
                     self._set_status(
                         streaming=False,
                         paused=False,

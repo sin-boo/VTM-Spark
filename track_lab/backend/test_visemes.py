@@ -29,7 +29,7 @@ def test_open_mouth_reaches_a_without_overshoot() -> None:
     rest = _set_rest()
     weights = _heuristic({**rest, "open": 0.60})
     assert weights["A"] > 0.8
-    assert 0.0 <= sum(weights[name] for name in ("A", "I", "U", "E", "O")) <= 1.0
+    assert 0.0 <= sum(weights[name] for name in ("A", "I", "U", "E")) <= 1.0
 
 
 def test_vowels_share_one_bounded_budget() -> None:
@@ -37,9 +37,9 @@ def test_vowels_share_one_bounded_budget() -> None:
     spread = _heuristic({**rest, "open": 0.45, "width": 0.52})
     rounded = _heuristic({**rest, "open": 0.45, "width": 0.30})
     assert spread["I"] + spread["E"] > 0.0
-    assert rounded["U"] + rounded["O"] > 0.0
+    assert rounded["U"] > 0.0
     for weights in (spread, rounded):
-        assert sum(weights[name] for name in ("A", "I", "U", "E", "O")) <= 1.000001
+        assert sum(weights[name] for name in ("A", "I", "U", "E")) <= 1.000001
 
 
 def test_blank_face_jitter_is_not_a_smile() -> None:
@@ -157,7 +157,6 @@ def test_banks_keep_small_vowels_when_smile_is_huge() -> None:
         "I": {"open": 0.22, "width": 0.46, "corner": 0.52, "lift": 0.0},
         "E": {"open": 0.30, "width": 0.48, "corner": 0.52, "lift": 0.0},
         "U": {"open": 0.22, "width": 0.32, "corner": 0.48, "lift": 0.0},
-        "O": {"open": 0.34, "width": 0.30, "corner": 0.48, "lift": 0.0},
     }
     near_i = cal.weights(
         {"open": 0.22, "width": 0.455, "corner": 0.51, "lift": 0.0},
@@ -188,12 +187,12 @@ def test_mesh_mix_normalizes_bad_external_weights() -> None:
     rest = np.zeros((28, 3), dtype=np.float32)
     rest[:, 2] = 1.0
     book.shapes["rest"] = rest
-    for name in ("A", "I", "U", "E", "O"):
+    for name in ("A", "I", "U", "E"):
         shape = rest.copy()
         shape[list(MOUTH_SLOTS), 1] = 10.0
         book.shapes[name] = shape
     weights = empty_weights()
-    weights.update({"A": 1.0, "I": 1.0, "U": 1.0, "E": 1.0, "O": 1.0})
+    weights.update({"A": 1.0, "I": 1.0, "U": 1.0, "E": 1.0})
     mixed = book.mix(weights)
     assert mixed is not None
     assert float(mixed[list(MOUTH_SLOTS), 1].max()) <= 10.000001

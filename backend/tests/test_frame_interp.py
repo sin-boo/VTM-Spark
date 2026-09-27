@@ -6,6 +6,7 @@ from backend.frame_interp import (
     blend_images,
     inbetween_frames,
     inbetween_image,
+    inbetween_pacing,
     inbetween_slot_s,
     inbetween_ts,
     lerp_stream_pose,
@@ -50,18 +51,54 @@ def test_print_inbetween_skips_when_behind() -> None:
     assert print_inbetween_count(1, last_interp_s=0.02, gen_fps=10.0) == 1
 
 
-def test_inbetween_image_moves_box() -> None:
-    left = np.zeros((48, 48, 3), dtype=np.uint8)
-    right = np.zeros((48, 48, 3), dtype=np.uint8)
-    left[20:28, 4:12] = 255
-    right[20:28, 36:44] = 255
+def _blob(cx: float, size: int = 192) -> np.ndarray:
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    g = np.exp(-((xx - cx) ** 2 + (yy - size / 2) ** 2) / (2 * 12.0**2)) * 255.0
+    return np.dstack([g, g, g]).astype(np.uint8)
+
+
+def _centre_x(arr: np.ndarray) -> float:
+    g = arr[..., 0].astype(np.float32)
+    xx = np.arange(arr.shape[1], dtype=np.float32)[None, :]
+    return float((g * xx).sum() / g.sum())
+
+
+def _spread_x(arr: np.ndarray) -> float:
+    g = arr[..., 0].astype(np.float32)
+    xx = np.arange(arr.shape[1], dtype=np.float32)[None, :]
+    c = _centre_x(arr)
+    return float(np.sqrt((g * (xx - c) ** 2).sum() / g.sum()))
+
+
+def test_inbetween_image_lands_halfway() -> None:
+    """The mid must sit at the midpoint, not backwards or as two ghosts.
+
+    Sampling ``x + flow`` moved the old key the wrong way; a plain crossfade
+    would also pass a loose "somewhere between" check.
+    """
+    left, right = _blob(80), _blob(100)
     mid = np.asarray(inbetween_image(Image.fromarray(left), Image.fromarray(right), 0.5))
+    assert abs(_centre_x(mid) - 90.0) < 2.0
+    # One blob, not the old and new positions faded together.
+    fade = np.asarray(blend_images(Image.fromarray(left), Image.fromarray(right), 0.5))
+    # Fade: ~15.3 px wide; warped mid: ~13.1; the key itself: ~11.8.
+    assert _spread_x(mid) < _spread_x(fade) * 0.9
+    assert _spread_x(mid) < _spread_x(left) * 1.2
 
-    def _col_mass(arr: np.ndarray) -> float:
-        cols = np.where(arr.sum(axis=(0, 2)) > 0)[0]
-        return float(cols.mean()) if cols.size else -1.0
 
-    assert _col_mass(left) < _col_mass(mid) < _col_mass(right)
+def test_inbetween_pacing_spreads_evenly() -> None:
+    # 6 keys/s, one mid: two 83 ms steps, not 50 ms then 117 ms.
+    n, gap = inbetween_pacing(6.0, 1)
+    assert n == 1
+    assert abs(gap - 1.0 / 12.0) < 1e-6
+    # 10 keys/s cannot fit three mids under 20 fps: only one survives.
+    n, gap = inbetween_pacing(10.0, 3)
+    assert n == 1
+    assert abs(gap - 0.05) < 1e-6
+    # 20 keys/s: no room for mids at all.
+    assert inbetween_pacing(20.0, 2)[0] == 0
+    # Unknown rate: keep the count, fall back to the 20 fps slot.
+    assert inbetween_pacing(0.0, 2) == (2, 0.05)
 
 
 def test_inbetween_frames_count() -> None:

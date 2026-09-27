@@ -1,8 +1,20 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
-import type { CharacterCard, CharacterLoadResult, TravelBox } from '../api'
+import {
+  characterThumb,
+  type CharacterCard,
+  type CharacterExportResult,
+  type CharacterInfo,
+  type CharacterLoadResult,
+  type CharacterMeta,
+  type TravelBox,
+} from '../api'
+import { CharacterDetails } from './CharacterDetails'
 import { CharacterFit, type CharacterFitHandle } from './CharacterFit'
 import { ProgressMeter } from './widgets'
+
+/** Details / sharing panel is asleep: kept in the code, hidden from the menu. Set true to bring it back. */
+const SHOW_CHARACTER_DETAILS = false
 
 type Props = {
   currentId: string
@@ -20,6 +32,11 @@ type Props = {
   onRemove: (id: string) => void
   onRename: (id: string, name: string) => void
   onCreate: (file: File) => Promise<CharacterCard | void | undefined>
+  onImport: (file: File) => Promise<CharacterCard>
+  onExport: (id: string, name: string) => Promise<CharacterExportResult>
+  onReveal: (id: string) => Promise<unknown>
+  onInfo: (id: string) => Promise<CharacterInfo>
+  onMeta: (meta: CharacterMeta) => Promise<CharacterCard>
   onRefresh?: () => void
   travel?: TravelBox | null
   onTravel: (box: TravelBox) => void
@@ -27,8 +44,32 @@ type Props = {
 
 type CtxMenu = { id: string; x: number; y: number }
 
+type LibNotice = { error: boolean; text: string }
+
+function cleanError(e: unknown): string {
+  return String(e).replace(/^Error:\s*/, '')
+}
+
+/** Grid thumbnail that drops back to the full preview if /thumb fails. */
+function CardThumb({ card }: { card: CharacterCard }) {
+  const [failed, setFailed] = useState(false)
+  const src = failed ? card.preview_url : characterThumb(card)
+  return (
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      onError={() => {
+        if (!failed && src !== card.preview_url) setFailed(true)
+      }}
+    />
+  )
+}
+
 export function CharacterLibrary(props: Props) {
   const createRef = useRef<HTMLInputElement>(null)
+  const importRef = useRef<HTMLInputElement>(null)
+  const gridRef = useRef<HTMLDivElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
   const fitRef = useRef<CharacterFitHandle>(null)
@@ -45,6 +86,11 @@ export function CharacterLibrary(props: Props) {
   const [localStill, setLocalStill] = useState('')
   const [menu, setMenu] = useState<CtxMenu | null>(null)
   const [pickError, setPickError] = useState('')
+  const [detailsId, setDetailsId] = useState<string | null>(null)
+  const [revealError, setRevealError] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [libNotice, setLibNotice] = useState<LibNotice | null>(null)
+  const [revealId, setRevealId] = useState<string | null>(null)
   const locked = props.busy || props.creating
   const creating = props.creating
   const current = props.characters.find((c) => c.id === props.currentId)
@@ -53,6 +99,7 @@ export function CharacterLibrary(props: Props) {
   const renameCard = props.characters.find((c) => c.id === renameId)
   const menuCard = props.characters.find((c) => c.id === menu?.id)
   const nameCard = props.characters.find((c) => c.id === nameId)
+  const detailsCard = props.characters.find((c) => c.id === detailsId)
   const stillSrc = localStill || props.createStillUrl || nameCard?.preview_url || ''
   const previewSrc = current?.preview_url || (creating ? stillSrc : '')
   const createOpen = creating || Boolean(localStill) || Boolean(nameId)
@@ -63,6 +110,7 @@ export function CharacterLibrary(props: Props) {
     setConfirmId(null)
     setRepairId(null)
     setRenameId(null)
+    setRevealError('')
     setMenu(null)
     setPickError('')
   }
@@ -70,6 +118,7 @@ export function CharacterLibrary(props: Props) {
   function closeLibrary() {
     setLibraryOpen(false)
     setPickedId(null)
+    setLibNotice(null)
     clearOverlays()
   }
 
@@ -85,8 +134,12 @@ export function CharacterLibrary(props: Props) {
   useEffect(() => {
     function onKey(ev: KeyboardEvent) {
       if (ev.key !== 'Escape') return
-      if (menu || renameId || confirmId || repairId) {
+      if (menu || renameId || confirmId || repairId || revealError) {
         clearOverlays()
+        return
+      }
+      if (detailsId) {
+        setDetailsId(null)
         return
       }
       if (createOpen) {
@@ -97,7 +150,18 @@ export function CharacterLibrary(props: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [menu, renameId, confirmId, repairId, creating, nameId, libraryOpen, createOpen])
+  }, [
+    menu,
+    renameId,
+    confirmId,
+    repairId,
+    revealError,
+    detailsId,
+    creating,
+    nameId,
+    libraryOpen,
+    createOpen,
+  ])
 
   useEffect(() => {
     if (!menu) return
@@ -114,12 +178,21 @@ export function CharacterLibrary(props: Props) {
   }, [renameId])
 
   useEffect(() => {
+    if (!revealId) return
+    const cards = gridRef.current?.querySelectorAll<HTMLElement>('[data-id]') ?? []
+    const found = Array.from(cards).find((el) => el.dataset.id === revealId)
+    if (!found) return
+    found.scrollIntoView({ block: 'nearest' })
+    setRevealId(null)
+  }, [revealId, props.characters])
+
+  useEffect(() => {
     if (fitting) nameRef.current?.focus()
   }, [fitting])
 
   function placeMenu(card: CharacterCard, x: number, y: number) {
     const width = 168
-    const height = card.shapes_compatible === false ? 148 : 116
+    const height = (card.shapes_compatible === false ? 148 : 116) + 56
     setConfirmId(null)
     setRenameId(null)
     setMenu({
@@ -181,6 +254,49 @@ export function CharacterLibrary(props: Props) {
     }
   }
 
+  function pickImport() {
+    if (locked || importing) return
+    importRef.current?.click()
+  }
+
+  async function beginImport(file: File) {
+    setLibNotice(null)
+    if (!/\.vtm$/i.test(file.name)) {
+      setLibNotice({ error: true, text: 'Pick a .vtm character file.' })
+      return
+    }
+    setImporting(true)
+    try {
+      const card = await props.onImport(file)
+      if (card?.id) {
+        setPickedId(card.id)
+        setRevealId(card.id)
+        setLibNotice({ error: false, text: `Imported ${card.name}.` })
+      }
+    } catch (e) {
+      setLibNotice({ error: true, text: `Import failed: ${cleanError(e)}` })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  async function revealCard(card: CharacterCard) {
+    setMenu(null)
+    setRevealError('')
+    try {
+      await props.onReveal(card.id)
+    } catch (e) {
+      setRevealError(`${card.name}: ${cleanError(e)}`)
+    }
+  }
+
+  function openDetails(card: CharacterCard) {
+    setMenu(null)
+    setConfirmId(null)
+    setRenameId(null)
+    setDetailsId(card.id)
+  }
+
   function submitDockRename() {
     const name = renameDraft.trim()
     if (!renameId || !name) return
@@ -223,12 +339,6 @@ export function CharacterLibrary(props: Props) {
     setNameId(card.id)
   }
 
-  async function loadCard(id: string) {
-    if (locked || id === props.currentId) return
-    const res = await props.onLoad(id)
-    if (res?.incompatible) setRepairId(id)
-  }
-
   async function chooseCard(id: string) {
     if (!id || locked) return
     const gen = ++chooseGen.current
@@ -241,18 +351,19 @@ export function CharacterLibrary(props: Props) {
     if (res?.incompatible) setRepairId(id)
   }
 
-  async function addCard(id: string) {
-    if (!id || locked) return
-    setPickedId(id)
-    if (id !== props.currentId) await loadCard(id)
-    closeLibrary()
-  }
-
-  async function addPicked() {
-    if (pickedId) await addCard(pickedId)
-  }
-
-  const sheet = renameCard ? (
+  const sheet = revealError ? (
+    <div className="char-sheet" role="alertdialog" aria-labelledby="char-reveal-title">
+      <p id="char-reveal-title" className="char-sheet-title">
+        Could not open the folder
+      </p>
+      <p className="status-error">{revealError}</p>
+      <div className="row">
+        <button type="button" className="btn ghost" onClick={() => setRevealError('')}>
+          OK
+        </button>
+      </div>
+    </div>
+  ) : renameCard ? (
     <div className="char-sheet" role="dialog" aria-labelledby="char-rename-title">
       <p id="char-rename-title" className="char-sheet-title">
         Rename {renameCard.name}
@@ -285,7 +396,7 @@ export function CharacterLibrary(props: Props) {
         Remove {confirmCard.name}?
       </p>
       <div className="char-sheet-preview">
-        <img src={confirmCard.preview_url} alt="" />
+        <img src={characterThumb(confirmCard)} alt="" />
         <p className="hint">
           {confirmCard.id === props.currentId ? 'Off the desk and out of the library.' : 'Out of the library.'}
         </p>
@@ -371,6 +482,19 @@ export function CharacterLibrary(props: Props) {
           void beginCreate(f)
         }}
       />
+      <input
+        ref={importRef}
+        type="file"
+        accept=".vtm"
+        className="file-input-hidden"
+        disabled={locked || importing}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          e.target.value = ''
+          if (!f) return
+          void beginImport(f)
+        }}
+      />
 
       {libraryOpen
         ? createPortal(
@@ -390,7 +514,10 @@ export function CharacterLibrary(props: Props) {
                     Close
                   </button>
                 </header>
-                <div className={props.characters.length ? 'char-grid' : 'char-grid is-empty'}>
+                <div
+                  ref={gridRef}
+                  className={props.characters.length ? 'char-grid' : 'char-grid is-empty'}
+                >
                   {props.characters.length ? (
                     props.characters.map((card) => (
                     <article
@@ -398,6 +525,7 @@ export function CharacterLibrary(props: Props) {
                       className={`char-card${
                         card.id === (pickedId || props.currentId) ? ' is-on' : ''
                       }${menu?.id === card.id ? ' is-menu' : ''}${card.id === confirmId ? ' is-remove' : ''}`}
+                      data-id={card.id}
                       onContextMenu={(e) => openMenu(card, e)}
                     >
                       <button
@@ -409,7 +537,7 @@ export function CharacterLibrary(props: Props) {
                         onClick={() => void chooseCard(card.id)}
                         onContextMenu={(e) => openMenu(card, e)}
                       >
-                        <img src={card.preview_url} alt="" />
+                        <CardThumb card={card} />
                         <span className="char-card-name">{card.name}</span>
                         {card.shapes_compatible === false ? (
                           <span className="char-card-warn">Incompatible</span>
@@ -438,17 +566,23 @@ export function CharacterLibrary(props: Props) {
                     </div>
                   )}
                 </div>
+                {libNotice ? (
+                  <p className={libNotice.error ? 'status-error' : 'hint'} role="status">
+                    {libNotice.text}
+                  </p>
+                ) : null}
                 <div className="char-modal-actions">
                   <button type="button" className="btn" disabled={locked} onClick={pickFile}>
                     Create
                   </button>
                   <button
                     type="button"
-                    className="btn primary"
-                    disabled={locked || !pickedId}
-                    onClick={() => void addPicked()}
+                    className="btn"
+                    disabled={locked || importing}
+                    title="Add a character someone shared as a .vtm file"
+                    onClick={pickImport}
                   >
-                    Add
+                    {importing ? 'Importing…' : 'Import .vtm'}
                   </button>
                 </div>
               </div>
@@ -536,6 +670,28 @@ export function CharacterLibrary(props: Props) {
           )
         : null}
 
+      {detailsCard
+        ? createPortal(
+            <div
+              className="char-modal-back"
+              role="presentation"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setDetailsId(null)
+              }}
+            >
+              <CharacterDetails
+                card={detailsCard}
+                onInfo={props.onInfo}
+                onMeta={props.onMeta}
+                onExport={props.onExport}
+                busy={locked}
+                onClose={() => setDetailsId(null)}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
+
       {sheet
         ? createPortal(
             <div
@@ -594,6 +750,25 @@ export function CharacterLibrary(props: Props) {
                 }}
               >
                 Rename
+              </button>
+              {SHOW_CHARACTER_DETAILS ? (
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => openDetails(menuCard)}
+                >
+                  Details
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                title="Open the folder with this character's .vtm file, ready to share"
+                onClick={() => void revealCard(menuCard)}
+              >
+                Show in folder
               </button>
               <button
                 type="button"

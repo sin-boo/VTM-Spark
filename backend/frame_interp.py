@@ -99,6 +99,27 @@ def playout_gap(
     return float(next_at) - float(now), float(next_at) + slot
 
 
+def inbetween_pacing(gen_fps: float, count: int, *, fps_max: float = SHOW_FPS_MAX) -> tuple[int, float]:
+    """``(mids to show, seconds between shown pictures)`` for one key interval.
+
+    Mids and the key share the gap between two keys evenly instead of firing
+    every 50 ms and then waiting: at 6 keys/s one mid gives 83 ms steps, not
+    50 ms then 117 ms. Mids that would not fit under ``fps_max`` are dropped so
+    the queue never backs up and then bursts.
+    """
+    n = max(0, int(count))
+    slot = 1.0 / max(1.0, float(fps_max))
+    fps = float(gen_fps)
+    if fps <= 0.0:
+        return n, slot
+    interval = 1.0 / fps
+    fit = int(interval / slot + 1e-6) - 1
+    n = max(0, min(n, fit))
+    if n <= 0:
+        return 0, slot
+    return n, max(slot, interval / float(n + 1))
+
+
 def print_inbetween_count(
     wanted: int,
     *,
@@ -128,13 +149,34 @@ def _cv2():
     return cv2
 
 
+_GRIDS: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _pixel_grid(height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+    key = (int(height), int(width))
+    grid = _GRIDS.get(key)
+    if grid is None:
+        grid = np.meshgrid(
+            np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32)
+        )
+        _GRIDS.clear()
+        _GRIDS[key] = grid
+    return grid
+
+
 def _warp_rgb(image: np.ndarray, flow: np.ndarray, amount: float) -> np.ndarray:
+    """Move ``image`` ``amount`` of the way along ``flow`` (prev → next).
+
+    ``remap`` samples backwards: the pixel that lands at ``x`` comes from
+    ``x - amount * flow``. Adding the flow instead sent every moving part the
+    wrong way, so each in-between showed the old and the new position at once.
+    """
     cv2 = _cv2()
 
     height, width = image.shape[:2]
-    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-    map_x = (grid_x + flow[..., 0] * float(amount)).astype(np.float32)
-    map_y = (grid_y + flow[..., 1] * float(amount)).astype(np.float32)
+    grid_x, grid_y = _pixel_grid(height, width)
+    map_x = (grid_x - flow[..., 0] * float(amount)).astype(np.float32)
+    map_y = (grid_y - flow[..., 1] * float(amount)).astype(np.float32)
     return cv2.remap(
         image,
         map_x,
@@ -160,7 +202,8 @@ def _flow_forward(prev: np.ndarray, nxt: np.ndarray) -> np.ndarray:
     gray_a = cv2.cvtColor(a, cv2.COLOR_RGB2GRAY)
     gray_b = cv2.cvtColor(b, cv2.COLOR_RGB2GRAY)
     # One cheap pass. A second backward pass plus OpenCL was cutting gen FPS.
-    fwd = cv2.calcOpticalFlowFarneback(gray_a, gray_b, None, 0.5, 2, 11, 2, 5, 1.1, 0)
+    # Three pyramid levels follow a fast head turn (~60 px at 768); two lost it.
+    fwd = cv2.calcOpticalFlowFarneback(gray_a, gray_b, None, 0.5, 3, 11, 2, 5, 1.1, 0)
     if (small_w, small_h) != (width, height):
         fwd = cv2.resize(fwd, (width, height), interpolation=cv2.INTER_LINEAR)
         fwd[..., 0] *= float(width) / float(small_w)
@@ -169,8 +212,14 @@ def _flow_forward(prev: np.ndarray, nxt: np.ndarray) -> np.ndarray:
 
 
 def _mix_warp(prev: np.ndarray, nxt: np.ndarray, flow: np.ndarray, t: float) -> Image.Image:
+    """Both keys meet at ``t``: prev moves forward by ``t``, next back by ``1-t``.
+
+    Warping only prev and fading in a still next left a faint double image on
+    anything that moved.
+    """
     left = _warp_rgb(prev, flow, t)
-    out = (1.0 - t) * left.astype(np.float32) + t * nxt.astype(np.float32)
+    right = _warp_rgb(nxt, flow, t - 1.0)
+    out = (1.0 - t) * left.astype(np.float32) + t * right.astype(np.float32)
     return Image.fromarray(np.clip(out, 0.0, 255.0).astype(np.uint8), mode="RGB")
 
 
