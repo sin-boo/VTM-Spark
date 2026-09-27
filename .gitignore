@@ -81,3 +81,16 @@ models/trackers/*.task
 # OpenSeeFace weights also download via install.bat (only model 3 is used).
 vendor/tools/openseeface/models/*.onnx
 vendor/tools/openseeface/models/priorbox_640x640.json
+
+# AI assistant / editor config stays local (never pushed)
+.claude/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.codex/
+.gemini/
+.aider*
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
