@@ -146,6 +146,9 @@ export function ControlRail(props: Props) {
   const busy = Boolean(s?.busy)
   const streaming = Boolean(s?.streaming)
   const paused = Boolean(s?.paused)
+  // A model picked but not loaded: Start stream loads it first.
+  const pendingModel = s?.pending_checkpoint || ''
+  const shownModel = pendingModel || s?.checkpoint
   const interpolate = s?.interpolate !== false
   const tracking = Boolean(s?.tracking) || Boolean(props.lab?.live)
   const virtualCam = Boolean(s?.virtual_cam)
@@ -328,7 +331,7 @@ export function ControlRail(props: Props) {
               <select
                 value={
                   props.checkpoints.find(
-                    (c) => c.label === s?.checkpoint || c.path === s?.checkpoint,
+                    (c) => c.label === shownModel || c.path === shownModel,
                   )?.path ||
                   props.checkpoints[0]?.path ||
                   ''
@@ -345,6 +348,9 @@ export function ControlRail(props: Props) {
                 ))}
               </select>
             </label>
+            {pendingModel && !streaming ? (
+              <p className="hint">Not loaded yet — press Start stream to load it.</p>
+            ) : null}
             {(props.catalogOffers ?? []).length ? (
               <ul className="model-offers">
                 {(props.catalogOffers ?? []).map((offer) => (
@@ -622,11 +628,18 @@ export function ControlRail(props: Props) {
             <div className="row stream-run">
               <button
                 type="button"
-                className={streaming ? 'btn is-on' : 'btn primary'}
+                className={
+                  streaming ? 'btn is-on' : pendingModel ? 'btn is-pending' : 'btn primary'
+                }
                 onClick={props.onToggleStream}
                 disabled={(busy && !streaming) || Boolean(s?.fast_warming)}
+                title={
+                  !streaming && pendingModel
+                    ? `Load ${pendingModel}, then start the stream`
+                    : undefined
+                }
               >
-                {streaming ? 'Stop stream' : 'Start stream'}
+                {streaming ? 'Stop stream' : pendingModel ? 'Load new model & start' : 'Start stream'}
               </button>
               <button
                 type="button"

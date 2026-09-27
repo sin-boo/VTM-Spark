@@ -1256,6 +1256,18 @@ button.char-preview:focus-visible {
   border-color: #5a9fd6;
 }
 
+/* A new model is picked but not loaded: Start stream will load it. */
+.btn.is-pending {
+  background: #6b4f1d;
+  border-color: #d9a441;
+  color: #fff;
+}
+
+.btn.is-pending:hover:not(:disabled) {
+  background: #7d5d22;
+  border-color: #f0bd5a;
+}
+
 .btn.is-on {
   background: #2a2a2a;
   border-color: var(--mark);

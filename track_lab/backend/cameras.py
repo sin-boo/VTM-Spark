@@ -15,6 +15,8 @@ from pathlib import Path
 
 import cv2
 
+from . import debug_log
+
 
 def _no_mic_params() -> list[int]:
     """Keep VideoCapture from binding the Windows microphone.
@@ -371,22 +373,23 @@ def _open_dshow_reader(index: int, width: int, height: int) -> tuple[object | No
                 continue
             if _picture(frame):
                 # #region agent log
-                import numpy as np
+                if debug_log.ENABLED:
+                    import numpy as np
 
-                _sample = np.asarray(frame)
-                _step = max(1, min(_sample.shape[:2]) // 16) if getattr(_sample, "ndim", 0) >= 2 else 1
-                _agent_log(
-                    "D",
-                    "cameras.py:_open_dshow_reader",
-                    "dshow pictured",
-                    {
-                        "index": int(index),
-                        "name": name,
-                        "dcap": attempt,
-                        "shape": list(_sample.shape),
-                        "std": round(float(np.std(_sample[::_step, ::_step])), 2),
-                    },
-                )
+                    _sample = np.asarray(frame)
+                    _step = max(1, min(_sample.shape[:2]) // 16) if getattr(_sample, "ndim", 0) >= 2 else 1
+                    debug_log.log(
+                        "D",
+                        "cameras.py:_open_dshow_reader",
+                        "dshow pictured",
+                        {
+                            "index": int(index),
+                            "name": name,
+                            "dcap": attempt,
+                            "shape": list(_sample.shape),
+                            "std": round(float(np.std(_sample[::_step, ::_step])), 2),
+                        },
+                    )
                 # #endregion
                 if fallback is not None:
                     _release_reader(fallback)
@@ -403,7 +406,7 @@ def _open_dshow_reader(index: int, width: int, height: int) -> tuple[object | No
                     pass
         time.sleep(0.12)
     # #region agent log
-    _agent_log(
+    debug_log.log(
         "D",
         "cameras.py:_open_dshow_reader",
         "dshow fallback",
@@ -420,26 +423,6 @@ def _release_reader(reader: object) -> None:
             closer()
         except Exception:
             pass
-
-
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "286628",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(
-            r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
-            "a",
-            encoding="utf-8",
-        ) as fh:
-            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
 
 
 def _picture(frame: object) -> bool:
@@ -470,7 +453,7 @@ def _open_opencv_capture(index: int, width: int, height: int) -> cv2.VideoCaptur
                 _apply_size(cap, w, h)
                 if _pull_frame(cap) is not None:
                     # #region agent log
-                    _agent_log(
+                    debug_log.log(
                         "D",
                         "cameras.py:_open_opencv_capture",
                         "opencv open",
@@ -507,10 +490,10 @@ def open_capture(index: int, width: int, height: int) -> cv2.VideoCapture | _Dsh
         return cap
     if reader is not None:
         # #region agent log
-        _agent_log("D", "cameras.py:open_capture", "using dull dshow", {"index": int(index)})
+        debug_log.log("D", "cameras.py:open_capture", "using dull dshow", {"index": int(index)})
         # #endregion
         return _DshowHold(reader)
     # #region agent log
-    _agent_log("D", "cameras.py:open_capture", "open failed", {"index": int(index)})
+    debug_log.log("D", "cameras.py:open_capture", "open failed", {"index": int(index)})
     # #endregion
     return None

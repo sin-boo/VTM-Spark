@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import base64
 import io
 import queue
@@ -17,6 +16,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 from PIL import Image
 
+from . import debug_log
 from .developer import DEVELOPER
 from .desk_boot import (
     new_boot_state,
@@ -311,6 +311,8 @@ class StreamRuntime:
             "message": "Starting…",
             "boot": new_boot_state(),
             "checkpoint": checkpoint_label(default_ckpt),
+            # Picked in the Model list but not loaded yet; Start stream loads it.
+            "pending_checkpoint": "",
             "keypoint_layout": str(
                 getattr(self.engine, "keypoint_layout", "hrnet_native") or "hrnet_native"
             ),
@@ -460,6 +462,7 @@ class StreamRuntime:
         self._last_display_t = 0.0
         self._last_key_t = 0.0
         self._model_load_lock = threading.Lock()
+        self._pending_checkpoint: Path | None = None
         self._worker_stop = threading.Event()
         self._gen_worker = threading.Thread(
             target=self._gen_worker_loop, name="rs-gen", daemon=True
@@ -1212,7 +1215,9 @@ class StreamRuntime:
 
         ``keep_bar``: a warmup follows (Start stream, Generate once), so the
         GPU-move slice stays on screen and the warmup bar carries on from it.
+        A model picked in the Model list loads here first.
         """
+        self._apply_pending_checkpoint()
         with self._model_load_lock:
             if not getattr(self.engine, "_ready", False) or self.engine.model is None:
                 self._load_model(clear_busy=not keep_busy)
@@ -1294,7 +1299,8 @@ class StreamRuntime:
         self.engine._ref_path = ref
         self._store_reencoded_latents(ref)
 
-    def set_checkpoint(self, path: str | Path) -> None:
+    @staticmethod
+    def _checked_checkpoint(path: str | Path) -> Path:
         ckpt = resolve_user_path(path).resolve()
         if not ckpt.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {display_path(ckpt)}")
@@ -1302,7 +1308,44 @@ class StreamRuntime:
             raise ValueError(
                 f"Not a DiT checkpoint (need a .pt/.pth file over 1 MB, got {display_path(ckpt)})"
             )
+        return ckpt
+
+    def select_checkpoint(self, path: str | Path) -> None:
+        """Pick a model without loading it. Start stream / Generate load it.
+
+        Swapping weights runs the whole load + warmup, so the Model list only
+        records the choice and the Start button asks for it.
+        """
+        ckpt = self._checked_checkpoint(path)
         remember_checkpoint_location(ckpt)
+        loaded = Path(self.engine.checkpoint).resolve()
+        same = ckpt == loaded and bool(getattr(self.engine, "_ready", False))
+        with self._lock:
+            self._pending_checkpoint = None if same else ckpt
+        from .ui_session import save_ui_session
+
+        # The next launch boots the picked model either way.
+        save_ui_session(checkpoint=display_path(ckpt))
+        if same:
+            self._set_status(pending_checkpoint="", message="Model ready", error="")
+        else:
+            self._set_status(
+                pending_checkpoint=checkpoint_label(ckpt),
+                message="New model selected — press Start stream to load it",
+                error="",
+            )
+
+    def _apply_pending_checkpoint(self) -> None:
+        with self._lock:
+            pending = self._pending_checkpoint
+        if pending is not None:
+            self.set_checkpoint(pending)
+
+    def set_checkpoint(self, path: str | Path) -> None:
+        ckpt = self._checked_checkpoint(path)
+        remember_checkpoint_location(ckpt)
+        with self._lock:
+            self._pending_checkpoint = None
         with self._model_load_lock:
             self._set_status(busy=True, message="Switching model…", error="")
             try:
@@ -1331,6 +1374,7 @@ class StreamRuntime:
                 self._clear_progress(
                     busy=False,
                     checkpoint=checkpoint_label(self.engine.checkpoint),
+                    pending_checkpoint="",
                     message="Model ready",
                     model_ready=True,
                     state="ready",
@@ -1349,6 +1393,7 @@ class StreamRuntime:
                     message="Model switch failed",
                     model_ready=ready,
                     checkpoint=checkpoint_label(self.engine.checkpoint),
+                    pending_checkpoint="",
                 )
                 raise
 
@@ -2184,6 +2229,9 @@ class StreamRuntime:
         ):
             return
 
+        # Warming up means a stream is coming; drop a Stop-stream offload that
+        # was still waiting for the last frame.
+        self._offload_pending = False
         try:
             self.engine.ensure_gpu()
         except Exception:
@@ -3636,7 +3684,7 @@ class StreamRuntime:
 
     def _offload_models(self) -> None:
         """Move DiT / VAE off the GPU after Stop stream. Tracking stays up."""
-        if self._streaming or self._gen_busy:
+        if self._streaming or self._gen_busy or self.status().get("fast_warming"):
             self._offload_pending = True
             return
         try:
@@ -4872,25 +4920,6 @@ class StreamRuntime:
         )
         return self.status()
 
-    def _agent_log(self, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-        try:
-            payload = {
-                "sessionId": "286628",
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            }
-            with open(
-                r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
-                "a",
-                encoding="utf-8",
-            ) as fh:
-                fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
-        except Exception:
-            pass
-
     def _track_poll_loop(self) -> None:
         while not self._track_stop.is_set():
             time.sleep(0.05)
@@ -4900,7 +4929,7 @@ class StreamRuntime:
                 if self._lab_drive:
                     # #region agent log
                     _now = time.time()
-                    if _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
+                    if debug_log.ENABLED and _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
                         self._dbg_t = _now
                         _kps = self._last_overlay_kps
                         _prev = getattr(self, "_dbg_kps", None)
@@ -4909,7 +4938,7 @@ class StreamRuntime:
                             _motion = float(np.max(np.abs(_kps[:, :2] - _prev[:, :2])))
                         if _kps is not None:
                             self._dbg_kps = np.asarray(_kps, dtype=np.float32).copy()
-                        self._agent_log(
+                        debug_log.log(
                             "E",
                             "stream.py:_track_poll_loop",
                             "desk overlay",

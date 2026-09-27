@@ -25,6 +25,8 @@ export type AppStatus = {
   state: string
   message: string
   checkpoint: string
+  /** Picked in the Model list, not loaded yet. Start stream loads it. */
+  pending_checkpoint?: string
   keypoint_layout?: string
   device: string
   error: string

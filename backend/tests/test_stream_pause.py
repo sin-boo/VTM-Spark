@@ -28,6 +28,7 @@ def _bare_stream() -> StreamRuntime:
     rt._display_queue = __import__("queue").Queue()
     rt._last_display_t = 0.0
     rt._last_key_t = 0.0
+    rt._first_frame_pending = False
     return rt
 
 

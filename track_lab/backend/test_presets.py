@@ -392,8 +392,9 @@ def test_pair_ids_cover_every_mouth_combination() -> None:
     from .presets import pair_ends, pair_id
 
     pairs = [pair_id(a, b) for a, b in combinations(PRESET_IDS, 2)]
-    assert len(pairs) == 28
-    assert len(set(pairs)) == 28
+    # Seven shapes (O folded into U) -> 7 choose 2.
+    assert len(pairs) == 21
+    assert len(set(pairs)) == 21
     assert pair_id("smile", "rest") == "rest+smile"
     assert pair_ends("smile+rest") is None
     assert pair_ends("rest+smile") == ("rest", "smile")

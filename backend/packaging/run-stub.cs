@@ -81,13 +81,22 @@ internal static class Program
             {
                 return 0;
             }
-            Log("single-instance lock held but no desk window found");
-            if (!Ask("VTM Noble looks like it is already running, but its window cannot be found.\n\n"
-                + "Clean up leftover processes and start it again?"))
+            // No window: usually a desk that was just closed and is still
+            // freeing GPU memory. Let it finish before calling it a hidden copy.
+            if (!WaitDeskExit(TimeSpan.FromSeconds(10)))
             {
-                return 0;
+                if (FocusDeskOnce())
+                {
+                    return 0;
+                }
+                Log("single-instance lock held but no desk window found");
+                if (!Ask("VTM Noble looks like it is already running, but its window cannot be found.\n\n"
+                    + "Clean up leftover processes and start it again?"))
+                {
+                    return 0;
+                }
+                KillOrphans(false);
             }
-            KillOrphans(false);
         }
 
         string pyw = DeskPython(here);
@@ -355,6 +364,21 @@ internal static class Program
             return false;
         }
         m.Dispose();
+        return true;
+    }
+
+    // True once the desk's single-instance lock is gone (it finished exiting).
+    private static bool WaitDeskExit(TimeSpan patience)
+    {
+        DateTime deadline = DateTime.UtcNow + patience;
+        while (DeskRunning())
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                return false;
+            }
+            Thread.Sleep(250);
+        }
         return true;
     }
 

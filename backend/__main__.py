@@ -218,6 +218,14 @@ def _shutdown_all(*, exit_code: int = 0) -> None:
     ``shutdown_runtime()`` can hang on camera/CUDA teardown. Never block the
     process forever — orphans were holding tens of GB of RAM after close.
     """
+    try:
+        # The window is gone; let run.exe start a fresh desk right away.
+        from backend.single_instance import release_single_instance
+
+        release_single_instance()
+    except Exception:
+        pass
+
     def _cleanup() -> None:
         try:
             from backend.desk_splash import kill_orphan_webview2

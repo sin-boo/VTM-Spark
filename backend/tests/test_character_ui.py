@@ -19,7 +19,6 @@ def test_toon_preview_opens_library() -> None:
     assert "setLibraryOpen(true)" in lib
     assert "pickFile()" not in lib.split("function openDock")[1].split("async function beginCreate")[0]
     assert "                    Create" in lib
-    assert "                    Add" in lib
     ctx = lib.split('className="char-ctx"')[1]
     assert "Repair" in ctx
     assert "shapes_compatible === false" in ctx
@@ -47,10 +46,8 @@ def test_toon_preview_opens_library() -> None:
     assert "object-fit: contain" in img
     assert "100cqh" not in css
     assert "container-type" not in css
-    assert "@media (min-height: 880px)" in css
-    tall = css.split("@media (min-height: 880px)")[1].split("@media")[0]
-    assert "space-evenly" in tall
-    assert "max-height: 28px" in tall
+    # The rail fits without a tall-screen spread; only the width steps remain.
+    assert "@media (min-height: 880px)" not in css
     assert "--rail-width: 336px" in css
     assert "--rail-width: 380px" in css
 

@@ -13,6 +13,8 @@ from pathlib import Path
 
 _lock_handle = None
 _mutex_handle = None
+# Undo steps for the locks this process took (mutex, lock file).
+_releases: list = []
 
 
 def lock_path() -> Path:
@@ -51,6 +53,7 @@ def _try_windows_mutex(name: str = "Local\\VTMNobleSingleInstance") -> bool:
                     pass
 
         atexit.register(_release)
+        _releases.append(_release)
         return True
     except Exception:
         return True
@@ -108,6 +111,7 @@ def _try_file_lock(path: Path) -> bool:
                 pass
 
         atexit.register(_release)
+        _releases.append(_release)
         return True
     except OSError:
         try:
@@ -125,6 +129,20 @@ def acquire_single_instance() -> bool:
         if not _try_windows_mutex():
             return False
     return _try_file_lock(lock_path())
+
+
+def release_single_instance() -> None:
+    """Give up the instance locks now, before a slow exit.
+
+    Freeing CUDA memory can keep a closed desk's process alive for seconds.
+    Holding the locks that long made run.exe report a hidden running copy.
+    """
+    while _releases:
+        step = _releases.pop()
+        try:
+            step()
+        except Exception:
+            pass
 
 
 def health_url(host: str, port: int) -> str:

@@ -461,7 +461,10 @@ def test_real_library_packs_still_read(tmp_path: Path) -> None:
         shutil.copy(src, copy)
         sidecar = src.with_suffix("") / "fit.json"
         fit = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else None
-        assert upgrade_character_pack(copy, fit=fit) is True
+        changed = upgrade_character_pack(copy, fit=fit)
+        # Packs the desk already opened are v2; only older ones must rewrite.
+        if pack.version < 2:
+            assert changed is True
         up = read_character_pack(copy)
         assert up.version == 2
         np.testing.assert_array_equal(up.ref_latent, pack.ref_latent)

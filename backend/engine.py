@@ -1555,6 +1555,14 @@ class StreamEngine:
             vae_dtype = preferred_sd_vae_dtype(self.device)
             self.vae = load_sd_vae(self.device, dtype=vae_dtype)
             print(f"SD-VAE ready (dtype={str(vae_dtype).replace('torch.', '')})")
+        else:
+            # A model switch after Stop stream keeps decoders offloaded in RAM.
+            # Bring them to the new DiT's device before claiming GPU residency,
+            # or ensure_gpu() skips them and decode mixes cuda input / cpu weights.
+            self.vae = _mod_to(self.vae, self.device)
+        self.vae_tiny = _mod_to(self.vae_tiny, self.device)
+        self._ref_latent = _ten_to(self._ref_latent, self.device)
+        self._ref_face_latent = _ten_to(self._ref_face_latent, self.device)
 
         self._ready = True
         self._gpu_resident = True
@@ -2155,6 +2163,9 @@ class StreamEngine:
                 return
             if self._ref_keypoints is None:
                 return
+            # The lock was free while compiling; a Stop-stream offload may have
+            # moved the weights to RAM in that gap.
+            self.ensure_gpu()
             steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
             warm_steps = max(1, min(steps, 4))
 
@@ -2406,7 +2417,11 @@ class StreamEngine:
         *,
         sanitize: bool | str = True,
     ) -> np.ndarray:
-        """Sanitize one or more poses → ``(B, 37, 4)`` in KEYPOINT_SCHEMA."""
+        """Sanitize one or more poses → ``(B, 37, 4)`` in KEYPOINT_SCHEMA.
+
+        Nose tips stay in; ``block_model_slots`` drops them only on the copy
+        sent to the DiT, so the overlay and in-betweens keep the full pose.
+        """
         if isinstance(keypoints, torch.Tensor):
             kps = keypoints.detach().float().cpu().numpy()
         else:
@@ -2499,14 +2514,18 @@ class StreamEngine:
             elif verbose:
                 print("[pose-diag] generate: SKIP sanitize")
                 print(format_body_diagnostics(one, label="generate/RAW"))
-            out[i] = block_model_slots(one)
+            out[i] = one
 
         if verbose:
             print(
                 "Generating with KEYPOINT_SCHEMA target (no text prompt):\n"
                 + format_keypoints_table(out[0], max_rows=12)
             )
-            print(format_body_diagnostics(out[0], label="generate/SENT_TO_MODEL"))
+            print(
+                format_body_diagnostics(
+                    block_model_slots(out[0]), label="generate/SENT_TO_MODEL"
+                )
+            )
         return out
 
     def _denoise_to_latents_locked(
@@ -2519,15 +2538,20 @@ class StreamEngine:
     ) -> dict:
         if not self._ready:
             self.load()
+        # Callers check residency before taking the lock; an offload can land
+        # in between. Re-check here, under the lock offload also takes.
+        self.ensure_gpu()
         if self._ref_latent is None or self._ref_keypoints is None:
             raise RuntimeError("Set a reference image (+ keypoints) before generating.")
 
         kps_batch = self._prepare_target_keypoints_batch(keypoints, sanitize=sanitize)
         self.last_target_keypoints = kps_batch[-1].copy()
         self.last_target_keypoints_batch = kps_batch.copy()
+        from .pose_controller import block_model_slots
+
         kps_model = np.stack(
             [
-                keypoints_for_model(kps_batch[i], self.keypoint_layout)
+                keypoints_for_model(block_model_slots(kps_batch[i]), self.keypoint_layout)
                 for i in range(kps_batch.shape[0])
             ],
             axis=0,

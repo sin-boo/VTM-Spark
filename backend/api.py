@@ -335,8 +335,9 @@ def checkpoints() -> list[dict[str, str]]:
 
 @app.post("/api/checkpoint")
 def set_checkpoint(body: PathBody) -> dict[str, Any]:
+    """Select a model. It loads on the next Start stream / Generate."""
     try:
-        get_runtime().set_checkpoint(body.path)
+        get_runtime().select_checkpoint(body.path)
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
     return get_runtime().status()
@@ -344,24 +345,15 @@ def set_checkpoint(body: PathBody) -> dict[str, Any]:
 
 @app.post("/api/checkpoint/browse")
 def browse_checkpoint() -> dict[str, Any]:
-    """Open a native file picker; load the file on a background thread.
-
-    Loading on the same request as Tk used to freeze/kill the webview while
-    CUDA swapped weights.
-    """
+    """Open a native file picker and select the file (loads on Start stream)."""
     path = _pick_checkpoint_file()
     if not path:
         return {"cancelled": True, "path": None, "status": get_runtime().status()}
     rt = get_runtime()
-    rt._set_status(busy=True, message="Switching model…", error="")
-
-    def _load() -> None:
-        try:
-            rt.set_checkpoint(path)
-        except Exception:
-            pass
-
-    threading.Thread(target=_load, name="vtm-ckpt-load", daemon=True).start()
+    try:
+        rt.select_checkpoint(path)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"cancelled": False, "path": path, "status": rt.status()}
 
 

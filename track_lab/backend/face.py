@@ -12,27 +12,8 @@ import cv2
 import numpy as np
 
 from .anime import AnimeMeshError, draw_label28, fit_mesh, reset_anime_mesh, rest_too_small
+from . import debug_log
 from .cameras import list_cameras, load_camera_choice, pick_default, save_camera_index
-
-
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "286628",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(
-            r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
-            "a",
-            encoding="utf-8",
-        ) as fh:
-            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
 
 
 def _same_index(cam: dict[str, object], index: int) -> bool:
@@ -1179,7 +1160,7 @@ class FaceBench:
                 self.last_error = str(calibrator.payload().get("error") or "")
             # #region agent log
             _now = time.perf_counter()
-            if _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
+            if debug_log.ENABLED and _now - float(getattr(self, "_dbg_t", 0.0)) >= 0.5:
                 self._dbg_t = _now
                 _prev = getattr(self, "_dbg_pts", None)
                 _motion = 0.0
@@ -1189,7 +1170,7 @@ class FaceBench:
                     self._dbg_pts = posed.copy()
                 _head = frame.head if isinstance(frame.head, dict) else {}
                 _pose = frame.pose if isinstance(frame.pose, dict) else {}
-                _agent_log(
+                debug_log.log(
                     "E",
                     "face.py:_finish_live_body",
                     "overlay",

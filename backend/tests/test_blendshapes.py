@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from backend.blendshapes import (
     apply_current_to_character,
     compatibility,
@@ -269,6 +271,7 @@ def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, mon
     rt = object.__new__(StreamRuntime)
     rt._ref_path = pack
     rt._model_load_lock = threading.Lock()
+    rt._lock = threading.RLock()
     rt._fast_warmed = True
     rt._batch2_auto_tried = True
     rt._set_status = lambda **_k: None
@@ -300,6 +303,9 @@ def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, mon
         def load_encoded_reference(self, **_kwargs: object) -> None:
             order.append("character")
 
+        def model_identity(self) -> dict[str, object]:
+            return {"checkpoint": "next.pt", "image_size": 768, "latent_shape": [1, 4, 96, 96]}
+
     rt.engine = _Engine()
     monkeypatch.setattr("backend.stream.resolve_user_path", lambda path: Path(path))
     monkeypatch.setattr("backend.stream.is_stream_checkpoint_file", lambda _path: True)
@@ -315,9 +321,10 @@ def test_model_switch_skips_opening_vtm_then_loads_character(tmp_path: Path, mon
             {
                 "image_size": 768,
                 "keypoints": None,
-                "ref_latent": None,
+                "ref_latent": np.zeros((1, 4, 96, 96), dtype=np.float32),
                 "ref_face_latent": None,
                 "skip_crop": True,
+                "model": {"checkpoint": "next.pt", "image_size": 768},
             },
         )(),
     )

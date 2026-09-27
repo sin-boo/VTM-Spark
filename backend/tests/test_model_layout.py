@@ -16,6 +16,7 @@ from backend.model_layout import (
     schema37_to_hrnet_native37,
     stamp_checkpoint_keypoint_layout,
 )
+from backend.pose_controller import block_model_slots
 
 
 def test_closed_schema_mouth_becomes_native_closed_signature() -> None:
@@ -215,7 +216,8 @@ def test_generate_sends_native_layout_but_keeps_schema_overlay(monkeypatch) -> N
     sent = np.asarray(captured["target"])
     if sent.ndim == 3:
         sent = sent[0]
-    np.testing.assert_allclose(sent, schema37_to_hrnet_native37(target))
+    # Nose tips are blocked before the DiT; the overlay keeps them.
+    np.testing.assert_allclose(sent, schema37_to_hrnet_native37(block_model_slots(target)))
     ref_sent = np.asarray(captured["ref"])
     expected_ref = np.asarray(stream._ref_keypoints_model)
     if ref_sent.ndim == 3:
@@ -238,7 +240,7 @@ def test_generate_sends_schema_layout_and_keeps_schema_overlay(monkeypatch) -> N
     sent = np.asarray(captured["target"])
     if sent.ndim == 3:
         sent = sent[0]
-    np.testing.assert_allclose(sent, target)
+    np.testing.assert_allclose(sent, block_model_slots(target))
     ref_sent = np.asarray(captured["ref"])
     if ref_sent.ndim == 3:
         ref_sent = ref_sent[0]

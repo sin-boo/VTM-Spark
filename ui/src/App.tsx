@@ -306,7 +306,9 @@ export default function App() {
         refPath={refPath}
         error={error}
         onRefPath={setRefPath}
-        onCheckpoint={(path) => run('Model', () => api.setCheckpoint(path))}
+        onCheckpoint={(path) =>
+          run('Model', async () => applyStatus(await api.setCheckpoint(path)))
+        }
         onBrowseCheckpoint={() =>
           run('Model', async () => {
             const res = await api.browseCheckpoint()

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from . import debug_log
 from .cameras import _ensure_com, open_capture
 from .paths import LAB_ROOT, OSF_MODELS
 from .presets import empty_weights
@@ -226,28 +227,6 @@ def _draw_lid_mids(
         cv2.fillConvexPoly(vis, diamond, (8, 10, 14), cv2.LINE_AA)
         cv2.fillConvexPoly(vis, diamond, color, cv2.LINE_AA)
         _stamp_id(vis, px, py, f"{mid_id}*", color, font, pad=size + 2)
-
-
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        import json
-
-        payload = {
-            "sessionId": "286628",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(
-            r"F:\Ai-model\ai_vtuber\VTM noble\debug-286628.log",
-            "a",
-            encoding="utf-8",
-        ) as fh:
-            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
 
 
 def _drain_queued(cap: object, frame: np.ndarray) -> tuple[np.ndarray, int]:
@@ -639,9 +618,9 @@ class OsfCam:
                 except Exception as exc:
                     fails += 1
                     # #region agent log
-                    if time.perf_counter() - last_log >= 0.5:
+                    if debug_log.ENABLED and time.perf_counter() - last_log >= 0.5:
                         last_log = time.perf_counter()
-                        _agent_log(
+                        debug_log.log(
                             "A",
                             "osf_cam.py:_grab_loop",
                             "read raised",
@@ -657,9 +636,9 @@ class OsfCam:
                 if not ok or raw is None:
                     fails += 1
                     # #region agent log
-                    if time.perf_counter() - last_log >= 0.5:
+                    if debug_log.ENABLED and time.perf_counter() - last_log >= 0.5:
                         last_log = time.perf_counter()
-                        _agent_log(
+                        debug_log.log(
                             "A",
                             "osf_cam.py:_grab_loop",
                             "read empty",
@@ -673,7 +652,7 @@ class OsfCam:
                 pending.put(fresh, read_ms)
                 self._publish_preview(fresh)
                 now = time.perf_counter()
-                if now - last_log >= 0.5:
+                if debug_log.ENABLED and now - last_log >= 0.5:
                     last_log = now
                     shape = [0, 0]
                     std = 0.0
@@ -684,7 +663,7 @@ class OsfCam:
                     except Exception:
                         pass
                     # #region agent log
-                    _agent_log(
+                    debug_log.log(
                         "A",
                         "osf_cam.py:_grab_loop",
                         "grab",
@@ -701,7 +680,7 @@ class OsfCam:
                     # #endregion
         except Exception as exc:
             # #region agent log
-            _agent_log("A", "osf_cam.py:_grab_loop", "grab died", {"error": str(exc)})
+            debug_log.log("A", "osf_cam.py:_grab_loop", "grab died", {"error": str(exc)})
             # #endregion
         finally:
             if self._grab_thread is me:
@@ -737,9 +716,9 @@ class OsfCam:
                     if not saw_frame and stalls >= 30:
                         raise RuntimeError("Camera produced no frames")
                     # #region agent log
-                    if time.perf_counter() - last_log >= 0.5:
+                    if debug_log.ENABLED and time.perf_counter() - last_log >= 0.5:
                         last_log = time.perf_counter()
-                        _agent_log(
+                        debug_log.log(
                             "A",
                             "osf_cam.py:_loop",
                             "tracker waiting",
@@ -755,11 +734,11 @@ class OsfCam:
                 predict_ms = (time.perf_counter() - started) * 1000.0
                 # #region agent log
                 now_log = time.perf_counter()
-                if now_log - last_log >= 0.5:
+                if debug_log.ENABLED and now_log - last_log >= 0.5:
                     last_log = now_log
                     skipped = max(0, pending.seq - last_seq - 1)
                     last_seq = pending.seq
-                    _agent_log(
+                    debug_log.log(
                         "B",
                         "osf_cam.py:_loop",
                         "track",

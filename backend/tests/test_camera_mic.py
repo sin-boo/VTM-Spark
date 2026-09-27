@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,8 +14,14 @@ from cameras import _no_mic_params as poser_no_mic_params
 from cameras import _open_cv_index
 from live_poser import pick_default_camera
 
-from track_lab.backend import cameras as lab_cameras
-from track_lab.backend.osf_cam import OsfCam
+# Track Lab imports its ``harness`` package top-level (its pytest.ini runs
+# from track_lab/). Append so the desk's own ``backend`` still wins.
+_LAB = Path(__file__).resolve().parents[2] / "track_lab"
+if str(_LAB) not in sys.path:
+    sys.path.append(str(_LAB))
+
+from track_lab.backend import cameras as lab_cameras  # noqa: E402
+from track_lab.backend.osf_cam import OsfCam  # noqa: E402
 
 
 def _assert_no_mic_params(params: list[int]) -> None:
