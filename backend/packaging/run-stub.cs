@@ -44,8 +44,10 @@ internal static class Program
     private const string WebView2RuntimeKey = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
     private const string WebView2Bootstrapper = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
 
+    private const uint MB_OK = 0x00000000;
     private const uint MB_YESNO = 0x00000004;
     private const uint MB_ICONWARNING = 0x00000030;
+    private const uint MB_ICONINFORMATION = 0x00000040;
     private const uint MB_SETFOREGROUND = 0x00010000;
     private const uint MB_TOPMOST = 0x00040000;
     private const int IDYES = 6;
@@ -276,6 +278,10 @@ internal static class Program
             RunWebView2Installer(exe, false);
             if (!WebView2Installed())
             {
+                Inform("VTM Studio needs Microsoft WebView2 to show its window, and the quick install did not work.\n\n"
+                    + "Windows will now ask for administrator permission to install it for all users. "
+                    + "The prompt will say \"Microsoft Edge Update Setup\" - that is this step.\n\n"
+                    + "Click Yes to continue.");
                 RunWebView2Installer(exe, true);
             }
             Log(WebView2Installed() ? "WebView2 runtime installed" : "WebView2 runtime still missing");
@@ -404,6 +410,13 @@ internal static class Program
     {
         return MessageBoxW(IntPtr.Zero, text, DeskTitle,
             MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST) == IDYES;
+    }
+
+    // Heads-up before a Windows admin prompt, so it is not a surprise.
+    private static void Inform(string text)
+    {
+        MessageBoxW(IntPtr.Zero, text, DeskTitle,
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
     }
 
     private static string LogPath()

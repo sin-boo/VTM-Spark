@@ -11,6 +11,17 @@ from .paths import package_root
 
 DEVICE_NAME = "VTM Studio Cam"
 
+# Shown before the UAC prompt so it is clear what the admin rights are for.
+ADMIN_NOTICE = (
+    f"{DEVICE_NAME} needs a one-time setup.\n\n"
+    "Windows will now ask for administrator permission. This is only for the "
+    "virtual camera: it lets OBS, Discord, Zoom and other apps use VTM Studio "
+    "as a webcam, and Windows only allows adding a camera as admin.\n\n"
+    'The prompt may say "Windows Command Processor" - that is this step. '
+    "Click Yes.\n\n"
+    "You are only asked once."
+)
+
 
 def vcam_bundle_dir() -> Path:
     return package_root() / "vendor" / "tools" / "vtm_studio_cam"
@@ -52,6 +63,24 @@ def device_available() -> bool:
         return False
 
 
+def confirm_admin_prompt() -> bool:
+    """Explain the coming UAC prompt in a dialog. False = the user cancelled."""
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        import ctypes
+
+        MB_OKCANCEL = 0x1
+        MB_ICONINFORMATION = 0x40
+        MB_SETFOREGROUND = 0x10000
+        MB_TOPMOST = 0x40000
+        IDOK = 1
+        flags = MB_OKCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST
+        return ctypes.windll.user32.MessageBoxW(None, ADMIN_NOTICE, "VTM Studio", flags) == IDOK
+    except Exception:
+        return True
+
+
 def ensure_installed(*, allow_prompt: bool = True) -> None:
     """Register VTM Studio Cam if missing. May show a UAC prompt once."""
     if device_available():
@@ -68,8 +97,13 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
 
     if not allow_prompt:
         raise RuntimeError(
-            f"{DEVICE_NAME} is not installed. Run install.bat "
-            "(approve the UAC prompt once)."
+            f"{DEVICE_NAME} is not installed. Click Virtual camera to add it "
+            "(Windows asks for admin once)."
+        )
+
+    if not confirm_admin_prompt():
+        raise RuntimeError(
+            f"{DEVICE_NAME} setup cancelled. Click Virtual camera again when you are ready."
         )
 
     # Elevated installer (UAC). Wait for registration to settle.
@@ -88,7 +122,8 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"Timed out installing {DEVICE_NAME}. Approve UAC if prompted."
+            f"Timed out installing {DEVICE_NAME}. Click Yes on the Windows prompt, "
+            "then click Virtual camera again."
         ) from exc
 
     # UAC-elevated child may return before regsvr32 finishes; poll briefly.
@@ -100,7 +135,7 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
     detail = (proc.stderr or proc.stdout or "").strip()
     hint = detail or f"exit {proc.returncode}"
     raise RuntimeError(
-        f"Could not install {DEVICE_NAME}. Approve UAC when prompted, "
-        f"then retry Virtual camera. ({hint})"
+        f"Could not install {DEVICE_NAME}. Click Virtual camera again and choose "
+        f"Yes on the Windows prompt. ({hint})"
     )
 

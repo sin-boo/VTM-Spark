@@ -112,6 +112,10 @@ if (-not (Use-VtmNode -RepoRoot $Root -Install)) {
 Write-Host "==> Using Node.js: $((Get-Command node -ErrorAction SilentlyContinue).Source)"
 Write-Host "==> Building UI (Vite)"
 Push-Location "$Root\ui"
+# Vite's live progress moves the console cursor and the next lines print over
+# its summary. CI=true makes it log plainly (it checks isTTY && !CI).
+$prevCi = $env:CI
+$env:CI = "true"
 try {
   function Install-UiPackages {
     $npmCode = Invoke-ProcessWithHeartbeat `
@@ -176,6 +180,7 @@ try {
     if ($code -ne 0) { throw "UI build failed twice - see npm output above. Re-run install.bat; if it keeps failing, report the error above." }
   }
 } finally {
+  $env:CI = $prevCi
   Pop-Location
 }
 

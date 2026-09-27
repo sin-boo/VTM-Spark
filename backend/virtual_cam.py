@@ -193,7 +193,7 @@ class VirtualCameraOut:
         except Exception as exc:
             self._error = (
                 f"Could not open {DEVICE_NAME}. "
-                f"Re-run install.bat and approve UAC once. ({exc})"
+                f"Click Virtual camera again, or re-run install.bat. ({exc})"
             )
             raise RuntimeError(self._error) from exc
 

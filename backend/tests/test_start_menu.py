@@ -222,3 +222,16 @@ def test_run_exe_installs_webview2_before_starting_the_desk() -> None:
     assert boot.index("InstallWebView2()") < boot.index("StartDesk(pyw)")
     assert '"/silent /install"' in stub
     assert 'psi.Verb = "runas"' in stub
+
+
+def test_every_admin_prompt_is_explained_first() -> None:
+    menu = _start_menu_text()
+    for marker in ("-Verb RunAs",):
+        start = 0
+        while (i := menu.find(marker, start)) != -1:
+            before = menu[max(0, i - 900) : i]
+            assert "Windows will now ask for administrator permission." in before, menu[i - 200 : i + 40]
+            start = i + 1
+    stub = (_root() / "backend" / "packaging" / "run-stub.cs").read_text(encoding="utf-8")
+    elevated = stub.index("RunWebView2Installer(exe, true)")
+    assert "Inform(" in stub[elevated - 600 : elevated]

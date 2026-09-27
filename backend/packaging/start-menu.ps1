@@ -285,16 +285,21 @@ function Invoke-EnsureVtmStudioCam {
   }
 
   Write-Host ""
-  Write-Ansi "==> Installing virtual camera: VTM Studio Cam" cyan
-  Write-Ansi "    Approve the Windows UAC prompt once (DirectShow register)." slate
+  Write-Ansi "==> Installing the virtual camera: VTM Studio Cam" cyan
+  Write-Host ""
+  Write-Ansi "    Windows will now ask for administrator permission." white
+  Write-Ansi "    This is for the virtual camera. It lets OBS, Discord, Zoom and other apps" slate
+  Write-Ansi "    use VTM Studio as a webcam, and Windows only allows adding a camera as admin." slate
+  Write-Ansi "    The prompt may say 'Windows Command Processor' - that is this step." slate
+  Write-Ansi "    Click Yes. You are only asked once." slate
   Write-Host ""
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
     Start-Process -FilePath $installBat -WorkingDirectory (Split-Path $installBat -Parent) -Wait -Verb RunAs
   } catch {
-    Write-Ansi "Virtual camera install failed (need admin once): $_" amber
-    Write-Ansi "You can still click Virtual camera in the app to retry." slate
+    Write-Ansi "Virtual camera skipped - the Windows permission prompt was declined." amber
+    Write-Ansi "Everything else still works. Click Virtual camera in the app to add it later." slate
     $ErrorActionPreference = $prev
     return $false
   }
@@ -366,7 +371,12 @@ function Invoke-EnsureWebView2 {
     $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Wait -PassThru
     Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
     if (-not (Test-WebView2)) {
-      Write-Ansi "    Retrying system-wide - approve the Windows prompt." slate
+      Write-Host ""
+      Write-Ansi "    Windows will now ask for administrator permission." white
+      Write-Ansi "    This is for WebView2, Microsoft's component that draws the VTM Studio window." slate
+      Write-Ansi "    The quick install did not take, so it installs for all users instead." slate
+      Write-Ansi "    The prompt will say 'Microsoft Edge Update Setup' - that is this step. Click Yes." slate
+      Write-Host ""
       $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Verb RunAs -Wait -PassThru
       Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
     }
@@ -535,7 +545,7 @@ function Invoke-SmartBuild {
   Write-InstallStep "App build" $true
   Write-InstallStep "WebView2" $webviewOk "Check your internet. run.exe installs it automatically on the next start."
   Write-InstallStep "Models" $modelsOk "Check your internet. Missing models download automatically when you start the app."
-  Write-InstallStep "Virtual camera" $vcamOk "Re-run install.bat and approve UAC, or click Virtual camera in the app."
+  Write-InstallStep "Virtual camera" $vcamOk "Click Virtual camera in the app to add it (Windows asks for admin once)."
   Write-InstallStep "Track Lab" $trackLabOk "Check your internet and re-run install.bat, or run track_lab\start.bat."
   Write-Host ""
   if ($allOk) {
@@ -571,6 +581,9 @@ function Invoke-BuildDeskUi {
   }
   $buildCode = 1
   Push-Location $uiDir
+  # Plain vite output; its live progress overwrites the next console lines.
+  $prevCi = $env:CI
+  $env:CI = "true"
   try {
     # Start-Process ExitCode. kill-orphans' taskkill (128) used to leak into
     # the next native status and mark a good vite build as failed.
@@ -583,6 +596,7 @@ function Invoke-BuildDeskUi {
     Write-Ansi "UI rebuild threw: $_" rose
     $buildCode = 1
   } finally {
+    $env:CI = $prevCi
     Pop-Location
   }
   if ($buildCode -ne 0) {

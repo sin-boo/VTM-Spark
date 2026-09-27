@@ -87,6 +87,8 @@ function Use-VtmNode {
     $env:npm_config_cache = Join-Path $RepoRoot ".tools\npm-cache"
     $env:npm_config_update_notifier = "false"
     $env:npm_config_fund = "false"
+    # Build-time advisories are for us to fix in the lockfile, not for users.
+    $env:npm_config_audit = "false"
     return $true
   }
   if (Get-Command npm -ErrorAction SilentlyContinue) {
