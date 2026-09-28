@@ -19,16 +19,22 @@ import {
 } from './api'
 import { CelStage } from './components/CelStage'
 import { ControlRail } from './components/ControlRail'
+import { LanguagePick } from './components/LanguagePick'
 import { MetricStrip } from './components/MetricStrip'
 import { Splash } from './components/Splash'
 import { WindowDots } from './components/WindowDots'
 import { WindowResize } from './components/WindowResize'
+import { useI18n } from './i18n'
 import { dragIfPrimary } from './nativeWindow'
 import './App.css'
 
 const DESK_HANDOFF = new URLSearchParams(window.location.search).has('desk')
 
 export default function App() {
+  const { t, setLang, picked } = useI18n()
+  // Stable callbacks below read the current language without re-subscribing.
+  const tRef = useRef(t)
+  tRef.current = t
   const [status, setStatus] = useState<AppStatus | null>(null)
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [catalogOffers, setCatalogOffers] = useState<CatalogOffer[]>([])
@@ -108,7 +114,7 @@ export default function App() {
       const listed = await api.characters()
       setCharacters(listed.characters ?? [])
     } catch (e) {
-      setError(`Character: ${String(e)}`)
+      setError(`${tRef.current('err.character')}: ${String(e)}`)
     }
   }, [])
 
@@ -116,7 +122,7 @@ export default function App() {
     try {
       setCheckpoints(await api.checkpoints())
     } catch (e) {
-      setError(`Model: ${String(e)}`)
+      setError(`${tRef.current('err.model')}: ${String(e)}`)
     }
     try {
       const catalog = await api.modelCatalog()
@@ -279,8 +285,14 @@ export default function App() {
     return reply
   }
 
-  if (!deskReady) {
+  // Hold the finished splash until we know whether this is the first run.
+  if (!deskReady || picked === null) {
     return <Splash boot={boot} error={error} />
+  }
+
+  // First run: everything is loaded; ask for a language before the desk opens.
+  if (!picked) {
+    return <LanguagePick />
   }
 
   return (
@@ -293,8 +305,7 @@ export default function App() {
           dragIfPrimary(e.button)
         }}
       >
-        <img className="desk-caption-mark" src="/splash-mark.png" width={16} height={16} alt="" />
-        <span className="desk-caption-title">VTM Studio</span>
+        <img className="desk-caption-logo" src="/vtm-spark-logo.svg" width={68} height={23} alt="VTM Spark" />
         <WindowDots />
       </div>
       <div className="desk">
@@ -307,10 +318,10 @@ export default function App() {
         error={error}
         onRefPath={setRefPath}
         onCheckpoint={(path) =>
-          run('Model', async () => applyStatus(await api.setCheckpoint(path)))
+          run(t('err.model'), async () => applyStatus(await api.setCheckpoint(path)))
         }
         onBrowseCheckpoint={() =>
-          run('Model', async () => {
+          run(t('err.model'), async () => {
             const res = await api.browseCheckpoint()
             if (res.cancelled) return
             applyStatus(res.status)
@@ -323,7 +334,7 @@ export default function App() {
         createStillUrl={createStillUrl}
         onRefreshCharacters={refreshCharacters}
         onCreateCharacter={(file) =>
-          run('Character', async () => {
+          run(t('err.character'), async () => {
             frameQueue.current.length = 0
             setFrame(null)
             const url = URL.createObjectURL(file)
@@ -343,7 +354,7 @@ export default function App() {
           })
         }
         onLoadCharacter={(id, opts) =>
-          run('Character', async () => {
+          run(t('err.character'), async () => {
             const res = await api.loadCharacter(id, opts)
             if (res.status) applyStatus(res.status)
             if (res.frame?.image) setFrame(res.frame.image)
@@ -353,7 +364,7 @@ export default function App() {
           })
         }
         onRemoveCharacter={(id) =>
-          run('Character', async () => {
+          run(t('err.character'), async () => {
             const res = await api.removeCharacter(id)
             applyStatus(res.status)
             setCharacters(res.characters ?? [])
@@ -365,7 +376,7 @@ export default function App() {
           })
         }
         onRenameCharacter={(id, name) =>
-          run('Character', async () => {
+          run(t('err.character'), async () => {
             const res = await api.renameCharacter(id, name)
             applyStatus(res.status)
             setCharacters(res.characters ?? [])
@@ -388,7 +399,7 @@ export default function App() {
           return res.character
         }}
         onUploadRef={(file) =>
-          run('Reference', async () => {
+          run(t('err.reference'), async () => {
             const res = await api.uploadRef(file)
             setRefPath(res.path)
             applyStatus(res.status)
@@ -398,7 +409,7 @@ export default function App() {
           })
         }
         onApplyRef={() =>
-          run('Reference', async () => {
+          run(t('err.reference'), async () => {
             const res = await api.applyRef(refPath.trim())
             applyStatus(res.status)
             if (res.frame?.image) setFrame(res.frame.image)
@@ -408,7 +419,7 @@ export default function App() {
         }
         onSettings={(patch) => {
           setStatus((cur) => (cur ? { ...cur, ...patch } : cur))
-          void run('Settings', async () => {
+          void run(t('err.settings'), async () => {
             const next = await api.settings(patch)
             if (next && typeof next === 'object' && next.state) {
               applyStatus({ ...next, ...patch })
@@ -416,30 +427,30 @@ export default function App() {
           })
         }}
         onToggleTracking={() =>
-          run('Tracking', async () => {
+          run(t('err.tracking'), async () => {
             const on = Boolean(status?.tracking) || Boolean(lab?.live)
             applyStatus(on ? await api.stopTracking() : await api.startTracking())
             await refreshLab()
           })
         }
-        onCalibrate={() => run('Calibrate', () => api.recenter())}
-        onGenerate={() => run('Generate', () => api.generate())}
+        onCalibrate={() => run(t('err.calibrate'), () => api.recenter())}
+        onGenerate={() => run(t('err.generate'), () => api.generate())}
         onToggleStream={() =>
-          run('Stream', async () => {
+          run(t('err.stream'), async () => {
             applyStatus(
               status?.streaming ? await api.stopStream() : await api.startStream(),
             )
           })
         }
         onTogglePause={() =>
-          run('Stream', async () => {
+          run(t('err.stream'), async () => {
             applyStatus(
               status?.paused ? await api.resumeStream() : await api.pauseStream(),
             )
           })
         }
         onToggleVirtualCam={() =>
-          run('Virtual camera', async () => {
+          run(t('err.virtualCam'), async () => {
             const next = status?.virtual_cam
               ? await api.stopVirtualCam()
               : await api.startVirtualCam()
@@ -453,12 +464,12 @@ export default function App() {
               ? { ...cur, feel: { ...ZERO_LAB_FEEL, ...cur.feel, ...patch } }
               : cur,
           )
-          void run('Lab feel', async () => {
+          void run(t('err.labFeel'), async () => {
             await sendLab('set_feel', patch)
           })
         }}
         onLabCalibrate={(id) =>
-          run('Calibrate', async () => {
+          run(t('err.calibrate'), async () => {
             await sendLab('calibrate', { id })
           })
         }
@@ -472,7 +483,7 @@ export default function App() {
               error: '',
             }),
           )
-          void run('Input', async () => {
+          void run(t('err.input'), async () => {
             try {
               await sendLab('set_input', { source })
               const live = Boolean(status?.tracking) || Boolean(lab?.live)
@@ -494,7 +505,7 @@ export default function App() {
           })
         }}
         onCamera={(index) =>
-          run('Camera', async () => {
+          run(t('err.camera'), async () => {
             applyStatus(await api.settings({ camera_index: index }))
             setLab((cur) => (cur ? { ...cur, camera_index: index } : cur))
             if (!lab?.online || labSourceOf(lab) === 'ifm') return
@@ -508,7 +519,7 @@ export default function App() {
           void refreshCheckpoints()
         }}
         onDownloadModel={(name) =>
-          run('Download', async () => {
+          run(t('err.download'), async () => {
             await api.startModelDownload(name)
             await refreshCheckpoints()
           })
@@ -519,7 +530,10 @@ export default function App() {
           })
         }
         onReloadBackend={() => {
-          void run('Reload', () => api.reloadBackend())
+          void run(t('err.reload'), () => api.reloadBackend())
+        }}
+        onLanguage={(next) => {
+          void run(t('err.language'), () => setLang(next))
         }}
       />
 
@@ -533,6 +547,7 @@ export default function App() {
         <MetricStrip
           fps={status?.show_fps || status?.gen_fps || 0}
           genFps={status?.gen_fps ?? 0}
+          gpuUtil={status?.streaming ? status?.gpu_util : null}
           checkpoint={status?.checkpoint ?? ''}
         />
       </main>

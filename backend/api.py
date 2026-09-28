@@ -1,4 +1,4 @@
-"""FastAPI surface for the VTM Studio desktop app."""
+"""FastAPI surface for the VTM Spark desktop app."""
 
 from __future__ import annotations
 
@@ -24,13 +24,15 @@ from .paths import (
     ui_dist_dir,
 )
 from .stream import get_runtime, shutdown_runtime
+from .gpu_select import gpu_snapshot, list_gpus, save_gpu_pref
+from .ui_prefs import load_ui_prefs, save_ui_prefs
 
 HOST = "127.0.0.1"
 PORT = 8765
 
 __all__ = ["app", "configure_runtime", "mount_frontend", "shutdown_runtime"]
 
-app = FastAPI(title="VTM Studio", version="0.1.0")
+app = FastAPI(title="VTM Spark", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*", "null"],
@@ -136,10 +138,19 @@ class SettingsBody(BaseModel):
     use_body: bool | None = None
     fast_mode: bool | None = None
     compile_model: bool | None = None
+    batch: int | None = None
     batch2: bool | None = None
     auto_sync_track: bool | None = None
     camera_index: int | None = None
     travel_box: dict[str, Any] | None = None
+
+
+class UiPrefsBody(BaseModel):
+    language: str | None = None
+
+
+class GpuBody(BaseModel):
+    uuid: str = ""
 
 
 class PathBody(BaseModel):
@@ -363,6 +374,37 @@ def settings(body: SettingsBody) -> dict[str, Any]:
     return get_runtime().update_settings(**data)
 
 
+@app.get("/api/ui-prefs")
+def ui_prefs() -> dict[str, Any]:
+    return load_ui_prefs()
+
+
+@app.post("/api/ui-prefs")
+def set_ui_prefs(body: UiPrefsBody) -> dict[str, Any]:
+    try:
+        return save_ui_prefs(body.model_dump(exclude_none=True))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/gpus")
+def gpus() -> dict[str, Any]:
+    return gpu_snapshot()
+
+
+@app.post("/api/gpu")
+def set_gpu(body: GpuBody) -> dict[str, Any]:
+    """Save the GPU pick. It takes effect on the next start / Reload backend."""
+    uuid = body.uuid.strip()
+    if uuid and not any(g["uuid"] == uuid for g in list_gpus()):
+        raise HTTPException(400, f"No GPU with id {uuid}")
+    try:
+        save_gpu_pref(uuid)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return gpu_snapshot()
+
+
 @app.get("/api/cameras")
 def cameras() -> dict[str, Any]:
     rt = get_runtime()
@@ -436,6 +478,15 @@ def character_fit_hair(body: HairStrokeBody) -> dict[str, Any]:
 def character_fit_skeleton(body: SkeletonMoveBody) -> dict[str, Any]:
     try:
         view = get_runtime().move_character_skeleton(body.id, body.x, body.y)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "fit": view}
+
+
+@app.post("/api/characters/fit/point")
+def character_fit_point(body: SkeletonMoveBody) -> dict[str, Any]:
+    try:
+        view = get_runtime().move_character_point(body.id, body.x, body.y)
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "fit": view}

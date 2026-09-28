@@ -1,9 +1,9 @@
-# Bake splash-mark.png onto run.exe with a transparent ICO. A .bat cannot carry an Explorer icon.
+# Bake app-icon.png (the VTM Spark logo) onto run.exe with a transparent ICO. A .bat cannot carry an Explorer icon.
 # winexe: no console window. The stub opens start-menu.ps1 in a console only when it must.
 $ErrorActionPreference = "Stop"
 $Pack = $PSScriptRoot
 $Root = (Resolve-Path (Join-Path $Pack "..\..")).Path
-$Png = Join-Path $Root "ui\public\splash-mark.png"
+$Png = Join-Path $Root "ui\public\app-icon.png"
 $Ico = Join-Path $Pack "run.ico"
 $Cs = Join-Path $Pack "run-stub.cs"
 $Out = Join-Path $Root "run.exe"
@@ -12,7 +12,7 @@ if (-not (Test-Path -LiteralPath $Csc)) {
   $Csc = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
 }
 if (-not (Test-Path -LiteralPath $Csc)) {
-  throw "csc.exe not found. Need .NET Framework 4 to stamp the hat on run.exe"
+  throw "csc.exe not found. Need .NET Framework 4 to stamp the logo on run.exe"
 }
 if (-not (Test-Path -LiteralPath $Png)) { throw "missing $Png" }
 

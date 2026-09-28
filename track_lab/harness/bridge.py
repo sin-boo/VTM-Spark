@@ -27,7 +27,7 @@ HOST = "127.0.0.1"
 CMD_WAIT = 180.0
 GEN_WAIT = 300.0
 JPEG_WAIT = 4.0
-LIVE_OPS = frozenset({"start", "stop", "calibrate", "track"})
+LIVE_OPS = frozenset({"start", "stop", "calibrate", "track", "set_rest"})
 
 
 def _log(msg: str) -> None:
@@ -125,7 +125,7 @@ class WorkerBridge:
         self._proc: subprocess.Popen[Any] | None = None
         self._respawned = False
         self._closed = False
-        self.op_wait = {"start": 120.0, "track": 120.0, "stop": 8.0, "calibrate": 8.0}
+        self.op_wait = {"start": 120.0, "track": 120.0, "set_rest": 120.0, "stop": 8.0, "calibrate": 8.0}
 
     @property
     def ready(self) -> bool:

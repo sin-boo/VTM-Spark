@@ -21,24 +21,15 @@
   cursor: grabbing;
 }
 
-.desk-caption-mark {
+/* The VTM Spark wordmark (on-dark logo), 1968x666, shown 23px tall (the p hangs below the line). */
+.desk-caption-logo {
   display: block;
   align-self: center;
-  width: 16px;
-  height: 16px;
-  margin: 0 0 0 8px;
+  width: 68px;
+  height: 23px;
+  margin: 0 8px 0 10px;
   object-fit: contain;
-  background: transparent;
   pointer-events: none;
-}
-
-.desk-caption-title {
-  display: flex;
-  align-items: center;
-  padding: 0 8px 0 6px;
-  color: var(--mute);
-  font-size: 11px;
-  letter-spacing: 0.02em;
 }
 
 .desk {
@@ -1010,6 +1001,16 @@ button.char-preview:focus-visible {
   min-height: 22px;
 }
 
+.stream-batch .lab-tabs button {
+  height: 20px;
+  padding: 0 4px;
+}
+
+.stream-batch .lab-tabs button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .stream-steps input {
   grid-column: 3;
   width: 100%;
@@ -1854,12 +1855,12 @@ button.char-preview:focus-visible {
   cursor: crosshair;
 }
 
-.fit-overlay.is-skeleton,
+.fit-overlay.is-points,
 .fit-overlay.is-limiters {
   cursor: grab;
 }
 
-.fit-overlay.is-skeleton:active,
+.fit-overlay.is-points:active,
 .fit-overlay.is-limiters:active {
   cursor: grabbing;
 }
@@ -1885,6 +1886,29 @@ button.char-preview:focus-visible {
   stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
   cursor: grab;
+}
+
+.fit-joint.is-face {
+  fill: #f45b69;
+}
+
+.fit-joint.is-iris {
+  fill: #f4c95b;
+}
+
+.fit-joint.is-grabbed {
+  fill: var(--paper);
+}
+
+.fit-point-label {
+  fill: var(--paper);
+  stroke: #1a1a1a;
+  stroke-width: 3;
+  paint-order: stroke;
+  text-anchor: middle;
+  pointer-events: none;
+  user-select: none;
+  vector-effect: non-scaling-stroke;
 }
 
 .fit-brush {
@@ -2210,34 +2234,20 @@ html[data-splash] #root {
   text-align: center;
 }
 
-.krita-splash-mark {
-  display: block;
-  width: 72px;
-  height: 72px;
-  margin: 0 auto 12px;
-  object-fit: contain;
-  background: transparent;
-}
-
-.krita-splash-kicker {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--mute);
-}
-
 .krita-splash-brand h1 {
-  margin: 4px 0 0;
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--paper);
+  margin: 0;
+}
+
+/* The VTM Spark wordmark (on-dark logo), 1968x666. */
+.krita-splash-logo {
+  display: block;
+  width: 176px;
+  height: 60px;
+  object-fit: contain;
 }
 
 .krita-splash-ver {
-  margin: 6px 0 0;
+  margin: 10px 0 0;
   color: var(--mute);
   font-size: 11px;
 }
@@ -2320,6 +2330,62 @@ html[data-splash] #root {
   margin: 0;
   color: #d08080;
   font-size: 12px;
+  text-align: center;
+}
+
+/* First-run language picker: the splash layout, with choices where the bar was. */
+.lang-pick {
+  position: relative;
+}
+
+.lang-pick-caption {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  -webkit-app-region: no-drag;
+}
+
+.lang-pick-body {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+
+.lang-pick-title {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--paper);
+  text-align: center;
+}
+
+.lang-pick-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.lang-pick-option {
+  height: 34px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.lang-pick-hint {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--mute);
+  font-size: 11px;
   text-align: center;
 }
 

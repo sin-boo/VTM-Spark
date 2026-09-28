@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n'
 import { nativeWindow } from '../nativeWindow'
 
 function Icon({ kind }: { kind: 'min' | 'max' | 'close' }) {
@@ -23,19 +24,20 @@ function Icon({ kind }: { kind: 'min' | 'max' | 'close' }) {
 }
 
 export function WindowDots() {
+  const { t } = useI18n()
   return (
     <nav
       className="win-caption"
-      aria-label="Window"
+      aria-label={t('win.label')}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <button type="button" className="is-min" aria-label="Minimize" onClick={() => nativeWindow('minimize')}>
+      <button type="button" className="is-min" aria-label={t('win.minimize')} onClick={() => nativeWindow('minimize')}>
         <Icon kind="min" />
       </button>
-      <button type="button" className="is-max" aria-label="Maximize" onClick={() => nativeWindow('toggle_max')}>
+      <button type="button" className="is-max" aria-label={t('win.maximize')} onClick={() => nativeWindow('toggle_max')}>
         <Icon kind="max" />
       </button>
-      <button type="button" className="is-close" aria-label="Close" onClick={() => nativeWindow('close')}>
+      <button type="button" className="is-close" aria-label={t('win.close')} onClick={() => nativeWindow('close')}>
         <Icon kind="close" />
       </button>
     </nav>

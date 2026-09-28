@@ -1,6 +1,6 @@
 """Fixed loopback bind for the lab API + harness.
 
-Do not hop this port. VTM Studio looks here; a second lab should reuse or refuse.
+Do not hop this port. VTM Spark looks here; a second lab should reuse or refuse.
 """
 
 from __future__ import annotations

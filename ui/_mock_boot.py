@@ -75,6 +75,26 @@ def _session() -> dict:
 
 # Imported packs live in a temp folder so the mock never writes to characters/.
 IMPORTS = Path(tempfile.gettempdir()) / "vtm_mock_imports"
+# Language pick from Settings; in memory only.
+_ui_prefs = {"language": ""}
+_gpus = [
+    {"index": 0, "uuid": "GPU-mock-0000", "name": "NVIDIA GeForce RTX 4090", "memory_mb": 24564},
+    {"index": 1, "uuid": "GPU-mock-0001", "name": "NVIDIA GeForce RTX 3060", "memory_mb": 12288},
+]
+_gpu = {"selected": "", "active": ""}
+
+
+def _gpu_snapshot() -> dict:
+    active = next((g for g in _gpus if g["uuid"] == _gpu["active"]), _gpus[0])
+    return {
+        "gpus": _gpus,
+        "selected": _gpu["selected"],
+        "active": _gpu["active"],
+        "in_use": active["name"],
+        "external": "",
+        "restart_needed": _gpu["selected"] != _gpu["active"],
+    }
+
 # MOCK_EXPORT_SAVE=1 pretends the native Save dialog exists; =cancel simulates Cancel.
 # Unset, /export-save 404s and the UI falls back to the GET download.
 _EXPORT_SAVE = os.environ.get("MOCK_EXPORT_SAVE", "").strip().lower()
@@ -350,7 +370,7 @@ def status() -> dict:
         "compile_status": "",
         "compile_detail": "",
         "virtual_cam": False,
-        "virtual_cam_device": "VTM Studio Cam",
+        "virtual_cam_device": "VTM Spark",
         "virtual_cam_error": "",
         "virtual_cam_width": 0,
         "virtual_cam_height": 0,
@@ -389,6 +409,10 @@ class H(BaseHTTPRequestHandler):
         p = unquote(self.path.split("?")[0])
         if p in ("/api/boot", "/api/status"):
             self._send(200, ready if "boot" in p else status())
+        elif p == "/api/ui-prefs":
+            self._send(200, _ui_prefs)
+        elif p == "/api/gpus":
+            self._send(200, _gpu_snapshot())
         elif p == "/api/checkpoints":
             self._send(200, _checkpoints())
         elif p == "/api/models/catalog":
@@ -469,7 +493,7 @@ class H(BaseHTTPRequestHandler):
                 "font:14px Segoe UI,sans-serif;padding:24px'>"
                 "This is the Vite mock API on port 8765, not the operator desk. "
                 "Open <a href='http://127.0.0.1:5173'>http://127.0.0.1:5173</a>, "
-                "or close this process and launch VTM Studio."
+                "or close this process and launch VTM Spark."
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
         else:
@@ -486,6 +510,18 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = unquote(self.path.split("?")[0])
+        if p == "/api/ui-prefs":
+            language = str(self._read_json().get("language") or "")
+            if language not in ("en", "ja"):
+                self._send(400, {"detail": f"Unknown language: {language!r}"})
+                return
+            _ui_prefs["language"] = language
+            self._send(200, _ui_prefs)
+            return
+        if p == "/api/gpu":
+            _gpu["selected"] = str(self._read_json().get("uuid") or "")
+            self._send(200, _gpu_snapshot())
+            return
         if p == "/api/settings":
             patch = self._read_json()
             for key, value in patch.items():

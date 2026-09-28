@@ -33,4 +33,4 @@ def test_repo_hat_ico_is_transparent() -> None:
 
 
 def test_app_id_is_not_pythonw() -> None:
-    assert APP_USER_MODEL_ID == "VTM.Studio"
+    assert APP_USER_MODEL_ID == "VTM.Spark"

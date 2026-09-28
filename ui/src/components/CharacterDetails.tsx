@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   characterThumb,
-  exportNote,
   type CharacterCard,
   type CharacterExportResult,
   type CharacterInfo,
   type CharacterMeta,
 } from '../api'
+import { useI18n, type I18n } from '../i18n'
 
 type Props = {
   card: CharacterCard
@@ -33,10 +33,10 @@ function draftOf(info: CharacterInfo | null, card: CharacterCard): Draft {
   }
 }
 
-function stamp(value: string | number | undefined): string {
+function stamp(value: string | number | undefined, locale: string): string {
   if (value === undefined || value === null || value === '') return '—'
   const when = typeof value === 'number' ? new Date(value < 1e12 ? value * 1000 : value) : new Date(value)
-  return Number.isNaN(when.getTime()) ? String(value) : when.toLocaleString()
+  return Number.isNaN(when.getTime()) ? String(value) : when.toLocaleString(locale)
 }
 
 function bytes(size: number | undefined): string {
@@ -46,12 +46,17 @@ function bytes(size: number | undefined): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function yes(on: boolean | undefined): string {
-  return on ? 'Yes' : 'No'
+/** One line for the desk after an export; empty when the user cancelled. */
+function exportNote(t: I18n['t'], name: string, res: CharacterExportResult): string {
+  if (res.cancelled) return ''
+  if (res.native) return res.saved ? t('details.savedTo', { name, path: res.saved }) : t('details.savedName', { name })
+  return t('details.exportedAs', { name, file: res.saved })
 }
 
 export function CharacterDetails(props: Props) {
   const { card } = props
+  const { t, locale } = useI18n()
+  const yes = (on: boolean | undefined) => (on ? t('common.yes') : t('common.no'))
   const nameRef = useRef<HTMLInputElement>(null)
   const [info, setInfo] = useState<CharacterInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -121,7 +126,7 @@ export function CharacterDetails(props: Props) {
     try {
       await props.onMeta({ id: card.id, ...sent })
     } catch (e) {
-      setError(`Save failed: ${cleanError(e)}`)
+      setError(t('details.saveFailed', { error: cleanError(e) }))
       setSaving(false)
       return
     }
@@ -134,7 +139,7 @@ export function CharacterDetails(props: Props) {
       setInfo((cur) => (cur ? { ...cur, ...sent } : cur))
       setDraft(sent)
     }
-    setNote('Saved.')
+    setNote(t('details.saved'))
     setSaving(false)
   }
 
@@ -146,9 +151,9 @@ export function CharacterDetails(props: Props) {
     setNote('')
     try {
       const res = await props.onExport(card.id, name)
-      setNote(exportNote(name, res))
+      setNote(exportNote(t, name, res))
     } catch (e) {
-      setError(`Export failed: ${cleanError(e)}`)
+      setError(t('details.exportFailed', { error: cleanError(e) }))
     } finally {
       setExporting(false)
     }
@@ -158,10 +163,10 @@ export function CharacterDetails(props: Props) {
     <div className="char-details" role="dialog" aria-labelledby="char-details-title">
       <header className="char-create-head">
         <h2 id="char-details-title" className="char-sheet-title">
-          Details · {info?.name || card.name}
+          {t('details.title', { name: info?.name || card.name })}
         </h2>
         <button type="button" className="btn ghost" onClick={props.onClose}>
-          Close
+          {t('common.close')}
         </button>
       </header>
       <div className="char-details-main">
@@ -170,7 +175,7 @@ export function CharacterDetails(props: Props) {
         </div>
         <div className="char-details-fields">
           <label className="field">
-            <span>Name</span>
+            <span>{t('common.name')}</span>
             <input
               ref={nameRef}
               value={draft.name}
@@ -186,27 +191,27 @@ export function CharacterDetails(props: Props) {
             />
           </label>
           <label className="field">
-            <span>Author</span>
+            <span>{t('details.author')}</span>
             <input
               value={draft.author}
               maxLength={120}
-              placeholder="Who made this character"
+              placeholder={t('details.authorPlaceholder')}
               disabled={frozen}
               onChange={(e) => edit('author', e.target.value)}
             />
           </label>
           <label className="field">
-            <span>License</span>
+            <span>{t('details.license')}</span>
             <input
               value={draft.license}
               maxLength={120}
-              placeholder="e.g. Personal use only"
+              placeholder={t('details.licensePlaceholder')}
               disabled={frozen}
               onChange={(e) => edit('license', e.target.value)}
             />
           </label>
           <label className="field">
-            <span>Description</span>
+            <span>{t('details.description')}</span>
             <textarea
               value={draft.description}
               maxLength={2000}
@@ -220,65 +225,65 @@ export function CharacterDetails(props: Props) {
 
       {info && !info.model_match ? (
         <p className="char-details-warn" role="note">
-          Made with a different model. It will be re-encoded for this model on first load.
+          {t('details.otherModel')}
           {model?.checkpoint ? <span className="mono"> ({model.checkpoint})</span> : null}
         </p>
       ) : null}
 
       {loading ? (
-        <p className="hint">Reading character…</p>
+        <p className="hint">{t('details.reading')}</p>
       ) : !info ? (
         <div className="char-details-empty">
-          <p className="hint">Details are not available for this character.</p>
+          <p className="hint">{t('details.unavailable')}</p>
           <button type="button" className="btn ghost" onClick={() => setReload((n) => n + 1)}>
-            Retry
+            {t('common.retry')}
           </button>
         </div>
       ) : (
         <div className="char-details-facts">
           <section>
-            <h3 className="group-subtitle">Made with</h3>
+            <h3 className="group-subtitle">{t('details.madeWith')}</h3>
             <dl>
-              <dt>Model</dt>
+              <dt>{t('details.model')}</dt>
               <dd title={model?.checkpoint || ''}>{model?.checkpoint || '—'}</dd>
-              <dt>Image</dt>
+              <dt>{t('details.image')}</dt>
               <dd>{model?.image_size ? `${model.image_size} px` : '—'}</dd>
-              <dt>Latent</dt>
+              <dt>{t('details.latent')}</dt>
               <dd className="mono">
                 {model?.latent_shape?.length ? model.latent_shape.join(' × ') : '—'}
               </dd>
-              <dt>This desk</dt>
-              <dd>{info.model_match ? 'Same model' : 'Re-encode on load'}</dd>
+              <dt>{t('details.thisDesk')}</dt>
+              <dd>{info.model_match ? t('details.sameModel') : t('details.reencode')}</dd>
             </dl>
           </section>
           <section>
-            <h3 className="group-subtitle">Includes</h3>
+            <h3 className="group-subtitle">{t('details.includes')}</h3>
             <dl>
-              <dt>Source image</dt>
+              <dt>{t('details.sourceImage')}</dt>
               <dd>{yes(includes?.source_image)}</dd>
-              <dt>Pose keys</dt>
-              <dd>{includes?.pose_keys ? includes.pose_keys : 'None'}</dd>
-              <dt>Blend shapes</dt>
+              <dt>{t('details.poseKeys')}</dt>
+              <dd>{includes?.pose_keys ? includes.pose_keys : t('common.none')}</dd>
+              <dt>{t('details.blendShapes')}</dt>
               <dd>{yes(includes?.blendshapes)}</dd>
-              <dt>Hair</dt>
+              <dt>{t('details.hair')}</dt>
               <dd>{yes(includes?.hair)}</dd>
-              <dt>Skeleton</dt>
+              <dt>{t('details.skeleton')}</dt>
               <dd>{yes(includes?.skeleton)}</dd>
-              <dt>Limiters</dt>
+              <dt>{t('details.limiters')}</dt>
               <dd>{yes(includes?.travel_box)}</dd>
             </dl>
           </section>
           <section>
-            <h3 className="group-subtitle">File</h3>
+            <h3 className="group-subtitle">{t('details.file')}</h3>
             <dl>
-              <dt>Format</dt>
+              <dt>{t('details.format')}</dt>
               <dd>{info.version ? `v${info.version}` : '—'}</dd>
-              <dt>Size</dt>
+              <dt>{t('details.size')}</dt>
               <dd>{bytes(info.size_bytes)}</dd>
-              <dt>Created</dt>
-              <dd>{stamp(info.created_at)}</dd>
-              <dt>Updated</dt>
-              <dd>{stamp(info.updated_at)}</dd>
+              <dt>{t('details.created')}</dt>
+              <dd>{stamp(info.created_at, locale)}</dd>
+              <dt>{t('details.updated')}</dt>
+              <dd>{stamp(info.updated_at, locale)}</dd>
             </dl>
           </section>
         </div>
@@ -290,7 +295,7 @@ export function CharacterDetails(props: Props) {
           {note}
         </p>
       ) : null}
-      {busy && info ? <p className="hint">The desk is busy. Stop streaming to save or export.</p> : null}
+      {busy && info ? <p className="hint">{t('details.busy')}</p> : null}
 
       <div className="char-details-actions">
         <button
@@ -299,7 +304,7 @@ export function CharacterDetails(props: Props) {
           disabled={!info || busy || saving || !dirty || !draft.name.trim()}
           onClick={() => void save()}
         >
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? t('details.saving') : t('common.save')}
         </button>
         <button
           type="button"
@@ -307,7 +312,7 @@ export function CharacterDetails(props: Props) {
           disabled={busy || exporting || loading}
           onClick={() => void exportPack()}
         >
-          {exporting ? 'Exporting…' : 'Export .vtm'}
+          {exporting ? t('details.exporting') : t('details.export')}
         </button>
       </div>
     </div>

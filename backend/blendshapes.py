@@ -13,7 +13,7 @@ imported pack is marked ``origin: "imported"``. An imported plan is the
 creator's and is never reported as needing repair just because this desk's
 lab plan differs (see :func:`compatibility`).
 
-VTM Studio reads lab shapes and writes these files. It does not write shapes
+VTM Spark reads lab shapes and writes these files. It does not write shapes
 back into Track Lab.
 """
 

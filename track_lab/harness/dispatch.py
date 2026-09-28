@@ -50,6 +50,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.stop_live()
     if op == "track":
         return bench.track()
+    if op == "set_rest":
+        return bench.set_rest(body)
     if op == "set_source":
         path = Path(str(body.get("path") or ""))
         if not path.is_file():
@@ -97,6 +99,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.set_eye_point(body)
     if op == "set_skeleton_point":
         return bench.set_skeleton_point(body)
+    if op == "set_rest_point":
+        return bench.set_rest_point(body)
     if op == "set_hair":
         return bench.set_hair(body)
     if op == "set_point":

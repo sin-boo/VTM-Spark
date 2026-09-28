@@ -1,1 +1,1 @@
-# VTM Studio regression tests
+# VTM Spark regression tests

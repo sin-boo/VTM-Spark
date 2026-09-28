@@ -1,4 +1,4 @@
-# Kill leftover VTM Studio / Real Stream processes so close/build doesn't leave
+# Kill leftover VTM Spark / Real Stream processes so close/build doesn't leave
 # multi-GB Python orphans around (was freezing 96GB hosts at ~90% RAM).
 param(
   [switch]$Quiet,
@@ -25,7 +25,7 @@ if (-not $Fast) {
       (
         $_.CommandLine -match '(?i)-m\s+backend(\s|$)' -and
         (
-          $_.CommandLine -match '(?i)[\\/](vtm[ _-]?(noble|studio)|real_stream|VTMNoble|VTMStudio|RealStream)[\\/]' -or
+          $_.CommandLine -match '(?i)[\\/](vtm[ _-]?(noble|studio|spark)|real_stream|VTMNoble|VTMStudio|VTMSpark|RealStream)[\\/]' -or
           $_.CommandLine -match '(?i)[\\/]dist[\\/](VTMNoble|RealStream)[\\/]' -or
           $_.CommandLine -match '(?i)VTM_NOBLE|REAL_STREAM'
         )

@@ -134,7 +134,7 @@ def _blocked_by_existing(host: str, port: int) -> str | None:
     if probe_existing_api(host, port):
         url = health_url(host, port).rsplit("/api/", 1)[0]
         return (
-            f"VTM Studio already running at {url}. "
+            f"VTM Spark already running at {url}. "
             "Close the other window, or menu [K] Kill leftovers."
         )
     if _port_in_use(host, port):
@@ -261,7 +261,7 @@ def _shutdown_all(*, exit_code: int = 0) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="VTM Studio desktop app")
+    parser = argparse.ArgumentParser(description="VTM Spark desktop app")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--port",
@@ -309,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if os.name == "nt":
         os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
+    # GPU pick (Settings → GPU) has to land before anything initialises CUDA.
+    try:
+        from backend.gpu_select import apply_saved_gpu
+
+        apply_saved_gpu(log=_file_log)
+    except Exception:
+        _file_log("GPU pick failed — using automatic:\n" + traceback.format_exc())
 
     wait_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     mount_ui = args.ui == "webview"
@@ -325,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             return blocked
         if not acquire_single_instance():
             msg = (
-                "Another VTM Studio instance holds the single-instance lock. "
+                "Another VTM Spark instance holds the single-instance lock. "
                 "Close it or run backend\\packaging\\kill-orphans.ps1."
             )
             _file_log("ERROR: " + msg)
@@ -400,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         _file_log(
             "Microsoft Edge WebView2 runtime is missing and could not be installed "
             "automatically; the desk window needs it. Check your internet connection "
-            "and open VTM Studio again."
+            "and open VTM Spark again."
         )
         _shutdown_all(exit_code=3)
         return 3

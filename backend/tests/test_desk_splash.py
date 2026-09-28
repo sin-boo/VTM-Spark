@@ -33,7 +33,7 @@ def test_ui_public_files_maps_splash_art(tmp_path: Path) -> None:
 
 def test_early_splash_html_is_local_and_named() -> None:
     page = early_splash_html(label="Loading model")
-    assert "Studio" in page
+    assert "VTM Spark" in page
     assert "krita-splash" in page
     assert "Loading model" in page
     assert "splash-art.png" in page
@@ -328,7 +328,7 @@ def test_create_splash_window_skips_webview2_hang_flags() -> None:
         height=562,
         js_api=bridge,
     )
-    assert window["title"] == "VTM Studio"
+    assert window["title"] == "VTM Spark"
     assert "transparent" not in window
     assert "frameless" not in window
     assert window["js_api"] is bridge

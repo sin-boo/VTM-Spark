@@ -15,10 +15,10 @@ $HasMonorepo = Test-Path -LiteralPath $TorchSrc
 if (-not $HasMonorepo) {
   Write-Host "==> No parent monorepo detected - keeping committed vendor/"
   if (-not (Test-Path (Join-Path $Vendor "torch_train\inference_keypoint.py"))) {
-    throw "vendor/torch_train missing. Clone the full VTM Studio repo (vendor/ included)."
+    throw "vendor/torch_train missing. Clone the full VTM Spark repo (vendor/ included)."
   }
   if (-not (Test-Path (Join-Path $Vendor "tools\live-poser\live_poser.py"))) {
-    throw "vendor/tools/live-poser missing. Clone the full VTM Studio repo (vendor/ included)."
+    throw "vendor/tools/live-poser missing. Clone the full VTM Spark repo (vendor/ included)."
   }
   Write-Host "    vendor OK (standalone mode)"
   exit 0

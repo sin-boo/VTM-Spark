@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { useI18n } from '../i18n'
 
 type Props = {
   image: string | null
@@ -12,6 +13,7 @@ const ZOOM_MIN = 1
 const ZOOM_MAX = 8
 
 export function CelStage({ image, live, frozen = false, stillId = '' }: Props) {
+  const { t } = useI18n()
   const imgRef = useRef<HTMLImageElement>(null)
   const viewRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -107,10 +109,10 @@ export function CelStage({ image, live, frozen = false, stillId = '' }: Props) {
   return (
     <section className="stage">
       <div className="stage-head">
-        <h2 className="stage-title">Preview</h2>
+        <h2 className="stage-title">{t('stage.preview')}</h2>
         <div className="stage-pills">
-          {frozen ? <span className="stage-flag">Frozen</span> : null}
-          {live && !frozen ? <span className="stage-flag is-live">Live</span> : null}
+          {frozen ? <span className="stage-flag">{t('stage.frozen')}</span> : null}
+          {live && !frozen ? <span className="stage-flag is-live">{t('stage.live')}</span> : null}
           {frozen && zoom > 1.01 ? <span className="stage-flag">{zoom.toFixed(1)}×</span> : null}
         </div>
       </div>
@@ -182,9 +184,7 @@ export function CelStage({ image, live, frozen = false, stillId = '' }: Props) {
         ) : null}
       </div>
       {frozen ? (
-        <p className="hint">
-          Frozen. Drag points, Shift-drag to pan, scroll to zoom. Double-click to undo.
-        </p>
+        <p className="hint">{t('stage.frozenHint')}</p>
       ) : null}
     </section>
   )

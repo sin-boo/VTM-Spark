@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { api, type CharacterFit as FitView, type FitBox, type TravelBox } from '../api'
+import { useI18n, type MessageKey } from '../i18n'
 
 const ROOM_MAX = 1.2
 const BRUSH_MIN = 6
@@ -8,12 +9,19 @@ const ZOOM_MIN = 1
 const ZOOM_MAX = 8
 
 const HAIR_PARTS = [
-  { id: 'hair_middle', label: 'Middle', color: 'rgba(255, 200, 0, 0.42)' },
-  { id: 'hair_left', label: 'Left', color: 'rgba(0, 180, 255, 0.42)' },
-  { id: 'hair_right', label: 'Right', color: 'rgba(255, 80, 160, 0.42)' },
-] as const
+  { id: 'hair_middle', label: 'fit.middle', color: 'rgba(255, 200, 0, 0.42)' },
+  { id: 'hair_left', label: 'fit.left', color: 'rgba(0, 180, 255, 0.42)' },
+  { id: 'hair_right', label: 'fit.right', color: 'rgba(255, 80, 160, 0.42)' },
+] as const satisfies readonly { id: string; label: MessageKey; color: string }[]
 
-type Mode = 'hair' | 'skeleton' | 'limiters'
+const MODE_LABELS: Record<Mode, MessageKey> = {
+  hair: 'fit.hair',
+  points: 'fit.points',
+  limiters: 'fit.limiters',
+}
+
+type Mode = 'hair' | 'points' | 'limiters'
+type Mark = FitView['points'][number]
 type Edge =
   | 'body-left'
   | 'body-right'
@@ -33,7 +41,7 @@ type HairStroke = {
 
 type Snap = {
   pending: HairStroke[]
-  joints: FitView['skeleton']
+  marks: Mark[]
   draft: TravelBox | null
 }
 
@@ -94,6 +102,7 @@ function boxPath(box: FitBox) {
 }
 
 export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function CharacterFit(props, ref) {
+  const { t, tr } = useI18n()
   const [fit, setFit] = useState<FitView | null>(null)
   const [mode, setMode] = useState<Mode>('hair')
   const [part, setPart] = useState<(typeof HAIR_PARTS)[number]['id']>('hair_middle')
@@ -105,11 +114,12 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
   const [stroke, setStroke] = useState<number[][]>([])
   const [pending, setPending] = useState<HairStroke[]>([])
-  const [joints, setJoints] = useState<FitView['skeleton']>([])
+  const [marks, setMarks] = useState<Mark[]>([])
+  const [grabbed, setGrabbed] = useState<number | null>(null)
   const [draft, setDraft] = useState<TravelBox | null>(null)
   const strokeRef = useRef<number[][]>([])
   const pendingRef = useRef<HairStroke[]>([])
-  const jointsRef = useRef<FitView['skeleton']>([])
+  const marksRef = useRef<Mark[]>([])
   const fitRef = useRef<FitView | null>(null)
   const draftRef = useRef<TravelBox | null>(null)
   const pastRef = useRef<Snap[]>([])
@@ -125,7 +135,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
   const panOrigin = useRef({ x: 0, y: 0, panX: 0, panY: 0 })
   const drag = useRef<
     | { kind: 'hair' }
-    | { kind: 'joint'; id: number }
+    | { kind: 'point'; id: number }
     | { kind: 'edge'; edge: Edge }
     | null
   >(null)
@@ -146,9 +156,9 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     setPending(strokes)
   }
 
-  function writeJoints(rows: FitView['skeleton']) {
-    jointsRef.current = rows
-    setJoints(rows)
+  function writeMarks(rows: Mark[]) {
+    marksRef.current = rows
+    setMarks(rows)
   }
 
   function snapshot(): Snap {
@@ -157,14 +167,14 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
         ...row,
         points: row.points.map((point) => [point[0], point[1]]),
       })),
-      joints: jointsRef.current.map((row) => ({ ...row })),
+      marks: marksRef.current.map((row) => ({ ...row })),
       draft: draftRef.current ? { ...draftRef.current } : null,
     }
   }
 
   function restore(snap: Snap) {
     writePending(snap.pending)
-    writeJoints(snap.joints)
+    writeMarks(snap.marks)
     writeDraft(snap.draft)
   }
 
@@ -202,7 +212,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
         if (cancel) return
         fitRef.current = view
         setFit(view)
-        writeJoints(view.skeleton)
+        writeMarks(view.points ?? [])
       })
       .catch((err: unknown) => {
         if (!cancel) props.onNotice(err instanceof Error ? err.message : String(err))
@@ -301,14 +311,15 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     return Math.max(10, width * 0.014)
   }
 
-  function hitJoint(x: number, y: number) {
-    const reach = Math.max(14, width * 0.02)
+  function hitMark(x: number, y: number) {
+    // Face points sit close together; the nearest one inside reach wins.
+    const reach = Math.max(12, width * 0.018) / zoomRef.current
     let best: number | null = null
     let bestD = reach
-    for (const joint of joints) {
-      const d = Math.hypot(joint.x - x, joint.y - y)
+    for (const mark of marks) {
+      const d = Math.hypot(mark.x - x, mark.y - y)
       if (d <= bestD) {
-        best = joint.id
+        best = mark.id
         bestD = d
       }
     }
@@ -396,11 +407,12 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
       setCursor(xy)
       return
     }
-    if (mode === 'skeleton') {
-      const id = hitJoint(xy.x, xy.y)
+    if (mode === 'points') {
+      const id = hitMark(xy.x, xy.y)
       if (id == null) return
-      drag.current = { kind: 'joint', id }
-      writeJoints(jointsRef.current.map((row) => (row.id === id ? { ...row, x: xy.x, y: xy.y } : row)))
+      drag.current = { kind: 'point', id }
+      setGrabbed(id)
+      writeMarks(marksRef.current.map((row) => (row.id === id ? { ...row, x: xy.x, y: xy.y } : row)))
       return
     }
     const edge = hitEdge(xy.x, xy.y)
@@ -432,10 +444,8 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
       writeStroke([...pts, [xy.x, xy.y]])
       return
     }
-    if (active.kind === 'joint') {
-      writeJoints(
-        jointsRef.current.map((row) => (row.id === active.id ? { ...row, x: xy.x, y: xy.y } : row)),
-      )
+    if (active.kind === 'point') {
+      writeMarks(marksRef.current.map((row) => (row.id === active.id ? { ...row, x: xy.x, y: xy.y } : row)))
       return
     }
     const base = draftRef.current ?? props.travel
@@ -450,6 +460,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     }
     const active = drag.current
     drag.current = null
+    setGrabbed(null)
     if (!active) return
     if (active.kind === 'hair') {
       const points = strokeRef.current
@@ -464,10 +475,10 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     beforeDrag.current = null
     if (!before) return
     const changed =
-      active.kind === 'joint'
-        ? jointsRef.current.some((joint) => {
-            const orig = before.joints.find((row) => row.id === joint.id)
-            return !orig || Math.abs(orig.x - joint.x) > 0.5 || Math.abs(orig.y - joint.y) > 0.5
+      active.kind === 'point'
+        ? marksRef.current.some((mark) => {
+            const orig = before.marks.find((row) => row.id === mark.id)
+            return !orig || Math.abs(orig.x - mark.x) > 0.5 || Math.abs(orig.y - mark.y) > 0.5
           })
         : JSON.stringify(draftRef.current) !== JSON.stringify(before.draft)
     if (changed) remember(before)
@@ -476,9 +487,9 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
   async function commit() {
     const strokes = pendingRef.current
     const saved = fitRef.current
-    const moved = jointsRef.current.filter((joint) => {
-      const orig = saved?.skeleton.find((row) => row.id === joint.id)
-      return !orig || Math.abs(orig.x - joint.x) > 0.5 || Math.abs(orig.y - joint.y) > 0.5
+    const moved = marksRef.current.filter((mark) => {
+      const orig = saved?.points?.find((row) => row.id === mark.id)
+      return !orig || Math.abs(orig.x - mark.x) > 0.5 || Math.abs(orig.y - mark.y) > 0.5
     })
     const box = draftRef.current
     if (!strokes.length && !moved.length && !box) return
@@ -489,14 +500,14 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
         const res = await api.fitHair(stroke)
         view = res.fit
       }
-      for (const joint of moved) {
-        const res = await api.fitSkeleton(joint.id, joint.x, joint.y)
+      for (const mark of moved) {
+        const res = await api.fitPoint(mark.id, mark.x, mark.y)
         view = res.fit
       }
       if (box) props.onTravel(box)
       fitRef.current = view
       setFit(view)
-      if (view) writeJoints(view.skeleton)
+      if (view) writeMarks(view.points ?? [])
       writePending([])
       writeDraft(null)
       pastRef.current = []
@@ -517,9 +528,9 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
   const dirty =
     pending.length > 0 ||
     draft != null ||
-    joints.some((joint) => {
-      const orig = fit?.skeleton.find((row) => row.id === joint.id)
-      return !orig || Math.abs(orig.x - joint.x) > 0.5 || Math.abs(orig.y - joint.y) > 0.5
+    marks.some((mark) => {
+      const orig = fit?.points?.find((row) => row.id === mark.id)
+      return !orig || Math.abs(orig.x - mark.x) > 0.5 || Math.abs(orig.y - mark.y) > 0.5
     })
 
   return (
@@ -587,23 +598,40 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
             {mode === 'hair' && cursor ? (
               <circle cx={cursor.x} cy={cursor.y} r={radius} className="fit-brush" />
             ) : null}
-            {mode === 'skeleton'
-              ? joints.map((joint) => (
+            {mode === 'points'
+              ? marks.map((mark) => (
                   <circle
-                    key={joint.id}
-                    cx={joint.x}
-                    cy={joint.y}
-                    r={Math.max(7, width * 0.012)}
-                    className="fit-joint"
-                  />
+                    key={mark.id}
+                    cx={mark.x}
+                    cy={mark.y}
+                    r={(mark.group === 'body' ? Math.max(7, width * 0.012) : Math.max(4, width * 0.007)) / zoom}
+                    className={`fit-joint is-${mark.group}${grabbed === mark.id ? ' is-grabbed' : ''}`}
+                  >
+                    <title>{tr(mark.label)}</title>
+                  </circle>
                 ))
+              : null}
+            {mode === 'points' && grabbed != null
+              ? marks
+                  .filter((mark) => mark.id === grabbed)
+                  .map((mark) => (
+                    <text
+                      key="grabbed-label"
+                      x={mark.x}
+                      y={mark.y - Math.max(10, width * 0.016) / zoom}
+                      className="fit-point-label"
+                      fontSize={Math.max(11, width * 0.016) / zoom}
+                    >
+                      {tr(mark.label)}
+                    </text>
+                  ))
               : null}
           </svg>
         </div>
       </div>
       <div className="fit-tools">
-        <div className="fit-modes" role="tablist" aria-label="Fit tools">
-          {(['hair', 'skeleton', 'limiters'] as Mode[]).map((id) => (
+        <div className="fit-modes" role="tablist" aria-label={t('fit.tools')}>
+          {(['hair', 'points', 'limiters'] as Mode[]).map((id) => (
             <button
               key={id}
               type="button"
@@ -612,7 +640,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
               className={`btn fit-mode${mode === id ? ' is-on' : ''}`}
               onClick={() => setMode(id)}
             >
-              {id === 'hair' ? 'Hair' : id === 'skeleton' ? 'Skeleton' : 'Limiters'}
+              {t(MODE_LABELS[id])}
             </button>
           ))}
         </div>
@@ -630,7 +658,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
                   }}
                 >
                   <i style={{ background: row.color }} />
-                  {row.label}
+                  {t(row.label)}
                 </button>
               ))}
             </div>
@@ -640,19 +668,19 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
                 className={`btn${erase ? '' : ' primary'}`}
                 onClick={() => setErase(false)}
               >
-                Draw
+                {t('fit.draw')}
               </button>
               <button
                 type="button"
                 className={`btn${erase ? ' primary' : ''}`}
                 onClick={() => setErase(true)}
               >
-                Erase
+                {t('fit.erase')}
               </button>
             </div>
             <ul className="lab-sliders">
               <li>
-                <span>Brush</span>
+                <span>{t('fit.brush')}</span>
                 <input
                   type="range"
                   min={BRUSH_MIN}
@@ -668,14 +696,14 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
         ) : null}
         <div className="fit-actions">
           <button type="button" className="btn" disabled={pastCount < 1 || busy} onClick={undo}>
-            Undo
+            {t('common.undo')}
           </button>
           <button type="button" className="btn" disabled={futureCount < 1 || busy} onClick={redo}>
-            Redo
+            {t('common.redo')}
           </button>
         </div>
         <button type="button" className="btn primary" disabled={!dirty || busy} onClick={() => void commit()}>
-          Apply
+          {t('common.apply')}
         </button>
       </div>
     </div>

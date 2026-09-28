@@ -491,6 +491,9 @@ class FaceBench:
             book.rebase(pts)
             self.last_ms = (time.perf_counter() - started) * 1000.0
             self.rest_pts = pts
+            # Nudges were made on the old rest. Kept, they ride the new mesh
+            # and a character created from this still saves them in.
+            self._point_offsets = {}
             self.last_faces = 1
             self.last_tracker = "anime"
             # Four models on the still. They overlay together; none punches another.
@@ -521,6 +524,62 @@ class FaceBench:
             self._skeleton_rest = []
             self._set_iris_rest([], "none")
             self.overlay_bgr = None
+        return self.status(publish=True)
+
+    def set_rest(self, body: dict[str, object]) -> dict[str, object]:
+        """Install a character's packaged rest mesh on the still, no detection.
+
+        A .vtm already carries the face mesh, iris and skeleton (and usually
+        hair), so loading one must not re-run the face / landmark / iris /
+        skeleton models. Hair is detected only when the pack has none yet.
+        body: points (28 x [x, y, score]), iris ([{id, x, y, score, visible}]),
+        skeleton ([{id, name?, x, y, score?}]), hair? ([{class, polygon}]);
+        all in character pixels.
+        """
+        self.stop_live()
+        self._ensure_source(force=True)
+        if self.source_bgr is None:
+            self.last_error = f"Put a photo at {INPUT_DIR / SOURCE_NAME}"
+            return self.status(publish=True)
+        raw = np.asarray(body.get("points") or [], dtype=np.float32)
+        if raw.ndim != 2 or raw.shape[0] != 28 or raw.shape[1] < 2:
+            self.last_error = "set_rest needs 28 face points"
+            return self.status(publish=True)
+        pts = np.ones((28, 3), dtype=np.float32)
+        pts[:, : min(3, raw.shape[1])] = raw[:, :3]
+        frame = self.source_bgr
+        started = time.perf_counter()
+        self.last_error = ""
+        book.rebase(pts)
+        self.rest_pts = pts
+        # The pack's mesh already holds every edit; a nudge on top doubles it.
+        self._point_offsets = {}
+        self.last_faces = 1
+        self.last_tracker = "anime"
+        iris = [dict(row) for row in body.get("iris") or [] if isinstance(row, dict)]
+        self._set_iris_rest(iris, "iris_pose" if iris else "none")
+        hair = body.get("hair")
+        if isinstance(hair, list) and hair:
+            segs = [dict(seg) for seg in hair if isinstance(seg, dict)]
+        else:
+            try:
+                segs = detect_hair(frame)
+            except Exception as exc:
+                segs = []
+                self.last_error = f"Hair: {exc}"
+        self._hair = segs
+        self._hair_rig = build_hair_rig(segs, pts)
+        skeleton = [dict(j) for j in body.get("skeleton") or [] if isinstance(j, dict)]
+        if not skeleton:
+            skeleton = skeleton_from_still(pts, frame)
+        self._skeleton = skeleton
+        self._skeleton_rest = [dict(j) for j in skeleton]
+        self._save_parts()
+        self.last_ms = (time.perf_counter() - started) * 1000.0
+        vis = draw_label28(frame, pts)
+        self.overlay_bgr = vis
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(OUTPUT_DIR / "overlay.jpg"), vis)
         return self.status(publish=True)
 
     def apply_preset(self, name: str) -> dict[str, object]:
@@ -821,6 +880,53 @@ class FaceBench:
             self._skeleton = [dict(j) for j in self._skeleton_rest]
             self._save_parts()
             self.last_error = ""
+        return self.status(publish=True)
+
+    def set_rest_point(self, body: object) -> dict[str, object]:
+        """Move one rest face point (0–27) or iris (28–29) on the still.
+
+        The rest itself moves, so any overlay nudge on the same point is
+        dropped — otherwise the edit would be applied twice.
+        """
+        if not isinstance(body, dict):
+            return self.status(publish=True)
+        try:
+            idx = int(body.get("id", -1))
+            x = float(body.get("x"))
+            y = float(body.get("y"))
+        except (TypeError, ValueError):
+            self.last_error = "Invalid rest point"
+            return self.status(publish=True)
+        if not 0 <= idx <= 29:
+            self.last_error = "Only face points 0–27 and irises 28–29 are rest points"
+            return self.status(publish=True)
+        if idx < 28:
+            if self.rest_pts is None or idx >= len(self.rest_pts):
+                self.last_error = "Track the still before moving its points"
+                return self.status(publish=True)
+            pts = self.rest_pts.copy()
+            pts[idx, 0] = x
+            pts[idx, 1] = y
+            if pts.shape[1] > 2:
+                pts[idx, 2] = max(float(pts[idx, 2]), 0.85)
+            book.rebase(pts)
+            rest_hair = rig_rest_hair(self._hair_rig) or list(self._hair)
+            with self._lock:
+                self.rest_pts = pts
+                self._hair_rig = build_hair_rig(rest_hair, pts)
+                self._point_offsets = clear_offsets(self._point_offsets, idx)
+            if self.source_bgr is not None:
+                self.overlay_bgr = draw_label28(self.source_bgr, pts)
+        else:
+            rows = [dict(row) for row in self._iris_rest if int(row.get("id", -1)) != idx]
+            rows.append({"id": idx, "x": round(x, 3), "y": round(y, 3), "score": 1.0, "visible": True})
+            rows.sort(key=lambda row: int(row.get("id", -1)))
+            method = self._iris_rest_method if self._iris_rest_method not in ("", "none") else "manual"
+            self._set_iris_rest(rows, method)
+            with self._lock:
+                self._point_offsets = clear_offsets(self._point_offsets, idx)
+        self._save_parts()
+        self.last_error = ""
         return self.status(publish=True)
 
     def set_hair(self, body: object) -> dict[str, object]:

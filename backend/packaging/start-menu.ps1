@@ -1,4 +1,4 @@
-﻿# VTM Studio — install.bat / run.exe
+﻿# VTM Spark — install.bat / run.exe
 param(
   [ValidateSet("install", "run")]
   [string]$Action = "run"
@@ -24,7 +24,7 @@ $Esc = [char]27
 
 function Enable-PrettyConsole {
   try {
-    $Host.UI.RawUI.WindowTitle = "VTM Studio"
+    $Host.UI.RawUI.WindowTitle = "VTM Spark"
   } catch {}
 
   try {
@@ -247,12 +247,13 @@ function Invoke-EnsureModel {
   return $false
 }
 
-function Invoke-EnsureVtmStudioCam {
-  # Register bundled DirectShow filter as 'VTM Studio Cam' (UAC once).
-  $installBat = Join-Path $Root "vendor\tools\vtm_studio_cam\Install-VTMStudioCam.bat"
-  $dll64 = Join-Path $Root "vendor\tools\vtm_studio_cam\UnityCaptureFilter64.dll"
+function Invoke-EnsureVtmSparkCam {
+  # Register bundled DirectShow filter as 'VTM Spark' (UAC once). Also re-registers
+  # a camera left pointing at a copy of the app that was moved or deleted.
+  $installBat = Join-Path $Root "vendor\tools\vtm_spark_cam\Install-VTMSparkCam.bat"
+  $dll64 = Join-Path $Root "vendor\tools\vtm_spark_cam\UnityCaptureFilter64.dll"
   if (-not (Test-Path -LiteralPath $installBat) -or -not (Test-Path -LiteralPath $dll64)) {
-    Write-Ansi "==> VTM Studio Cam filters missing under vendor\tools\vtm_studio_cam" amber
+    Write-Ansi "==> VTM Spark camera filters missing under vendor\tools\vtm_spark_cam" amber
     return $false
   }
   if (-not (Test-Path -LiteralPath $VenvPy)) {
@@ -265,7 +266,7 @@ function Invoke-EnsureVtmStudioCam {
   $ErrorActionPreference = "Continue"
   $ready = $false
   try {
-    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)" | Out-Host
+    & $VenvPy -c "from backend.vcam_device import device_ready; raise SystemExit(0 if device_ready() else 1)" | Out-Host
     $ready = ($LASTEXITCODE -eq 0)
   } catch {
     $ready = $false
@@ -280,16 +281,16 @@ function Invoke-EnsureVtmStudioCam {
 
   if ($ready) {
     Write-Ansi "==> Virtual camera ready:" cyan -NoNewline
-    Write-Ansi " VTM Studio Cam" mint
+    Write-Ansi " VTM Spark" mint
     return $true
   }
 
   Write-Host ""
-  Write-Ansi "==> Installing the virtual camera: VTM Studio Cam" cyan
+  Write-Ansi "==> Installing the virtual camera: VTM Spark" cyan
   Write-Host ""
   Write-Ansi "    Windows will now ask for administrator permission." white
   Write-Ansi "    This is for the virtual camera. It lets OBS, Discord, Zoom and other apps" slate
-  Write-Ansi "    use VTM Studio as a webcam, and Windows only allows adding a camera as admin." slate
+  Write-Ansi "    use VTM Spark as a webcam, and Windows only allows adding a camera as admin." slate
   Write-Ansi "    The prompt may say 'Windows Command Processor' - that is this step." slate
   Write-Ansi "    Click Yes. You are only asked once." slate
   Write-Host ""
@@ -311,7 +312,7 @@ function Invoke-EnsureVtmStudioCam {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    & $VenvPy -c "from backend.vcam_device import device_available; raise SystemExit(0 if device_available() else 1)" | Out-Host
+    & $VenvPy -c "from backend.vcam_device import device_ready; raise SystemExit(0 if device_ready() else 1)" | Out-Host
     $ready = ($LASTEXITCODE -eq 0)
   } catch {
     $ready = $false
@@ -325,10 +326,10 @@ function Invoke-EnsureVtmStudioCam {
   }
 
   if ($ready) {
-    Write-Ansi "VTM Studio Cam installed." green
+    Write-Ansi "VTM Spark camera installed." green
     return $true
   }
-  Write-Ansi "VTM Studio Cam not detected yet — open Virtual camera in the app after Start." amber
+  Write-Ansi "VTM Spark camera not detected yet — open Virtual camera in the app after Start." amber
   return $false
 }
 
@@ -373,7 +374,7 @@ function Invoke-EnsureWebView2 {
     if (-not (Test-WebView2)) {
       Write-Host ""
       Write-Ansi "    Windows will now ask for administrator permission." white
-      Write-Ansi "    This is for WebView2, Microsoft's component that draws the VTM Studio window." slate
+      Write-Ansi "    This is for WebView2, Microsoft's component that draws the VTM Spark window." slate
       Write-Ansi "    The quick install did not take, so it installs for all users instead." slate
       Write-Ansi "    The prompt will say 'Microsoft Edge Update Setup' - that is this step. Click Yes." slate
       Write-Host ""
@@ -517,7 +518,7 @@ function Invoke-SmartBuild {
     Write-Ansi "    - No internet connection (uv, Node.js, PyTorch and npm download packages)" slate
     Write-Ansi "    - A proxy or firewall blocking nodejs.org, github.com or pypi.org" slate
     Write-Ansi "    - No NVIDIA driver - the CUDA check needs a recent NVIDIA GPU driver" slate
-    Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Studio / pause AV and retry" slate
+    Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Spark / pause AV and retry" slate
     Write-Ansi "  Re-running install.bat is safe; it keeps what finished and retries the rest." slate
     Write-Host ""
     Write-Ansi "Press Enter to return..." slate
@@ -536,8 +537,8 @@ function Invoke-SmartBuild {
   # Explicit setup step: fetch DiT weights into models\dit if missing.
   $modelsOk = [bool](@(Invoke-EnsureModel)[-1])
 
-  # Register bundled DirectShow virtual camera (VTM Studio Cam) once.
-  $vcamOk = [bool](@(Invoke-EnsureVtmStudioCam)[-1])
+  # Register bundled DirectShow virtual camera (VTM Spark) once.
+  $vcamOk = [bool](@(Invoke-EnsureVtmSparkCam)[-1])
 
   $allOk = $webviewOk -and $modelsOk -and $vcamOk -and $trackLabOk
   Write-Host ""
@@ -607,7 +608,7 @@ function Invoke-BuildDeskUi {
 
 function Test-VtmDeskWindow {
   $named = Get-Process -Name pythonw,python,VTMNoble -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'VTM Studio' }
+    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match 'VTM Spark' }
   if ($named) { return $true }
   try {
     if (-not ("Win32.FindVtm" -as [type])) {
@@ -616,7 +617,7 @@ function Test-VtmDeskWindow {
 public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
 "@
     }
-    $hwnd = [Win32.FindVtm]::FindWindowW($null, "VTM Studio")
+    $hwnd = [Win32.FindVtm]::FindWindowW($null, "VTM Spark")
     return ($hwnd -ne [IntPtr]::Zero)
   } catch {
     return $false

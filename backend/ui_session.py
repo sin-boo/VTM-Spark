@@ -31,6 +31,7 @@ def load_ui_session() -> dict[str, Any]:
         "inbetweens": None,
         "interpolate": None,
         "max_fps": None,
+        "batch": None,
         "hold_last": None,
         "compile_model": None,
         "travel_box": {},
@@ -60,6 +61,7 @@ def load_ui_session() -> dict[str, Any]:
         "inbetweens": raw.get("inbetweens"),
         "interpolate": raw.get("interpolate"),
         "max_fps": raw.get("max_fps"),
+        "batch": raw.get("batch"),
         "hold_last": raw.get("hold_last"),
         "compile_model": raw.get("compile_model"),
     }
@@ -81,7 +83,7 @@ def save_ui_session(**kwargs: Any) -> None:
             state["travel_box"] = (
                 dict(kwargs["travel_box"]) if isinstance(kwargs["travel_box"], dict) else {}
             )
-        for key in ("steps", "pose_cfg", "id_cfg", "frame_blend", "inbetweens", "max_fps"):
+        for key in ("steps", "pose_cfg", "id_cfg", "frame_blend", "inbetweens", "max_fps", "batch"):
             if key in kwargs and kwargs[key] is not None:
                 state[key] = kwargs[key]
         if "interpolate" in kwargs and kwargs["interpolate"] is not None:

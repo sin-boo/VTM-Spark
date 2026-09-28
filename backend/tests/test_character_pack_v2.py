@@ -145,7 +145,7 @@ def test_v2_roundtrip_every_field(tmp_path: Path) -> None:
 
     raw = peek_character_manifest(dest)
     assert raw["version"] == 2
-    assert raw["app"] == {"name": "VTM Studio", "pack_version": 2}
+    assert raw["app"] == {"name": "VTM Spark", "pack_version": 2}
     with zipfile.ZipFile(dest) as zf:
         names = set(zf.namelist())
         assert names == {

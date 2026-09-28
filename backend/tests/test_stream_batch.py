@@ -50,3 +50,21 @@ def test_lerp_keeps_parked_point_when_only_one_side_visible() -> None:
     out = lerp_stream_pose(prev, now, 0.5)
     np.testing.assert_allclose(out[5, :2], (0.1, 0.2))
     assert out[5, 3] >= 0.5
+
+
+def test_pack_batch_n_steps_evenly_to_now() -> None:
+    prev = neutral_keypoints()
+    now = prev.copy()
+    prev[:, 0] = 0.0
+    now[:, 0] = 0.9
+    hair_prev = np.zeros((3, 4, 4), dtype=np.float32)
+    hair_now = np.full((3, 4, 4), 0.9, dtype=np.float32)
+    for n in (3, 4):
+        kps, maps = pack_stream_batch(now, hair_now, prev, hair_prev, n)
+        assert kps.shape == (n, *now.shape)
+        want = [0.9 * (i + 1) / n for i in range(n)]
+        np.testing.assert_allclose(kps[:, 0, 0], want, atol=1e-6)
+        np.testing.assert_allclose(maps[:, 0, 0, 0], want, atol=1e-6)
+        np.testing.assert_allclose(kps[-1], now)
+    kps, _ = pack_stream_batch(now, hair_now, None, None, 4)
+    assert kps.shape == (4, *now.shape)

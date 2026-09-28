@@ -1,4 +1,4 @@
-Lean runtime deps for VTM Studio (synced by packaging/sync-vendor.ps1).
+Lean runtime deps for VTM Spark (synced by packaging/sync-vendor.ps1).
 
 Contains:
   torch_train/     DiT inference helpers

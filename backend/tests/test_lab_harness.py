@@ -942,8 +942,10 @@ def test_desk_smooth_slider_sends_feel() -> None:
         encoding="utf-8"
     )
     app = (root / "ui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    words = (root / "ui" / "src" / "i18n.ts").read_text(encoding="utf-8")
     assert "key: 'smoothing'" in feel
-    assert "label: 'Smooth'" in feel
+    assert "label: 'feel.smooth'" in feel
+    assert "'feel.smooth': 'Smooth'" in words
     assert "smoothing: value, gaze_smooth: value" in feel
     assert "sendLab('set_feel', patch)" in app
 
@@ -1013,7 +1015,7 @@ def test_desk_stops_boot_poll_when_ready() -> None:
 
 
 def rest_label_is_calibrate(rail: str) -> bool:
-    return ": 'Calibrate'" in rail or ': "Calibrate"' in rail
+    return ": t('track.calibrate')" in rail
 
 
 def test_update_settings_sends_set_mirror_when_lab_is_seen() -> None:
@@ -1221,3 +1223,80 @@ def test_sync_lab_character_uses_track_ack_frame(monkeypatch) -> None:
     assert ("hair", 4) in seen
     assert ("overlay", 4) in seen
     assert rt._lab_overlay_gen == 4
+
+
+def _pack_sync_runtime(monkeypatch, *, ref: str, fit: dict | None = None):
+    from pathlib import Path
+
+    from PIL import Image
+
+    from backend.engine import neutral_keypoints
+
+    rt = _hair_runtime()
+    calls: list[tuple[str, object]] = []
+
+    class _Lab:
+        def status(self, merge_frame=False):
+            return {"online": True, "ready": True, "commands": ["set_rest", "track"]}
+
+        def put_source(self, path):
+            return {"ok": True, "status": {}}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    monkeypatch.setattr("backend.character_fit.read_character_fit", lambda ident, **k: dict(fit or {}))
+    stored: list[dict] = []
+    monkeypatch.setattr(
+        "backend.character_fit.update_character_fit", lambda ident, patch, **k: stored.append(patch)
+    )
+    rt._ref_path = Path(ref)
+    rt._last_image = Image.new("RGB", (768, 768))
+    kps = neutral_keypoints().astype("float32")
+    kps[:, 3] = 1.0
+    rt._last_overlay_kps = kps
+    rt._last_lab_hair = [{"class": "hair_left", "polygon": [[-0.5, -0.9], [0.0, -0.9], [-0.2, -0.6]]}]
+    rt._same_lab_still = lambda: False
+    rt._write_lab_source = lambda: "track_lab/input/source.png"
+    rt._lab_ack = lambda op, body=None: calls.append((op, body)) or {
+        "ok": True,
+        "status": {"generation": 2},
+        "frame": {"generation": 2, "keypoints": [], "hair": []},
+    }
+    rt._adopt_lab_hair = lambda packet=None: True
+    rt.adopt_lab_overlay = lambda packet=None, emit=False: None
+    return rt, calls, stored, kps
+
+
+def test_loading_a_pack_sends_its_mesh_instead_of_detecting(monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    fit = {"hair": [{"class": "hair_middle", "polygon": [[-0.5, -1.0], [0.5, -1.0], [0.0, -0.5]]}]}
+    rt, calls, stored, kps = _pack_sync_runtime(monkeypatch, ref="characters/goblin.vtm", fit=fit)
+    StreamRuntime._sync_lab_character(rt)
+    ops = [op for op, _ in calls]
+    assert "track" not in ops and ops[0] == "set_rest"
+    body = calls[0][1]
+    # norm [-1, 1] -> character pixels on the 768 still, same slots.
+    x0 = (float(kps[0, 0]) + 1.0) * 0.5 * 768
+    assert abs(body["points"][0][0] - x0) < 1e-2
+    assert len(body["points"]) == 28
+    assert {row["id"] for row in body["iris"]} == {28, 29}
+    assert [j["id"] for j in body["skeleton"]] == [31, 32, 33, 34, 35, 36]
+    assert body["hair"][0]["polygon"][0] == [192.0, 0.0]
+    assert stored == []  # hair came from the pack
+
+
+def test_first_load_without_packaged_hair_stores_what_the_lab_found(monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt, calls, stored, _ = _pack_sync_runtime(monkeypatch, ref="characters/goblin.vtm", fit={})
+    StreamRuntime._sync_lab_character(rt)
+    assert calls[0][0] == "set_rest" and "hair" not in calls[0][1]
+    assert stored and stored[0]["hair"][0]["class"] == "hair_left"
+
+
+def test_a_new_still_still_runs_full_detection(monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt, calls, _, _ = _pack_sync_runtime(monkeypatch, ref="models/refs/upload.png")
+    StreamRuntime._sync_lab_character(rt, replace=True)
+    assert [op for op, _ in calls] == ["track"]

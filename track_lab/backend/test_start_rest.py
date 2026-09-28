@@ -218,3 +218,117 @@ def test_mirror_persists_in_ifm_json(monkeypatch, tmp_path) -> None:
     assert second.selfie is False
     assert bool(second.status(publish=False).get("mirror")) is True
 
+
+
+def _no_models(monkeypatch) -> None:
+    """Loading a packaged character must not run the detection models."""
+    def boom(name):
+        return lambda *a, **k: (_ for _ in ()).throw(AssertionError(f"{name} ran on a packaged rest"))
+
+    monkeypatch.setattr(face_mod, "fit_mesh", boom("face / landmark model"))
+    monkeypatch.setattr(face_mod, "track_still", boom("iris model"))
+    monkeypatch.setattr(face_mod, "skeleton_from_still", boom("skeleton fit"))
+
+
+def _rest_body(pts: np.ndarray, *, hair: bool) -> dict[str, object]:
+    body: dict[str, object] = {
+        "points": pts.tolist(),
+        "iris": [{"id": 28, "x": 640.0, "y": 410.0, "score": 0.9, "visible": True}],
+        "skeleton": [{"id": 31, "name": "neck", "x": 630.0, "y": 700.0, "score": 1.0}],
+    }
+    if hair:
+        body["hair"] = [{"class": "hair_middle", "polygon": [[600.0, 300.0], [700.0, 300.0], [650.0, 380.0]]}]
+    return body
+
+
+def test_set_rest_installs_packaged_mesh_without_detection(tmp_path, monkeypatch) -> None:
+    packaged = _mesh(620.0, 400.0)
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    _no_models(monkeypatch)
+    monkeypatch.setattr(face_mod, "detect_hair", lambda frame: (_ for _ in ()).throw(AssertionError("hair model ran")))
+    out = bench.set_rest(_rest_body(packaged, hair=True))
+    assert str(out.get("error") or "") == ""
+    assert np.allclose(bench.rest_pts[:, :2], packaged[:, :2])
+    assert bench._skeleton_rest[0]["id"] == 31 and bench._skeleton_rest[0]["x"] == 630.0
+    assert bench._iris_rest[0]["id"] == 28
+    assert bench._hair[0]["class"] == "hair_middle"
+
+
+def test_set_rest_detects_only_hair_when_the_pack_has_none(tmp_path, monkeypatch) -> None:
+    packaged = _mesh(620.0, 400.0)
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    _no_models(monkeypatch)
+    calls = {"hair": 0}
+    found = [{"class": "hair_left", "polygon": [[500.0, 300.0], [560.0, 300.0], [530.0, 380.0]]}]
+
+    def detect(frame):
+        calls["hair"] += 1
+        return found
+
+    monkeypatch.setattr(face_mod, "detect_hair", detect)
+    out = bench.set_rest(_rest_body(packaged, hair=False))
+    assert str(out.get("error") or "") == ""
+    assert calls["hair"] == 1
+    assert bench._hair == found
+
+
+def test_set_rest_rejects_a_broken_mesh(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    _no_models(monkeypatch)
+    out = bench.set_rest({"points": [[1.0, 2.0]] * 5})
+    assert "28 face points" in str(out.get("error") or "")
+
+
+def test_set_rest_point_moves_the_rest_and_drops_its_nudge(tmp_path, monkeypatch) -> None:
+    rest = _mesh(620.0, 400.0)
+    bench, book = _bench_for_track(monkeypatch, tmp_path, rest)
+    bench._point_offsets = {13: (17.0, -49.0), 5: (2.0, 3.0)}
+    out = bench.set_rest_point({"id": 13, "x": 700.0, "y": 450.0})
+    assert str(out.get("error") or "") == ""
+    assert np.allclose(bench.rest_pts[13, :2], (700.0, 450.0))
+    assert np.allclose(book.template(None)[13, :2], (700.0, 450.0))
+    # The edit is the rest now; the old nudge would apply it twice.
+    assert 13 not in bench._point_offsets
+    assert bench._point_offsets[5] == (2.0, 3.0)
+    others = [i for i in range(28) if i != 13]
+    assert np.allclose(bench.rest_pts[others, :2], rest[others, :2])
+
+
+def test_set_rest_point_moves_an_iris(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(620.0, 400.0))
+    bench._iris_rest = [
+        {"id": 28, "x": 640.0, "y": 410.0, "score": 0.9, "visible": True},
+        {"id": 29, "x": 700.0, "y": 410.0, "score": 0.9, "visible": True},
+    ]
+    bench._point_offsets = {29: (4.0, 4.0)}
+    out = bench.set_rest_point({"id": 29, "x": 705.0, "y": 420.0})
+    assert str(out.get("error") or "") == ""
+    by_id = {int(row["id"]): row for row in bench._iris_rest}
+    assert (by_id[29]["x"], by_id[29]["y"]) == (705.0, 420.0)
+    assert (by_id[28]["x"], by_id[28]["y"]) == (640.0, 410.0)
+    assert 29 not in bench._point_offsets
+
+
+def test_set_rest_point_rejects_skeleton_slots(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(620.0, 400.0))
+    out = bench.set_rest_point({"id": 31, "x": 1.0, "y": 2.0})
+    assert "0–27" in str(out.get("error") or "")
+
+
+def test_set_rest_drops_nudges_the_pack_already_holds(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    _no_models(monkeypatch)
+    bench._point_offsets = {13: (17.0, -49.0)}
+    bench.set_rest(_rest_body(_mesh(620.0, 400.0), hair=True))
+    assert bench._point_offsets == {}
+    assert bench.live_status()["points"][13][:2] == bench.rest_pts[13, :2].tolist()
+
+
+def test_track_drops_nudges_from_the_old_rest(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    fresh = _mesh(620.0, 400.0)
+    monkeypatch.setattr(face_mod, "fit_mesh", lambda frame: (fresh.copy(), None))
+    bench._point_offsets = {13: (17.0, -49.0)}
+    out = bench.track()
+    assert str(out.get("error") or "") == ""
+    assert bench._point_offsets == {}

@@ -1,6 +1,6 @@
 # Track lab
 
-Face-tracking bench. Shares the main VTM Studio venv (`.venv-build`). Source edits stay in this folder.
+Face-tracking bench. Shares the main VTM Spark venv (`.venv-build`). Source edits stay in this folder.
 
 **Still goes here:** `input/source.png`
 
@@ -33,7 +33,7 @@ Python is `..\.venv-build\Scripts\python.exe`. `PYTHONPATH` is this folder so `b
 
 ## Harness
 
-`harness/` is the outbound tracking + inbound settings port. The lab UI talks to `/api`; VTM Studio talks to `/harness`.
+`harness/` is the outbound tracking + inbound settings port. The lab UI talks to `/api`; VTM Spark talks to `/harness`.
 
 Port **8780** is fixed. A second `start.ps1` reuses a live lab **with harness**. An old process that only has `/api/health` is killed and replaced. Anything else on that port is an error — we do not hop.
 

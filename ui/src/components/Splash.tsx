@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { BootStatus } from '../api'
+import { useI18n } from '../i18n'
 import { dragIfPrimary } from '../nativeWindow'
 
 const EMPTY: BootStatus = {
@@ -44,6 +45,7 @@ function overall(boot: BootStatus): { pct: number; label: string } {
 }
 
 export function Splash(props: Props) {
+  const { tr } = useI18n()
   const boot = props.boot ?? EMPTY
   const bar = overall(boot)
   const notice = props.error || boot.error
@@ -70,17 +72,17 @@ export function Splash(props: Props) {
       <aside className="krita-splash-panel">
         <div className="krita-splash-plate">
           <header className="krita-splash-brand">
-            <img className="krita-splash-mark" src="/splash-mark.png?alpha=1" width={72} height={72} alt="" />
-            <p className="krita-splash-kicker">VTM</p>
-            <h1>Studio</h1>
+            <h1>
+              <img className="krita-splash-logo" src="/vtm-spark-logo.svg" width={176} height={60} alt="VTM Spark" />
+            </h1>
             <p className="krita-splash-ver">{APP_VERSION}</p>
           </header>
           <div className="krita-splash-status">
-            <p className="krita-splash-line">{bar.label}</p>
+            <p className="krita-splash-line">{tr(bar.label)}</p>
             <div className="krita-splash-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
               <b style={{ width: `${pct.toFixed(1)}%` }}><i /></b>
             </div>
-            {notice ? <p className="status-error">{notice}</p> : null}
+            {notice ? <p className="status-error">{tr(notice)}</p> : null}
           </div>
         </div>
       </aside>

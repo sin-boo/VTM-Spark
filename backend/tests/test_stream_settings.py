@@ -10,6 +10,7 @@ from backend.engine import (
     _clip_inbetweens,
     _clip_max_fps,
     effective_inbetweens,
+    gen_cap,
     gen_hold_s,
     interpolate_on,
 )
@@ -22,7 +23,9 @@ def test_clip_cfg_bounds() -> None:
 
 
 def test_clip_inbetweens_bounds() -> None:
-    assert _clip_inbetweens(-1) == 0
+    # Negative = Auto (fill the display at this PC's key rate).
+    assert _clip_inbetweens(-1) == -1
+    assert _clip_inbetweens(-7) == -1
     assert _clip_inbetweens(9) == 3
     assert _clip_inbetweens("2") == 2
     assert _clip_inbetweens("nope") == STREAM_INBETWEENS
@@ -94,8 +97,9 @@ def test_compile_toggle_on_cpu_skips() -> None:
 def test_max_fps_clip() -> None:
     assert _clip_max_fps(None) == 0
     assert _clip_max_fps(-5) == 0
-    assert _clip_max_fps("24") == 24
-    assert _clip_max_fps(999) == 60
+    assert _clip_max_fps("14") == 14
+    # Past the 20 fps display every extra key is thrown away.
+    assert _clip_max_fps(999) == 20
 
 
 def test_gen_hold_keeps_keys_under_cap() -> None:
@@ -108,3 +112,42 @@ def test_gen_hold_keeps_keys_under_cap() -> None:
     assert gen_hold_s(10, 10.0, 10.5) == 0.0
     # Batch x2 makes two keys per call, so it gets twice the interval.
     assert abs(gen_hold_s(10, 10.0, 10.01, batch=2) - 0.19) < 1e-9
+
+
+def test_auto_cap_fills_the_display_with_mids() -> None:
+    # Auto (0): keys + in-betweens = the 20 fps the display shows.
+    assert gen_cap(0, True, 1) == 10.0
+    assert gen_cap(0, True, 3) == 5.0
+    assert abs(gen_cap(0, True, 2) - 20.0 / 3.0) < 1e-9
+    # Interpolate off: keys only, still no point past the display.
+    assert gen_cap(0, False, 3) == 20.0
+    # A manual cap wins.
+    assert gen_cap(7, True, 1) == 7.0
+    # Fractional Auto caps pace exactly (no rounding 6.67 up to 7).
+    assert abs(gen_hold_s(20.0 / 3.0, 10.0, 10.0) - 0.15) < 1e-9
+
+
+def test_gen_cap_limit_matches_display() -> None:
+    from backend.engine import STREAM_MAX_GEN_FPS_LIMIT
+    from backend.frame_interp import SHOW_FPS_MAX
+
+    assert STREAM_MAX_GEN_FPS_LIMIT == SHOW_FPS_MAX
+
+
+def test_snap_alpha_eases_off_with_motion() -> None:
+    from backend.engine import snap_alpha
+
+    assert snap_alpha(0.58, 0.0) == 0.58
+    assert snap_alpha(0.58, 0.5) == 1.0
+    mid = snap_alpha(0.58, 0.015)
+    assert 0.58 < mid < 1.0
+
+
+def test_auto_inbetweens_ask_for_the_max_and_aim_keys_at_ten() -> None:
+    from backend.engine import STREAM_MAX_INBETWEENS
+
+    assert effective_inbetweens(True, -1) == STREAM_MAX_INBETWEENS
+    assert effective_inbetweens(False, -1) == 0
+    # Real keys up to 10/s, mids fill the rest of the 20 fps display.
+    assert gen_cap(0, True, -1) == 10.0
+    assert gen_cap(0, False, -1) == 20.0

@@ -1,4 +1,4 @@
-"""Ensure only one VTM Studio backend owns the machine at a time.
+"""Ensure only one VTM Spark backend owns the machine at a time.
 
 Orphan / double-started backends were stacking multi-GB CUDA+torch heaps
 (tens of GB → full system freeze on close/reopen).
@@ -122,7 +122,7 @@ def _try_file_lock(path: Path) -> bool:
 
 
 def acquire_single_instance() -> bool:
-    """Try to become the sole VTM Studio instance. False = another copy is alive."""
+    """Try to become the sole VTM Spark instance. False = another copy is alive."""
     if os.environ.get("VTM_ALLOW_MULTI", "").strip() in {"1", "true", "yes"}:
         return True
     if sys.platform.startswith("win"):

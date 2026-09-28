@@ -1,4 +1,4 @@
-"""Run VTM Studio generate from the current Track Lab overlay.
+"""Run VTM Spark generate from the current Track Lab overlay.
 
 The harness host stays torch-free. This module is imported by the worker.
 Parent ``backend`` is loaded as ``vtm_backend`` so it does not collide with
@@ -173,7 +173,7 @@ def _ensure_vtm() -> None:
         submodule_search_locations=[str(pkg_dir)],
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError("Cannot load VTM Studio backend")
+        raise RuntimeError("Cannot load VTM Spark backend")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_PKG] = mod
     spec.loader.exec_module(mod)

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TravelBox as TravelBoxValue } from '../api'
+import { useI18n, type MessageKey } from '../i18n'
 import { Toggle } from './widgets'
 
 const ROOM_MAX = 1.2
@@ -33,28 +34,28 @@ const ZERO: TravelBoxValue = {
 
 type RoomKey = 'left' | 'right' | 'up' | 'down' | 'body_left' | 'body_right' | 'body_up' | 'body_down'
 
-const HEAD_ROOM: [RoomKey, string][] = [
-  ['left', 'Left'],
-  ['right', 'Right'],
-  ['up', 'Up'],
-  ['down', 'Down'],
+const HEAD_ROOM: [RoomKey, MessageKey][] = [
+  ['left', 'common.left'],
+  ['right', 'common.right'],
+  ['up', 'common.up'],
+  ['down', 'common.down'],
 ]
 
 type TurnKey = 'turn_left' | 'turn_right' | 'tilt_left' | 'tilt_right'
 
 // Screen sides of the character: which way the face turns, or the crown tips.
-const HEAD_TURN: [TurnKey, string, number][] = [
-  ['turn_left', 'Turn left', YAW_MAX],
-  ['turn_right', 'Turn right', YAW_MAX],
-  ['tilt_left', 'Tilt left', ROLL_MAX],
-  ['tilt_right', 'Tilt right', ROLL_MAX],
+const HEAD_TURN: [TurnKey, MessageKey, MessageKey, number][] = [
+  ['turn_left', 'travel.turnLeft', 'travel.turnLeftTitle', YAW_MAX],
+  ['turn_right', 'travel.turnRight', 'travel.turnRightTitle', YAW_MAX],
+  ['tilt_left', 'travel.tiltLeft', 'travel.tiltLeftTitle', ROLL_MAX],
+  ['tilt_right', 'travel.tiltRight', 'travel.tiltRightTitle', ROLL_MAX],
 ]
 
-const BODY_ROOM: [RoomKey, string][] = [
-  ['body_left', 'Left'],
-  ['body_right', 'Right'],
-  ['body_up', 'Up'],
-  ['body_down', 'Down'],
+const BODY_ROOM: [RoomKey, MessageKey][] = [
+  ['body_left', 'common.left'],
+  ['body_right', 'common.right'],
+  ['body_up', 'common.up'],
+  ['body_down', 'common.down'],
 ]
 
 type Props = {
@@ -111,6 +112,7 @@ function fill(raw: TravelBoxValue | null | undefined): TravelBoxValue {
 }
 
 export function TravelBox(props: Props) {
+  const { t } = useI18n()
   const live = fill(props.value)
   const [draft, setDraft] = useState(live)
   const drag = useRef(false)
@@ -148,26 +150,26 @@ export function TravelBox(props: Props) {
   return (
     <div className={`travel-box${draft.enabled ? '' : ' is-off'}`}>
       <div className="group-head travel-box-head">
-        <h2 className="group-title">Limiters</h2>
+        <h2 className="group-title">{t('travel.title')}</h2>
         <div className="travel-box-actions">
           <button
             type="button"
             className="btn ghost compact"
             disabled={props.disabled}
             onClick={() => commit({ ...ZERO, enabled: draft.enabled }, true)}
-            title="Reset head, body, turn, and eye limits"
+            title={t('travel.resetTitle')}
           >
-            Reset
+            {t('common.reset')}
           </button>
           <Toggle
-            label="Show"
+            label={t('common.show')}
             checked={Boolean(props.show)}
             disabled={props.disabled}
-            title="Draw the head and body walls on the character"
+            title={t('travel.showTitle')}
             onChange={(on) => props.onShow?.(on)}
           />
           <Toggle
-            label="On"
+            label={t('common.on')}
             checked={draft.enabled}
             disabled={props.disabled}
             onChange={(enabled) => commit({ ...draft, enabled }, true)}
@@ -179,30 +181,30 @@ export function TravelBox(props: Props) {
         <div className="travel-block">
           <div className="travel-block-head">
             <i className="travel-swatch is-head" />
-            <h3 className="group-subtitle" title="How far the head may move from rest, in face heights.">
-              Head
+            <h3 className="group-subtitle" title={t('travel.headTitle')}>
+              {t('travel.head')}
             </h3>
           </div>
           <ul className="lab-sliders travel-readout">
             {HEAD_ROOM.map(([key, label]) => (
               <RangeRow
                 key={key}
-                label={label}
+                label={t(label)}
                 value={draft[key]}
                 disabled={off}
-                title={`Head may move ${label.toLowerCase()} this far from rest.`}
+                title={t('travel.headMove', { dir: t(label).toLowerCase() })}
                 kind="room"
                 onChange={(n) => commit({ ...draft, [key]: n })}
               />
             ))}
-            {HEAD_TURN.map(([key, label, max]) => (
+            {HEAD_TURN.map(([key, label, title, max]) => (
               <RangeRow
                 key={key}
-                label={label}
+                label={t(label)}
                 value={draft[key]}
                 max={max}
                 disabled={off}
-                title={`How far the head may ${label.toLowerCase()} on screen.`}
+                title={t(title)}
                 kind="deg"
                 onChange={(n) => commit({ ...draft, [key]: n })}
               />
@@ -213,21 +215,18 @@ export function TravelBox(props: Props) {
         <div className="travel-block">
           <div className="travel-block-head">
             <i className="travel-swatch is-body" />
-            <h3
-              className="group-subtitle"
-              title="How far the neck, shoulders, and chest may move from rest, in face heights."
-            >
-              Body
+            <h3 className="group-subtitle" title={t('travel.bodyTitle')}>
+              {t('travel.body')}
             </h3>
           </div>
           <ul className="lab-sliders travel-readout">
             {BODY_ROOM.map(([key, label]) => (
               <RangeRow
                 key={key}
-                label={label}
+                label={t(label)}
                 value={draft[key]}
                 disabled={off}
-                title={`Body may move ${label.toLowerCase()} this far from rest.`}
+                title={t('travel.bodyMove', { dir: t(label).toLowerCase() })}
                 kind="room"
                 onChange={(n) => commit({ ...draft, [key]: n })}
               />
@@ -237,22 +236,22 @@ export function TravelBox(props: Props) {
 
         <div className="travel-block">
           <div className="travel-block-head">
-            <h3 className="group-subtitle" title="Look angles, eyes, and size.">
-              Look
+            <h3 className="group-subtitle" title={t('travel.lookTitle')}>
+              {t('travel.look')}
             </h3>
           </div>
           <ul className="lab-sliders travel-readout">
             <RangeRow
-              label="Look up"
+              label={t('travel.lookUp')}
               value={draft.pitch_up}
               max={PITCH_UP_MAX}
               disabled={off}
               kind="deg"
-              title="How far the head may tip up toward the ceiling. Applies while tracking is on."
+              title={t('travel.lookUpTitle')}
               onChange={(pitch_up) => commit({ ...draft, pitch_up })}
             />
             <RangeRow
-              label="Look down"
+              label={t('travel.lookDown')}
               value={draft.pitch_down}
               max={PITCH_DOWN_MAX}
               disabled={off}
@@ -260,18 +259,18 @@ export function TravelBox(props: Props) {
               onChange={(pitch_down) => commit({ ...draft, pitch_down })}
             />
             <RangeRow
-              label="Eyes"
+              label={t('travel.eyes')}
               value={draft.eye}
               disabled={off}
-              title="How far the pupils may travel inside each eye."
+              title={t('travel.eyesTitle')}
               kind="eye"
               onChange={(eye) => commit({ ...draft, eye })}
             />
             <RangeRow
-              label="Size"
+              label={t('travel.size')}
               value={draft.size}
               disabled={off}
-              title="How much stepping toward or away from the camera may grow or shrink the character."
+              title={t('travel.sizeTitle')}
               kind="size"
               onChange={(size) => commit({ ...draft, size })}
             />
@@ -329,6 +328,7 @@ function ValueBox(props: {
   clamp: (n: number) => number
   onChange: (value: number) => void
 }) {
+  const { t } = useI18n()
   const kind = props.kind
   const scale = kind === 'eye' || kind === 'size' ? 100 : 1
   const shown = (props.value * scale).toFixed(kind === 'room' ? 2 : 0)
@@ -353,7 +353,7 @@ function ValueBox(props: {
       <input
         type="text"
         inputMode="decimal"
-        aria-label={`${props.label} value`}
+        aria-label={t('travel.value', { label: props.label })}
         value={typed ?? shown}
         disabled={props.disabled}
         onFocus={(e) => e.currentTarget.select()}

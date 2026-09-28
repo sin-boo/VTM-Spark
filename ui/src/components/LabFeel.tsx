@@ -6,18 +6,19 @@ import {
   type LabStatus,
   type MixWeights,
 } from '../api'
+import { useI18n, type MessageKey } from '../i18n'
 import { Lamp } from './widgets'
 
-type FeelSlider = { key: keyof LabFeel; label: string; max: number; title?: string }
+type FeelSlider = { key: keyof LabFeel; label: MessageKey; max: number; title?: MessageKey }
 
 const LIVE_FEEL: FeelSlider[] = [
   {
     key: 'smoothing',
-    label: 'Smooth',
+    label: 'feel.smooth',
     max: 1,
-    title: 'Ease each new pose toward the last one. Higher is smoother. Eyes use the same ease.',
+    title: 'feel.smoothTitle',
   },
-  { key: 'mouth', label: 'Mouth', max: 2 },
+  { key: 'mouth', label: 'feel.mouth', max: 2 },
 ]
 
 const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E']
@@ -47,6 +48,23 @@ function mixRows(lab: LabStatus | null): [string, number][] {
 }
 
 const HEAD_ROWS = new Set(['yaw', 'pitch', 'roll'])
+
+// Rows are keyed by their English name (the eased meters track them by it).
+const METER_LABELS: Record<string, MessageKey> = {
+  'blink L': 'meter.blinkL',
+  'blink R': 'meter.blinkR',
+  'look X': 'meter.lookX',
+  'look Y': 'meter.lookY',
+  yaw: 'meter.yaw',
+  pitch: 'meter.pitch',
+  roll: 'meter.roll',
+  smile: 'meter.smile',
+  sad: 'meter.sad',
+  A: 'meter.A',
+  I: 'meter.I',
+  U: 'meter.U',
+  E: 'meter.E',
+}
 
 /** Centred meters: look is -1..1, head is degrees. */
 function isCentred(name: string) {
@@ -123,13 +141,14 @@ function MixLane(props: {
   meters: ReturnType<typeof useEasedMeters>
 }) {
   const { rows, meters } = props
+  const { t } = useI18n()
   return (
     <>
       {rows.map(([name, value]) => {
         const v = meters.initial(name, value)
         return (
           <li key={name} className={isCentred(name) ? 'is-look' : undefined}>
-            <span>{name}</span>
+            <span>{METER_LABELS[name] ? t(METER_LABELS[name]) : name}</span>
             <i>
               <b ref={meters.bind(name, 'bar')} style={{ width: meterFill(name, v) }} />
             </i>
@@ -150,18 +169,19 @@ export function MixMeters({ lab }: { lab: LabStatus | null }) {
   const eyes = rows.slice(0, 4)
   const head = rows.slice(4, 7)
   const mouth = rows.slice(7)
+  const { t } = useI18n()
   return (
-    <section className={`desk-mix${live ? ' is-live' : ''}`} aria-label="Live">
+    <section className={`desk-mix${live ? ' is-live' : ''}`} aria-label={t('mix.title')}>
       <div className="char-stage-bar">
-        <h2 className="group-title">Live</h2>
-        <span className="char-stage-name">{live ? 'Tracking' : 'Waiting'}</span>
+        <h2 className="group-title">{t('mix.title')}</h2>
+        <span className="char-stage-name">{live ? t('mix.tracking') : t('mix.waiting')}</span>
       </div>
       <ul className="lab-meters">
-        <li className="meter-kicker">Eyes</li>
+        <li className="meter-kicker">{t('mix.eyes')}</li>
         <MixLane rows={eyes} meters={meters} />
-        <li className="meter-kicker">Head</li>
+        <li className="meter-kicker">{t('mix.head')}</li>
         <MixLane rows={head} meters={meters} />
-        <li className="meter-kicker">Mouth</li>
+        <li className="meter-kicker">{t('mix.mouth')}</li>
         <MixLane rows={mouth} meters={meters} />
       </ul>
     </section>
@@ -178,6 +198,7 @@ type SliderProps = {
 
 function FeelSliders(props: SliderProps) {
   const { rows, feel, online, busy, onFeel } = props
+  const { t } = useI18n()
   const [draft, setDraft] = useState<LabFeel>(feel)
   const drag = useRef(false)
   const timer = useRef<number | null>(null)
@@ -207,14 +228,14 @@ function FeelSliders(props: SliderProps) {
     <ul className="lab-sliders">
       {rows.map((row) => (
         <li key={row.key}>
-          <span>{row.label}</span>
+          <span>{t(row.label)}</span>
           <input
             type="range"
             min={0}
             max={row.max}
             step={0.01}
             value={draft[row.key] ?? ZERO_LAB_FEEL[row.key]}
-            title={row.title}
+            title={row.title ? t(row.title) : undefined}
             disabled={!online || busy}
             onChange={(e) => {
               const value = Number(e.target.value)
@@ -242,12 +263,13 @@ export function LabFeel(props: Props) {
   const online = Boolean(props.lab?.online)
   const live = Boolean(props.lab?.live)
   const feel = props.lab?.feel ?? ZERO_LAB_FEEL
-  const lamp = live ? 'Track Lab live' : online ? 'Track Lab connected' : 'Track Lab offline'
+  const { t } = useI18n()
+  const lamp = t(live ? 'lab.live' : online ? 'lab.connected' : 'lab.offline')
 
   return (
     <div className="lab-feel">
       <div className="lab-feel-head">
-        <h3 className="group-subtitle">Feel</h3>
+        <h3 className="group-subtitle">{t('feel.title')}</h3>
         <div className="lab-feel-meta">
           {props.headerExtra}
           <Lamp on={live} idle={online} label={lamp} />

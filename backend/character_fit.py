@@ -1,4 +1,4 @@
-"""Still-space hair, skeleton, and limiter boxes for the create fit step.
+"""Still-space hair, tracking points, skeleton, and limiter boxes for the create fit step.
 
 The fit (hair mask, skeleton, limiters) lives in the character's ``.vtm`` as
 ``fit.json``; the pack is the source of truth. Older installs kept it beside
@@ -24,7 +24,7 @@ from .character_pack import (
     upgrade_character_pack,
     write_pack_fit,
 )
-from .pose_controller import face_height
+from .pose_controller import KEYPOINT_REFS, face_height
 from .travel_box import (
     body_mesh_rect_norm,
     body_rect_norm,
@@ -41,6 +41,11 @@ SKELETON_LABELS = {
     35: "L elbow",
     36: "Chest",
 }
+# Tracking points the fit canvas can move: face 0–27, irises 28–29. Labels
+# match the live overlay so a point reads the same on both screens.
+FACE_POINT_SLOTS = tuple(range(28))
+IRIS_POINT_SLOTS = (28, 29)
+POINT_SLOTS = FACE_POINT_SLOTS + IRIS_POINT_SLOTS + tuple(SKELETON_LABELS)
 
 FIT_NAME = "fit.json"
 
@@ -209,16 +214,25 @@ def build_fit_view(
     if k is not None and k.ndim == 2 and k.shape[0] >= 37:
         fh = max(float(face_height(k)), 1e-3)
     skeleton: list[dict[str, Any]] = []
+    points: list[dict[str, Any]] = []
     if k is not None and k.ndim == 2 and k.shape[0] >= 37:
-        for idx, label in SKELETON_LABELS.items():
-            skeleton.append(
-                {
-                    "id": idx,
-                    "label": label,
-                    "x": round((float(k[idx, 0]) + 1.0) * 0.5 * w, 1),
-                    "y": round((float(k[idx, 1]) + 1.0) * 0.5 * h, 1),
-                }
+
+        def _px(idx: int) -> tuple[float, float]:
+            return (
+                round((float(k[idx, 0]) + 1.0) * 0.5 * w, 1),
+                round((float(k[idx, 1]) + 1.0) * 0.5 * h, 1),
             )
+
+        for idx, label in SKELETON_LABELS.items():
+            x, y = _px(idx)
+            skeleton.append({"id": idx, "label": label, "x": x, "y": y})
+        for idx in POINT_SLOTS:
+            if float(k[idx, 3]) < 0.5:
+                continue
+            group = "face" if idx in FACE_POINT_SLOTS else "iris" if idx in IRIS_POINT_SLOTS else "body"
+            label = SKELETON_LABELS.get(idx) or KEYPOINT_REFS[idx]
+            x, y = _px(idx)
+            points.append({"id": idx, "label": label, "group": group, "x": x, "y": y})
     head_tight = head_mesh_rect_norm(k) if k is not None else None
     head = head_rect_norm(k, spec) if k is not None else None
     body_tight = body_mesh_rect_norm(k) if k is not None else None
@@ -229,6 +243,7 @@ def build_fit_view(
         "face_height": round(fh, 6),
         "hair": norm_hair_to_pixels(hair_norm, w, h),
         "skeleton": skeleton,
+        "points": points,
         "boxes": {
             "head_tight": _px_rect(head_tight, w, h),
             "head": _px_rect(head, w, h),

@@ -1,4 +1,4 @@
-# VTM Studio — local / package artifacts (do not push)
+# VTM Spark — local / package artifacts (do not push)
 .venv/
 .venv-build/
 __pycache__/
@@ -43,6 +43,10 @@ models/extra_checkpoint_dirs.json
 models/session.json
 # Measured load / warmup stage times on this PC (progress bars)
 models/load_timings.json
+# Per-PC picks and measurements: language, GPU, model speed per batch size
+models/ui_prefs.json
+models/gpu.json
+models/hw_profile.json
 
 # Leftover pre-layout folder
 /data/

@@ -9,6 +9,7 @@ import {
   type CharacterMeta,
   type TravelBox,
 } from '../api'
+import { useI18n } from '../i18n'
 import { CharacterDetails } from './CharacterDetails'
 import { CharacterFit, type CharacterFitHandle } from './CharacterFit'
 import { ProgressMeter } from './widgets'
@@ -22,6 +23,8 @@ type Props = {
   creating: boolean
   createProgress?: number
   createLabel?: string
+  /** Model load and character build are separate bars; a new phase starts from zero. */
+  createPhase?: 'model' | 'character'
   createStillUrl?: string
   busy: boolean
   error: string
@@ -67,6 +70,7 @@ function CardThumb({ card }: { card: CharacterCard }) {
 }
 
 export function CharacterLibrary(props: Props) {
+  const { t, tr } = useI18n()
   const createRef = useRef<HTMLInputElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
@@ -263,7 +267,7 @@ export function CharacterLibrary(props: Props) {
   async function beginImport(file: File) {
     setLibNotice(null)
     if (!/\.vtm$/i.test(file.name)) {
-      setLibNotice({ error: true, text: 'Pick a .vtm character file.' })
+      setLibNotice({ error: true, text: t('lib.pickVtm') })
       return
     }
     setImporting(true)
@@ -272,10 +276,10 @@ export function CharacterLibrary(props: Props) {
       if (card?.id) {
         setPickedId(card.id)
         setRevealId(card.id)
-        setLibNotice({ error: false, text: `Imported ${card.name}.` })
+        setLibNotice({ error: false, text: t('lib.imported', { name: card.name }) })
       }
     } catch (e) {
-      setLibNotice({ error: true, text: `Import failed: ${cleanError(e)}` })
+      setLibNotice({ error: true, text: t('lib.importFailed', { error: cleanError(e) }) })
     } finally {
       setImporting(false)
     }
@@ -355,19 +359,19 @@ export function CharacterLibrary(props: Props) {
   const sheet = revealError ? (
     <div className="char-sheet" role="alertdialog" aria-labelledby="char-reveal-title">
       <p id="char-reveal-title" className="char-sheet-title">
-        Could not open the folder
+        {t('lib.revealFailed')}
       </p>
       <p className="status-error">{revealError}</p>
       <div className="row">
         <button type="button" className="btn ghost" onClick={() => setRevealError('')}>
-          OK
+          {t('common.ok')}
         </button>
       </div>
     </div>
   ) : renameCard ? (
     <div className="char-sheet" role="dialog" aria-labelledby="char-rename-title">
       <p id="char-rename-title" className="char-sheet-title">
-        Rename {renameCard.name}
+        {t('lib.renameTitle', { name: renameCard.name })}
       </p>
       <input
         ref={renameRef}
@@ -384,22 +388,22 @@ export function CharacterLibrary(props: Props) {
       />
       <div className="row">
         <button type="button" className="btn primary" disabled={!renameDraft.trim()} onClick={submitDockRename}>
-          Save
+          {t('common.save')}
         </button>
         <button type="button" className="btn ghost" onClick={() => setRenameId(null)}>
-          Cancel
+          {t('common.cancel')}
         </button>
       </div>
     </div>
   ) : confirmCard ? (
     <div className="char-sheet" role="alertdialog" aria-labelledby="char-confirm-title">
       <p id="char-confirm-title" className="char-sheet-title">
-        Remove {confirmCard.name}?
+        {t('lib.removeTitle', { name: confirmCard.name })}
       </p>
       <div className="char-sheet-preview">
         <img src={characterThumb(confirmCard)} alt="" />
         <p className="hint">
-          {confirmCard.id === props.currentId ? 'Off the desk and out of the library.' : 'Out of the library.'}
+          {confirmCard.id === props.currentId ? t('lib.removeCurrent') : t('lib.removeOther')}
         </p>
       </div>
       <div className="row">
@@ -413,19 +417,19 @@ export function CharacterLibrary(props: Props) {
             props.onRemove(id)
           }}
         >
-          Remove
+          {t('common.remove')}
         </button>
         <button type="button" className="btn ghost" onClick={() => setConfirmId(null)}>
-          Keep
+          {t('lib.keep')}
         </button>
       </div>
     </div>
   ) : repairCard ? (
     <div className="char-sheet" role="alertdialog" aria-labelledby="char-repair-title">
       <p id="char-repair-title" className="char-sheet-title">
-        Repair {repairCard.name}?
+        {t('lib.repairTitle', { name: repairCard.name })}
       </p>
-      <p className="hint">Blend shapes do not match the current plan.</p>
+      <p className="hint">{t('lib.repairHint')}</p>
       <div className="row">
         <button
           type="button"
@@ -439,10 +443,10 @@ export function CharacterLibrary(props: Props) {
             })()
           }}
         >
-          Repair
+          {t('common.repair')}
         </button>
         <button type="button" className="btn ghost" onClick={() => setRepairId(null)}>
-          Not now
+          {t('lib.notNow')}
         </button>
       </div>
     </div>
@@ -454,7 +458,7 @@ export function CharacterLibrary(props: Props) {
         type="button"
         className={`char-preview${current ? ' is-on' : ' is-empty'}`}
         disabled={locked}
-        aria-label={current ? `${current.name}. Open characters` : 'No character. Click to add'}
+        aria-label={current ? t('lib.openCharacters', { name: current.name }) : t('lib.emptyAria')}
         onClick={openDock}
         onContextMenu={(e) => {
           if (!current) return
@@ -465,8 +469,8 @@ export function CharacterLibrary(props: Props) {
           <img src={previewSrc} alt="" />
         ) : (
           <span className="char-preview-empty">
-            <span>No character</span>
-            <span>Click to add</span>
+            <span>{t('lib.noCharacter')}</span>
+            <span>{t('lib.clickToAdd')}</span>
           </span>
         )}
       </button>
@@ -509,10 +513,10 @@ export function CharacterLibrary(props: Props) {
               <div className="char-modal" role="dialog" aria-labelledby="char-library-title">
                 <header className="char-modal-head">
                   <h2 id="char-library-title" className="char-modal-title">
-                    Characters
+                    {t('lib.characters')}
                   </h2>
                   <button type="button" className="btn ghost" onClick={closeLibrary}>
-                    Close
+                    {t('common.close')}
                   </button>
                 </header>
                 <div
@@ -541,13 +545,13 @@ export function CharacterLibrary(props: Props) {
                         <CardThumb card={card} />
                         <span className="char-card-name">{card.name}</span>
                         {card.shapes_compatible === false ? (
-                          <span className="char-card-warn">Incompatible</span>
+                          <span className="char-card-warn">{t('lib.incompatible')}</span>
                         ) : null}
                       </button>
                       <button
                         type="button"
                         className="char-card-more"
-                        aria-label={`Actions for ${card.name}`}
+                        aria-label={t('lib.actionsFor', { name: card.name })}
                         aria-haspopup="menu"
                         aria-expanded={menu?.id === card.id}
                         disabled={locked}
@@ -561,8 +565,8 @@ export function CharacterLibrary(props: Props) {
                   ) : (
                     <div className="char-empty-well" aria-hidden="true">
                       <span className="char-preview-empty">
-                        <span>No character</span>
-                        <span>Click to add</span>
+                        <span>{t('lib.noCharacter')}</span>
+                        <span>{t('lib.clickToAdd')}</span>
                       </span>
                     </div>
                   )}
@@ -574,16 +578,16 @@ export function CharacterLibrary(props: Props) {
                 ) : null}
                 <div className="char-modal-actions">
                   <button type="button" className="btn" disabled={locked} onClick={pickFile}>
-                    Create
+                    {t('lib.create')}
                   </button>
                   <button
                     type="button"
                     className="btn"
                     disabled={locked || importing}
-                    title="Add a character someone shared as a .vtm file"
+                    title={t('lib.importTitle')}
                     onClick={pickImport}
                   >
-                    {importing ? 'Importing…' : 'Import .vtm'}
+                    {importing ? t('lib.importing') : t('lib.import')}
                   </button>
                 </div>
               </div>
@@ -604,10 +608,10 @@ export function CharacterLibrary(props: Props) {
                   <>
                     <header className="char-create-head">
                       <h2 id="char-create-title" className="char-sheet-title">
-                        Fit character
+                        {t('lib.fitTitle')}
                       </h2>
                       <button type="button" className="btn ghost" onClick={closeCreate}>
-                        Close
+                        {t('common.close')}
                       </button>
                     </header>
                     <CharacterFit
@@ -623,7 +627,7 @@ export function CharacterLibrary(props: Props) {
                         className="char-rename-input"
                         value={nameDraft}
                         maxLength={80}
-                        placeholder="Name"
+                        placeholder={t('common.name')}
                         onChange={(e) => setNameDraft(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
@@ -638,7 +642,7 @@ export function CharacterLibrary(props: Props) {
                         disabled={!nameDraft.trim()}
                         onClick={submitCreateName}
                       >
-                        Save
+                        {t('common.save')}
                       </button>
                     </div>
                     {notice ? <p className="status-error">{notice}</p> : null}
@@ -651,14 +655,15 @@ export function CharacterLibrary(props: Props) {
                     <div className="char-create-body">
                       <header className="char-create-head">
                         <h2 id="char-create-title" className="char-sheet-title">
-                          Creating character
+                          {t('lib.creatingTitle')}
                         </h2>
                         <button type="button" className="btn ghost" disabled={creating} onClick={closeCreate}>
-                          Close
+                          {t('common.close')}
                         </button>
                       </header>
                       <ProgressMeter
-                        label={props.createLabel || 'Creating character…'}
+                        key={props.createPhase ?? 'character'}
+                        label={tr(props.createLabel || 'Creating character…')}
                         value={props.createProgress ?? 0}
                       />
                       {notice ? <p className="status-error">{notice}</p> : null}
@@ -714,7 +719,7 @@ export function CharacterLibrary(props: Props) {
               ref={menuRef}
               className="char-ctx"
               role="menu"
-              aria-label={`${menuCard.name} actions`}
+              aria-label={t('lib.menuAria', { name: menuCard.name })}
               style={{ left: menu.x, top: menu.y }}
               onClick={(e) => e.stopPropagation()}
               onContextMenu={(e) => e.preventDefault()}
@@ -725,7 +730,7 @@ export function CharacterLibrary(props: Props) {
                 role="menuitem"
                 onClick={() => void beginEdit(menuCard)}
               >
-                Edit
+                {t('common.edit')}
               </button>
               {menuCard.shapes_compatible === false ? (
                 <button
@@ -737,7 +742,7 @@ export function CharacterLibrary(props: Props) {
                     setMenu(null)
                   }}
                 >
-                  Repair
+                  {t('common.repair')}
                 </button>
               ) : null}
               <button
@@ -750,7 +755,7 @@ export function CharacterLibrary(props: Props) {
                   setMenu(null)
                 }}
               >
-                Rename
+                {t('common.rename')}
               </button>
               {SHOW_CHARACTER_DETAILS ? (
                 <button
@@ -759,17 +764,17 @@ export function CharacterLibrary(props: Props) {
                   role="menuitem"
                   onClick={() => openDetails(menuCard)}
                 >
-                  Details
+                  {t('lib.details')}
                 </button>
               ) : null}
               <button
                 type="button"
                 className="menu-item"
                 role="menuitem"
-                title="Open the folder with this character's .vtm file, ready to share"
+                title={t('lib.showInFolderTitle')}
                 onClick={() => void revealCard(menuCard)}
               >
-                Show in folder
+                {t('lib.showInFolder')}
               </button>
               <button
                 type="button"
@@ -780,7 +785,7 @@ export function CharacterLibrary(props: Props) {
                   setMenu(null)
                 }}
               >
-                Remove
+                {t('common.remove')}
               </button>
             </div>,
             document.body,

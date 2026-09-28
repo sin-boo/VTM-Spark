@@ -1,4 +1,4 @@
-"""Developer / test-mode switch for VTM Studio.
+"""Developer / test-mode switch for VTM Spark.
 
 Flip ``DEVELOPER`` to ``True`` when you want the advanced operator controls
 exposed in the UI (checkpoint picker, image path, Iris / Body / Drive pose,

@@ -100,7 +100,7 @@ def test_install_exits_with_script_exit_code() -> None:
 def test_install_summary_uses_step_results() -> None:
     body = _function_body("Invoke-SmartBuild")
     assert "[void](Invoke-EnsureModel)" not in body
-    assert "[void](Invoke-EnsureVtmStudioCam)" not in body
+    assert "[void](Invoke-EnsureVtmSparkCam)" not in body
     assert "$modelsOk" in body
     assert "$vcamOk" in body
     assert "$trackLabOk" in body

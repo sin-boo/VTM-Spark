@@ -34,7 +34,7 @@ internal static class Program
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
     private const uint GW_OWNER = 4;
 
-    private const string DeskTitle = "VTM Studio";
+    private const string DeskTitle = "VTM Spark";
     private const string DeskMutex = "Local\\VTMNobleSingleInstance";
     // Held by run.exe while it launches, before the desk takes DeskMutex.
     private const string LaunchMutex = "Local\\VTMNobleLauncher";
@@ -96,7 +96,7 @@ internal static class Program
                     return 0;
                 }
                 Log("single-instance lock held but no desk window found");
-                if (!Ask("VTM Studio looks like it is already running, but its window cannot be found.\n\n"
+                if (!Ask("VTM Spark looks like it is already running, but its window cannot be found.\n\n"
                     + "Clean up leftover processes and start it again?"))
                 {
                     return 0;
@@ -228,7 +228,7 @@ internal static class Program
                 if (p.ExitCode == WebView2MissingCode)
                 {
                     return "The Microsoft Edge WebView2 runtime could not be installed automatically.\n\n"
-                        + "Check your internet connection and open VTM Studio again.";
+                        + "Check your internet connection and open VTM Spark again.";
                 }
                 return "The desk exited before its window opened (code " + p.ExitCode + ").";
             }
@@ -278,7 +278,7 @@ internal static class Program
             RunWebView2Installer(exe, false);
             if (!WebView2Installed())
             {
-                Inform("VTM Studio needs Microsoft WebView2 to show its window, and the quick install did not work.\n\n"
+                Inform("VTM Spark needs Microsoft WebView2 to show its window, and the quick install did not work.\n\n"
                     + "Windows will now ask for administrator permission to install it for all users. "
                     + "The prompt will say \"Microsoft Edge Update Setup\" - that is this step.\n\n"
                     + "Click Yes to continue.");
@@ -522,7 +522,7 @@ internal static class Program
         return true;
     }
 
-    // A visible top-level "VTM Studio" window from another process. With
+    // A visible top-level "VTM Spark" window from another process. With
     // pythonOnly, only the desk's own windows count.
     private static IntPtr FindDeskWindow(bool pythonOnly)
     {

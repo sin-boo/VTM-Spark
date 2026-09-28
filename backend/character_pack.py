@@ -41,7 +41,7 @@ from .paths import characters_dir, display_path
 FORMAT_ID = "vtm-character"
 FORMAT_VERSION = 2
 SUPPORTED_VERSIONS = (1, 2)
-APP_NAME = "VTM Studio"
+APP_NAME = "VTM Spark"
 
 MANIFEST_NAME = "manifest.json"
 PREVIEW_NAME = "preview.png"

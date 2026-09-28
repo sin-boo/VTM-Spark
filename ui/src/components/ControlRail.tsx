@@ -16,7 +16,9 @@ import {
   type LabStatus,
 } from '../api'
 import { DEVELOPER } from '../developer'
+import { LANGUAGES, useI18n, type I18n, type Lang, type MessageKey } from '../i18n'
 import { CharacterLibrary } from './CharacterLibrary'
+import { GpuPicker } from './GpuPicker'
 import { LabFeel, MixMeters } from './LabFeel'
 import { TravelBox } from './TravelBox'
 import { Lamp, ProgressMeter, Toggle } from './widgets'
@@ -66,6 +68,7 @@ type Props = {
   onDownloadModel?: (name: string) => void
   onLabIfmPort: (port: number) => void
   onReloadBackend: () => void
+  onLanguage: (lang: Lang) => void
 }
 
 function clampSteps(raw: string): number | null {
@@ -86,62 +89,50 @@ const TUNE_DEFAULTS = {
 /** How fast it runs and how much GPU it takes. Compile is left alone: turning it on recompiles. */
 const PERF_DEFAULTS = {
   max_fps: 0,
+  batch: 0,
   interpolate: true,
-  inbetweens: 1,
+  inbetweens: -1,
 }
 
 const STREAM_DEFAULTS = { ...TUNE_DEFAULTS, ...PERF_DEFAULTS }
 
-const HOLD_LAST_TITLE =
-  'Start each gen from a light mix of the last picture. Small moves stay consistent; a turn or new character drops the mix so the old face does not stick. Off = every frame is a fresh still from noise.'
-
-const INBETWEENS_TITLE =
-  'How many extra pictures to print between generated keys. 0 = keys only. 1 = one mid frame. Ignored when Interpolate is off.'
-
-const MAX_FPS_TITLE =
-  'Cap on generated frames per second. The GPU idles between frames, so a cap leaves headroom for games or OBS. Off = as fast as the GPU goes.'
-
-const INTERPOLATE_TITLE =
-  'Print optical-flow frames between DiT keys so motion looks smoother. Off = keys only. Runs off the generate thread so it does not steal Generate FPS.'
+/** Batch choices: 0 = Auto, then poses per model call (engine max is 4). */
+const BATCH_CHOICES = [0, 1, 2, 3, 4]
+/** In-between choices: -1 = Auto (fill the display at this PC's key rate). */
+const INBETWEEN_CHOICES = [-1, 0, 1, 2, 3]
 
 const MODEL_SLIDERS: {
   key: 'pose_cfg' | 'id_cfg' | 'frame_blend'
-  label: string
+  label: MessageKey
   min: number
   max: number
-  title: string
+  title: MessageKey
 }[] = [
-  {
-    key: 'pose_cfg',
-    label: 'Pose follow',
-    min: 0,
-    max: 6,
-    title: 'This 1–2 step model already mixes pose in the joint pass. Fast keeps this at 1.0 — raising it splits pose off the still and melts the face.',
-  },
-  {
-    key: 'id_cfg',
-    label: 'Reference lock',
-    min: 0,
-    max: 6,
-    title: 'This 1–2 step model already mixes the still in the joint pass. Fast keeps this at 1.0.',
-  },
-  {
-    key: 'frame_blend',
-    label: 'Snap',
-    min: 0.05,
-    max: 1,
-    title: `How much of the new frame is shown. Default ${STREAM_DEFAULTS.frame_blend.toFixed(2)}. 1 = no leftover. Lower blends the last picture in, so hair can linger after a turn.`,
-  },
+  { key: 'pose_cfg', label: 'tune.poseFollow', min: 0, max: 6, title: 'tune.poseFollowTitle' },
+  { key: 'id_cfg', label: 'tune.refLock', min: 0, max: 6, title: 'tune.refLockTitle' },
+  { key: 'frame_blend', label: 'tune.snap', min: 0.05, max: 1, title: 'tune.snapTitle' },
 ]
 
-function ifmListenLine(ifm?: LabIfm): string {
+const OVERLAY_PARTS = [
+  ['show_outline', 'overlay.outline'],
+  ['show_brows', 'overlay.brows'],
+  ['show_eyes', 'overlay.eyes'],
+  ['show_nose', 'overlay.nose'],
+  ['show_mouth', 'overlay.mouth'],
+  ['show_iris_overlay', 'overlay.iris'],
+  ['show_skeleton', 'overlay.skeleton'],
+  ['show_hair', 'overlay.hair'],
+] as const satisfies readonly (readonly [string, MessageKey])[]
+
+function ifmListenLine(t: I18n['t'], ifm?: LabIfm): string {
   if (!ifm) return ''
-  if (ifm.receiving && ifm.peer) return `Live · ${ifm.peer}`
-  if (ifm.listening) return 'Waiting for the phone'
+  if (ifm.receiving && ifm.peer) return t('track.ifmLive', { peer: ifm.peer })
+  if (ifm.listening) return t('track.ifmWaiting')
   return ''
 }
 
 export function ControlRail(props: Props) {
+  const { t, tr, lang } = useI18n()
   const s = props.status
   const busy = Boolean(s?.busy)
   const streaming = Boolean(s?.streaming)
@@ -202,13 +193,13 @@ export function ControlRail(props: Props) {
   const overlayOn = Object.values(overlayParts).some(Boolean)
   const labOnline = Boolean(props.lab?.online)
   const labLive = Boolean(props.lab?.live)
-  const labError = labBannerError(props.lab)
+  const labError = tr(labBannerError(props.lab))
   const restCalib = props.lab?.calib
   const restProgress = Number(restCalib?.progress ?? 0)
   const capturingRest = Boolean(restCalib?.capturing) && restProgress < 1
   const restLabel = capturingRest
-    ? `Calibrating ${Math.round(restProgress * 100)}%`
-    : 'Calibrate'
+    ? t('track.calibrating', { pct: Math.round(restProgress * 100) })
+    : t('track.calibrate')
   const canCalibrate = tracking || labLive
   const trackSource = labSourceOf(props.lab)
   const trackCameras: CameraInfo[] =
@@ -217,9 +208,24 @@ export function ControlRail(props: Props) {
     ? (props.lab?.camera_index ?? s?.camera_index ?? 0)
     : (s?.camera_index ?? 0)
   const deviceLocked = tracking || (labLive && trackSource === 'camera')
+  // Each batch size is its own compiled graph; it only changes between streams.
+  const batchLocked = streaming || Boolean(s?.fast_warming)
+  const batchSetting = s?.batch ?? STREAM_DEFAULTS.batch
+  const inbetweenSetting = s?.inbetweens ?? STREAM_DEFAULTS.inbetweens
+  // This PC's own speeds per batch size (measured, or ≈ predicted).
+  const batchRates = BATCH_CHOICES.filter((n) => n > 0 && s?.batch_rates?.[String(n)]).map((n) => {
+    const rate = s!.batch_rates![String(n)]
+    return t(rate.measured ? 'perf.batchRate' : 'perf.batchRateGuess', {
+      n,
+      fps: rate.fps.toFixed(1),
+    })
+  })
+  const batchTitle = batchRates.length
+    ? `${t('perf.batchTitle')}\n${t('perf.batchRates', { list: batchRates.join(' · ') })}`
+    : t('perf.batchTitle')
   const ifm = props.lab?.ifm
   const destIp = ifm?.primary || ''
-  const ifmLine = ifmListenLine(ifm)
+  const ifmLine = ifmListenLine(t, ifm)
 
   function copyDest() {
     if (!destIp) return
@@ -274,13 +280,20 @@ export function ControlRail(props: Props) {
   const modelProgress =
     showProgress && (s?.progress_kind === 'model' || s?.progress_kind === 'download') ? (
       <ProgressMeter
-        label={
+        label={tr(
           s.progress_label ||
-          (s.progress_kind === 'download' ? 'Downloading model' : 'Loading model')
-        }
+            (s.progress_kind === 'download' ? 'Downloading model' : 'Loading model'),
+        )}
         value={progress}
       />
     ) : null
+
+  // Only a bar from this job may drive the Create window; boot or an earlier
+  // job can leave another kind behind. A model load inside Create is its own phase.
+  const progressKind = s?.progress_kind || ''
+  const characterBar = progressKind === 'character' || progressKind === 'reference'
+  const modelBar = progressKind === 'model' || progressKind === 'download' || progressKind === 'warmup'
+  const createOwnsBar = busy && (characterBar || modelBar)
 
   const listed = props.characters.find((c) => c.id === s?.character_id)
   const charName = listed?.name || (s?.character_id ? s.character_name : '') || ''
@@ -288,7 +301,7 @@ export function ControlRail(props: Props) {
   return (
     <aside className="rail">
       <div className="rail-board">
-        <div className="rail-panes" role="tablist" aria-label="Rail">
+        <div className="rail-panes" role="tablist" aria-label={t('rail.label')}>
           <button
             type="button"
             role="tab"
@@ -296,7 +309,7 @@ export function ControlRail(props: Props) {
             className={railPane === 'desk' ? 'on' : ''}
             onClick={() => setRailPane('desk')}
           >
-            Desk
+            {t('rail.desk')}
           </button>
           <button
             type="button"
@@ -305,7 +318,7 @@ export function ControlRail(props: Props) {
             className={railPane === 'settings' ? 'on' : ''}
             onClick={() => setRailPane('settings')}
           >
-            Settings
+            {t('rail.settings')}
           </button>
         </div>
 
@@ -322,12 +335,12 @@ export function ControlRail(props: Props) {
                   onClick={props.onBrowseCheckpoint}
                   disabled={busy || streaming}
                 >
-                  Browse model…
+                  {t('model.browse')}
                 </button>
               </div>
             ) : null}
             <label className="field">
-              <span>Model</span>
+              <span>{t('model.label')}</span>
               <select
                 value={
                   props.checkpoints.find(
@@ -340,16 +353,16 @@ export function ControlRail(props: Props) {
                 onFocus={() => props.onRefreshCheckpoints?.()}
                 disabled={busy || streaming || !props.checkpoints.length}
               >
-                {props.checkpoints.length === 0 && <option value="">No models</option>}
+                {props.checkpoints.length === 0 && <option value="">{t('model.none')}</option>}
                 {props.checkpoints.map((c) => (
                   <option key={c.path} value={c.path}>
-                    {c.source === 'local' ? `${c.label} (local)` : c.label}
+                    {c.source === 'local' ? t('model.local', { name: c.label }) : c.label}
                   </option>
                 ))}
               </select>
             </label>
             {pendingModel && !streaming ? (
-              <p className="hint">Not loaded yet — press Start stream to load it.</p>
+              <p className="hint">{t('model.notLoaded')}</p>
             ) : null}
             {(props.catalogOffers ?? []).length ? (
               <ul className="model-offers">
@@ -360,13 +373,9 @@ export function ControlRail(props: Props) {
                       className={`model-offer${offer.is_new ? ' is-new' : ''}`}
                       disabled={busy || streaming}
                       onClick={() => props.onDownloadModel?.(offer.name)}
-                      title={
-                        offer.is_new
-                          ? 'New on the hub (under 30 days). Download into models/dit.'
-                          : 'On the hub and not on disk yet.'
-                      }
+                      title={offer.is_new ? t('model.offerNew') : t('model.offerAvailable')}
                     >
-                      <span className="model-offer-badge">{offer.badge}</span>
+                      <span className="model-offer-badge">{tr(offer.badge)}</span>
                       <span className="model-offer-name">{offer.label}</span>
                     </button>
                   </li>
@@ -376,11 +385,11 @@ export function ControlRail(props: Props) {
             {DEVELOPER ? (
               <>
                 <label className="field">
-                  <span>Image path</span>
+                  <span>{t('ref.imagePath')}</span>
                   <input
                     value={props.refPath}
                     onChange={(e) => props.onRefPath(e.target.value)}
-                    placeholder="Path to reference still"
+                    placeholder={t('ref.placeholder')}
                     disabled={busy || streaming}
                   />
                 </label>
@@ -389,7 +398,7 @@ export function ControlRail(props: Props) {
                     className={`btn ghost file-btn${busy || streaming ? ' disabled' : ''}`}
                     aria-disabled={busy || streaming}
                   >
-                    Browse…
+                    {t('ref.browse')}
                     <input
                       type="file"
                       accept="image/*"
@@ -408,7 +417,7 @@ export function ControlRail(props: Props) {
                     onClick={props.onApplyRef}
                     disabled={busy || streaming || !props.refPath.trim()}
                   >
-                    Apply ref
+                    {t('ref.apply')}
                   </button>
                 </div>
               </>
@@ -422,10 +431,10 @@ export function ControlRail(props: Props) {
               headerExtra={
                 <Toggle
                   className="track-mirror"
-                  label="Mirror"
+                  label={t('track.mirror')}
                   checked={Boolean(s?.mirror)}
                   onChange={(v) => props.onSettings({ mirror: v })}
-                  title="Mirror look and head turn"
+                  title={t('track.mirrorTitle')}
                 />
               }
               actions={
@@ -437,7 +446,7 @@ export function ControlRail(props: Props) {
                       onClick={props.onToggleTracking}
                       disabled={Boolean(s?.track_busy)}
                     >
-                      {tracking ? 'Stop tracking' : 'Start tracking'}
+                      {tracking ? t('track.stop') : t('track.start')}
                     </button>
                     <button
                       type="button"
@@ -450,25 +459,25 @@ export function ControlRail(props: Props) {
                       disabled={
                         Boolean(s?.track_busy) || capturingRest || !canCalibrate
                       }
-                      title="Capture rest for tracking"
+                      title={t('track.calibrateTitle')}
                     >
                       {restLabel}
                     </button>
                   </div>
-                  {restCalib?.hint ? <p className="hint">{restCalib.hint}</p> : null}
+                  {restCalib?.hint ? <p className="hint">{tr(restCalib.hint)}</p> : null}
                   {DEVELOPER && s?.body_label ? <p className="hint">{s.body_label}</p> : null}
                 </>
               }
             >
               <div className="track-cam-row">
-                <div className="lab-tabs" role="tablist" aria-label="Tracking input">
+                <div className="lab-tabs" role="tablist" aria-label={t('track.input')}>
                   <button
                     type="button"
                     className={trackSource === 'camera' ? 'on' : ''}
                     aria-pressed={trackSource === 'camera'}
                     onClick={() => props.onLabSource('camera')}
                   >
-                    Camera
+                    {t('track.camera')}
                   </button>
                   <button
                     type="button"
@@ -483,7 +492,7 @@ export function ControlRail(props: Props) {
                   labError ? (
                     <p className="status-error">{labError}</p>
                   ) : !labOnline && trackSource === 'ifm' ? (
-                    <p className="hint">Start Track Lab to listen for iFacialMocap.</p>
+                    <p className="hint">{t('track.startLab')}</p>
                   ) : null
                 ) : null}
                 {trackSource === 'ifm' ? (
@@ -492,17 +501,17 @@ export function ControlRail(props: Props) {
                       <button
                         type="button"
                         className="ifm-dest"
-                        title="Copy this PC’s address for iFacialMocap"
+                        title={t('track.copyTitle')}
                         onClick={copyDest}
                       >
-                        <span>{copiedDest ? 'Copied' : 'This PC'}</span>
+                        <span>{copiedDest ? t('track.copied') : t('track.thisPc')}</span>
                         <em className="mono">{destIp}</em>
                       </button>
                     ) : (
-                      <p className="hint">Same Wi-Fi as the iPhone.</p>
+                      <p className="hint">{t('track.sameWifi')}</p>
                     )}
                     <label className="field inline">
-                      <span>Port</span>
+                      <span>{t('track.port')}</span>
                       <input
                         className="mono"
                         value={ifmPort}
@@ -526,7 +535,7 @@ export function ControlRail(props: Props) {
                   <label className="field track-cam-field">
                     <select
                       className="camera-select"
-                      aria-label="Camera"
+                      aria-label={t('track.camera')}
                       value={trackCameraIndex}
                       onChange={(e) => props.onCamera(Number(e.target.value))}
                       onFocus={() => {
@@ -536,7 +545,7 @@ export function ControlRail(props: Props) {
                       }}
                       disabled={deviceLocked}
                     >
-                      {trackCameras.length === 0 && <option value={0}>Camera 0</option>}
+                      {trackCameras.length === 0 && <option value={0}>{t('track.cameraN', { n: 0 })}</option>}
                       {trackCameras.map((cam) => (
                         <option key={cam.index} value={cam.index}>
                           {cam.name}
@@ -550,16 +559,16 @@ export function ControlRail(props: Props) {
           </section>
         </div>
 
-          <section className="char-stage" aria-label="Toon">
+          <section className="char-stage" aria-label={t('toon.title')}>
             <div className="char-stage-bar">
-              <h2 className="group-title">Toon</h2>
+              <h2 className="group-title">{t('toon.title')}</h2>
               <span className="char-stage-name">{charName}</span>
             </div>
             {showProgress &&
             !props.charactersCreating &&
             (s?.progress_kind === 'character' || s?.progress_kind === 'reference') ? (
               <ProgressMeter
-                label={s.progress_label || 'Loading character'}
+                label={tr(s.progress_label || 'Loading character')}
                 value={progress}
               />
             ) : null}
@@ -569,18 +578,17 @@ export function ControlRail(props: Props) {
               creating={props.charactersCreating}
               createProgress={
                 props.charactersCreating
-                  ? Math.max(progress, 0.04)
-                  : s?.progress_kind === 'character' || s?.progress_kind === 'reference'
+                  ? Math.max(createOwnsBar ? progress : 0, 0.04)
+                  : characterBar
                     ? progress
                     : 0
               }
               createLabel={
-                props.charactersCreating
+                (props.charactersCreating ? createOwnsBar : characterBar)
                   ? s?.progress_label || 'Creating character…'
-                  : s?.progress_kind === 'character' || s?.progress_kind === 'reference'
-                    ? s.progress_label || 'Creating character…'
-                    : 'Creating character…'
+                  : 'Creating character…'
               }
+              createPhase={modelBar ? 'model' : 'character'}
               createStillUrl={props.createStillUrl}
               busy={busy || streaming}
               error={props.error || s?.error || ''}
@@ -603,25 +611,25 @@ export function ControlRail(props: Props) {
 
           <section className="group stream-panel">
             <div className="group-head">
-              <h2 className="group-title">Stream</h2>
+              <h2 className="group-title">{t('stream.title')}</h2>
               <Lamp
                 on={streaming || virtualCam}
                 pending={paused}
-                label={
+                label={t(
                   paused
-                    ? 'Stream paused'
+                    ? 'stream.paused'
                     : streaming
-                      ? 'Streaming'
+                      ? 'stream.streaming'
                       : virtualCam
-                        ? 'Virtual camera on'
-                        : 'Stream idle'
-                }
+                        ? 'stream.vcamOn'
+                        : 'stream.idle',
+                )}
               />
             </div>
             {showProgress &&
             (s?.progress_kind === 'warmup' || s?.progress_kind === 'compile') ? (
               <ProgressMeter
-                label={s.progress_label || 'Preparing stream'}
+                label={tr(s.progress_label || 'Preparing stream')}
                 value={progress}
               />
             ) : null}
@@ -635,29 +643,29 @@ export function ControlRail(props: Props) {
                 disabled={(busy && !streaming) || Boolean(s?.fast_warming)}
                 title={
                   !streaming && pendingModel
-                    ? `Load ${pendingModel}, then start the stream`
+                    ? t('stream.loadThenStart', { model: pendingModel })
                     : undefined
                 }
               >
-                {streaming ? 'Stop stream' : pendingModel ? 'Load new model & start' : 'Start stream'}
+                {streaming ? t('stream.stop') : pendingModel ? t('stream.loadNew') : t('stream.start')}
               </button>
               <button
                 type="button"
                 className={paused ? 'btn primary' : 'btn'}
                 onClick={props.onTogglePause}
                 disabled={!streaming || Boolean(s?.fast_warming)}
-                title={paused ? 'Resume generating frames' : 'Hold the last picture'}
+                title={paused ? t('stream.resumeTitle') : t('stream.pauseTitle')}
               >
-                {paused ? 'Resume' : 'Pause'}
+                {paused ? t('stream.resume') : t('stream.pause')}
               </button>
               <button
                 type="button"
                 className={virtualCam ? 'btn is-on' : 'btn'}
                 onClick={props.onToggleVirtualCam}
                 disabled={busy && !virtualCam}
-                title="Send avatar frames to a virtual camera for OBS"
+                title={t('stream.camTitle')}
               >
-                {virtualCam ? 'Stop cam' : 'Start cam'}
+                {virtualCam ? t('stream.stopCam') : t('stream.startCam')}
               </button>
             </div>
             <div className="row">
@@ -667,33 +675,51 @@ export function ControlRail(props: Props) {
                 onClick={() => props.onGenerate()}
                 disabled={busy || streaming || Boolean(s?.fast_warming)}
               >
-                Generate once
+                {t('stream.generateOnce')}
               </button>
             </div>
             {s?.virtual_cam_error ? (
-              <p className="status-error">{s.virtual_cam_error}</p>
+              <p className="status-error">{tr(s.virtual_cam_error)}</p>
             ) : null}
           </section>
           </div>
         ) : (
           <div className="rail-controls">
+            <section className="group">
+              <h2 className="group-title">{t('lang.title')}</h2>
+              <div className="lab-tabs" role="radiogroup" aria-label={t('lang.title')}>
+                {LANGUAGES.map((row) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    role="radio"
+                    lang={row.id}
+                    aria-checked={lang === row.id}
+                    className={lang === row.id ? 'on brand' : 'brand'}
+                    onClick={() => {
+                      if (lang !== row.id) props.onLanguage(row.id)
+                    }}
+                  >
+                    {row.label}
+                  </button>
+                ))}
+              </div>
+            </section>
             <section className="group stream-tune">
               <div className="group-head">
-                <h2 className="group-title">Tune</h2>
+                <h2 className="group-title">{t('tune.title')}</h2>
                 <button
                   type="button"
                   className="btn ghost compact"
                   onClick={resetStreamDefaults}
-                  title="Steps 1, Pose follow 1.0, Reference lock 1.0, Snap 0.58, Hold last on"
+                  title={t('tune.defaultsTitle')}
                 >
-                  Defaults
+                  {t('common.defaults')}
                 </button>
               </div>
               <ul className="lab-sliders stream-sliders">
                 <li className="stream-steps">
-                  <span title="Denoise passes per frame. This model is meant for 1 or 2. Each pass sees the pose and the original still together.">
-                    Steps
-                  </span>
+                  <span title={t('tune.stepsTitle')}>{t('tune.steps')}</span>
                   <input
                     className="mono"
                     type="number"
@@ -708,93 +734,142 @@ export function ControlRail(props: Props) {
                       }
                     }}
                     disabled={streaming}
-                    aria-label="Steps"
+                    aria-label={t('tune.steps')}
                   />
                 </li>
-                {MODEL_SLIDERS.map((row) => (
+                {MODEL_SLIDERS.map((row) => {
+                  const title = t(row.title, { value: STREAM_DEFAULTS.frame_blend.toFixed(2) })
+                  return (
                   <li key={row.key}>
-                    <span title={row.title}>{row.label}</span>
+                    <span title={title}>{t(row.label)}</span>
                     <input
                       type="range"
                       min={row.min}
                       max={row.max}
                       step={0.05}
                       value={cfgDraft[row.key]}
-                      title={row.title}
+                      title={title}
                       onChange={(e) => commitCfg(row.key, Number(e.target.value))}
                     />
                     <em className="mono">{cfgDraft[row.key].toFixed(2)}</em>
                   </li>
-                ))}
+                  )
+                })}
               </ul>
               <div className="stream-compile">
                 <Toggle
-                  label="Hold last"
+                  label={t('tune.holdLast')}
                   checked={s?.hold_last !== false}
                   onChange={(v) => props.onSettings({ hold_last: v })}
-                  title={HOLD_LAST_TITLE}
+                  title={t('tune.holdLastTitle')}
                 />
               </div>
             </section>
             <section className="group stream-perf">
               <div className="group-head">
-                <h2 className="group-title">Performance</h2>
+                <h2 className="group-title">{t('perf.title')}</h2>
                 <button
                   type="button"
                   className="btn ghost compact"
                   onClick={resetPerfDefaults}
-                  title="Max FPS off, Interpolate on, Inbetweens 1"
+                  title={t('perf.defaultsTitle')}
                 >
-                  Defaults
+                  {t('common.defaults')}
                 </button>
               </div>
               <ul className="lab-sliders stream-sliders">
                 <li>
-                  <span title={MAX_FPS_TITLE}>Max FPS</span>
+                  <span title={t('perf.maxFpsTitle')}>{t('perf.maxFps')}</span>
                   <input
                     type="range"
                     min={0}
-                    max={60}
+                    max={20}
                     step={1}
                     value={s?.max_fps ?? STREAM_DEFAULTS.max_fps}
-                    title={MAX_FPS_TITLE}
+                    title={t('perf.maxFpsTitle')}
                     onChange={(e) => props.onSettings({ max_fps: Number(e.target.value) })}
                   />
                   <em className="mono">
                     {(s?.max_fps ?? STREAM_DEFAULTS.max_fps) > 0
                       ? s?.max_fps ?? STREAM_DEFAULTS.max_fps
-                      : 'Off'}
+                      : t('perf.auto', { n: Math.round((s?.gen_cap ?? 10) * 10) / 10 })}
                   </em>
                 </li>
-                <li>
-                  <span title={INBETWEENS_TITLE}>Inbetweens</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={3}
-                    step={1}
-                    value={s?.inbetweens ?? STREAM_DEFAULTS.inbetweens}
-                    title={INBETWEENS_TITLE}
-                    disabled={!interpolate}
-                    onChange={(e) =>
-                      props.onSettings({ inbetweens: Number(e.target.value) })
-                    }
-                  />
-                  <em className="mono">{s?.inbetweens ?? STREAM_DEFAULTS.inbetweens}</em>
+                <li className="stream-batch">
+                  <span title={t('perf.inbetweensTitle')}>{t('perf.inbetweens')}</span>
+                  <div
+                    className="lab-tabs"
+                    role="radiogroup"
+                    aria-label={t('perf.inbetweens')}
+                    title={t('perf.inbetweensTitle')}
+                  >
+                    {INBETWEEN_CHOICES.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        role="radio"
+                        aria-checked={inbetweenSetting === n}
+                        className={inbetweenSetting === n ? 'on' : ''}
+                        disabled={!interpolate}
+                        onClick={() => {
+                          if (inbetweenSetting !== n) props.onSettings({ inbetweens: n })
+                        }}
+                      >
+                        {n < 0 ? t('perf.inbetweensAuto') : n}
+                      </button>
+                    ))}
+                  </div>
+                  <em className="mono" title={t('perf.inbetweensTitle')}>
+                    {!interpolate
+                      ? 0
+                      : streaming && s?.inbetweens_live != null
+                        ? s.inbetweens_live
+                        : inbetweenSetting < 0
+                          ? '—'
+                          : inbetweenSetting}
+                  </em>
+                </li>
+                <li className="stream-batch">
+                  <span title={batchTitle}>{t('perf.batch')}</span>
+                  <div
+                    className="lab-tabs"
+                    role="radiogroup"
+                    aria-label={t('perf.batch')}
+                    title={batchLocked ? t('perf.batchLocked') : batchTitle}
+                  >
+                    {BATCH_CHOICES.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        role="radio"
+                        aria-checked={batchSetting === n}
+                        className={batchSetting === n ? 'on' : ''}
+                        disabled={batchLocked}
+                        onClick={() => {
+                          if (batchSetting !== n) props.onSettings({ batch: n })
+                        }}
+                      >
+                        {n === 0 ? t('perf.batchAuto') : n}
+                      </button>
+                    ))}
+                  </div>
+                  <em className="mono" title={batchTitle}>
+                    ×{s?.batch_size ?? 1}
+                  </em>
                 </li>
               </ul>
               <div className="stream-compile">
                 <Toggle
-                  label="Interpolate"
+                  label={t('perf.interpolate')}
                   checked={interpolate}
                   onChange={(v) => props.onSettings({ interpolate: v })}
-                  title={INTERPOLATE_TITLE}
+                  title={t('perf.interpolateTitle')}
                 />
                 <Toggle
-                  label="Compile"
+                  label={t('perf.compile')}
                   checked={Boolean(s?.compile_model)}
                   onChange={(v) => props.onSettings({ compile_model: v })}
-                  title="Speed boost: builds a version of the model tuned for your GPU when the stream starts. The first build can take a minute; off runs at normal speed."
+                  title={t('perf.compileTitle')}
                   light={
                     !s?.compile_model
                       ? 'off'
@@ -807,22 +882,26 @@ export function ControlRail(props: Props) {
                             : 'off'
                   }
                   lightTitle={
-                    s?.compile_detail ||
-                    (s?.compile_on
-                      ? 'Speed boost on'
-                      : s?.fast_warming
-                        ? 'Building the speed boost'
-                        : s?.compile_status === 'fail'
-                          ? 'Speed boost unavailable — running at normal speed'
-                          : s?.compile_status === 'skip'
-                            ? 'Speed boost needs an NVIDIA GPU'
-                            : s?.compile_model
-                              ? 'Speed boost builds when the stream starts'
-                              : 'Speed boost off')
+                    s?.compile_detail
+                      ? tr(s.compile_detail)
+                      : s?.fast_warming && !s?.compile_on
+                        ? t('perf.boostBuilding')
+                        : tr(
+                            s?.compile_on
+                              ? 'Speed boost on'
+                              : s?.compile_status === 'fail'
+                                ? 'Speed boost unavailable — running at normal speed'
+                                : s?.compile_status === 'skip'
+                                  ? 'Speed boost needs an NVIDIA GPU'
+                                  : s?.compile_model
+                                    ? 'Speed boost builds when the stream starts'
+                                    : 'Speed boost off',
+                          )
                   }
                 />
               </div>
             </section>
+            <GpuPicker busy={busy} onRestart={props.onReloadBackend} />
             <section className="group">
               <TravelBox
                 value={s?.travel_box}
@@ -834,10 +913,10 @@ export function ControlRail(props: Props) {
             </section>
             <section className="group">
               <div className="group-head">
-                <h2 className="group-title">Overlay</h2>
+                <h2 className="group-title">{t('overlay.title')}</h2>
                 <Toggle
                   className="overlay-master"
-                  label="Show"
+                  label={t('common.show')}
                   checked={overlayOn}
                   onChange={(v) =>
                     props.onSettings({
@@ -857,21 +936,10 @@ export function ControlRail(props: Props) {
               {overlayOn ? (
                 <div className="overlay-controls">
                   <div className="overlay-parts">
-                    {(
-                      [
-                        ['show_outline', 'Outline'],
-                        ['show_brows', 'Brows'],
-                        ['show_eyes', 'Eyes'],
-                        ['show_nose', 'Nose'],
-                        ['show_mouth', 'Mouth'],
-                        ['show_iris_overlay', 'Iris'],
-                        ['show_skeleton', 'Skeleton'],
-                        ['show_hair', 'Hair'],
-                      ] as const
-                    ).map(([key, label]) => (
+                    {OVERLAY_PARTS.map(([key, label]) => (
                       <Toggle
                         key={key}
-                        label={label}
+                        label={t(label)}
                         checked={overlayParts[key]}
                         onChange={(v) => props.onSettings({ [key]: v })}
                       />
@@ -881,25 +949,25 @@ export function ControlRail(props: Props) {
               ) : null}
             </section>
             <section className="group">
-              <h2 className="group-title">App</h2>
+              <h2 className="group-title">{t('app.title')}</h2>
               <div className="row">
                 <button
                   type="button"
                   className="btn"
                   onClick={props.onReloadBackend}
-                  title="Restart Python so code changes load. A small hold window stays up until the desk comes back. Track Lab stays running."
+                  title={t('app.reloadTitle')}
                 >
-                  Reload backend
+                  {t('app.reload')}
                 </button>
               </div>
             </section>
             {DEVELOPER ? (
               <section className="group">
                 <div className="group-head">
-                  <h2 className="group-title">Developer</h2>
+                  <h2 className="group-title">{t('dev.title')}</h2>
                 </div>
                 <label className="field inline">
-                  <span>Track FPS</span>
+                  <span>{t('dev.trackFps')}</span>
                   <input
                     className="mono"
                     type="number"
@@ -913,36 +981,30 @@ export function ControlRail(props: Props) {
                 </label>
                 <div className="toggles">
                   <Toggle
-                    label="Fast"
+                    label={t('dev.fast')}
                     checked={Boolean(s?.fast_mode)}
                     onChange={(v) => props.onSettings({ fast_mode: v })}
                     disabled={streaming || Boolean(s?.fast_warming)}
                     light={!s?.fast_mode ? 'off' : s?.fast_warming ? 'pending' : 'on'}
-                    lightTitle={s?.fast_mode ? 'Fast path on' : 'Fast off'}
+                    lightTitle={s?.fast_mode ? t('dev.fastOn') : t('dev.fastOff')}
                   />
                   <Toggle
-                    label="Batch ×2"
-                    checked={Boolean(s?.batch2)}
-                    onChange={(v) => props.onSettings({ batch2: v })}
-                    disabled={streaming || Boolean(s?.fast_warming)}
-                  />
-                  <Toggle
-                    label="Auto sync track"
+                    label={t('dev.autoSync')}
                     checked={Boolean(s?.auto_sync_track)}
                     onChange={(v) => props.onSettings({ auto_sync_track: v })}
                   />
                   <Toggle
-                    label="Iris"
+                    label={t('dev.iris')}
                     checked={Boolean(s?.use_iris)}
                     onChange={(v) => props.onSettings({ use_iris: v })}
                   />
                   <Toggle
-                    label="Body"
+                    label={t('dev.body')}
                     checked={Boolean(s?.use_body)}
                     onChange={(v) => props.onSettings({ use_body: v })}
                   />
                   <Toggle
-                    label="Drive pose"
+                    label={t('dev.drivePose')}
                     checked={Boolean(s?.drive_pose)}
                     onChange={(v) => props.onSettings({ drive_pose: v })}
                   />
@@ -954,7 +1016,7 @@ export function ControlRail(props: Props) {
       </div>
       {props.error || s?.error ? (
         <footer className="rail-status">
-          <p className="status-error">{props.error || s?.error}</p>
+          <p className="status-error">{props.error || tr(s?.error)}</p>
         </footer>
       ) : null}
     </aside>

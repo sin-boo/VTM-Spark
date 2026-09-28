@@ -1,4 +1,4 @@
-﻿# VTM Studio setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
+﻿# VTM Spark setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
 # run.exe runs the desk from source with that venv.
 # DiT weights download into models/dit on install.bat / first launch.
 param(
@@ -61,7 +61,7 @@ function Get-UvExe {
 $script:UvExe = Get-UvExe
 Write-Host "==> Using uv: $($script:UvExe)"
 
-Write-Host "==> VTM Studio setup (UI + .venv-build)"
+Write-Host "==> VTM Spark setup (UI + .venv-build)"
 
 # --- NVIDIA GPU / driver (warn only: cu128 wheels still install without one) ---
 function Test-NvidiaDriver {
@@ -75,13 +75,13 @@ if (Test-NvidiaDriver) {
 } else {
   Write-Host ""
   Write-Host "    WARNING: nvidia-smi not found - no NVIDIA GPU driver detected."
-  Write-Host "    WARNING: VTM Studio needs an NVIDIA GPU + current NVIDIA driver to run CUDA torch."
+  Write-Host "    WARNING: VTM Spark needs an NVIDIA GPU + current NVIDIA driver to run CUDA torch."
   Write-Host "    WARNING: Setup will continue (CUDA torch wheels still install), but the desk will not"
   Write-Host "    WARNING: run until you install a driver from https://www.nvidia.com/Download/index.aspx"
   Write-Host ""
 }
 
-Write-Host "==> Killing leftover VTM Studio / backend processes"
+Write-Host "==> Killing leftover VTM Spark / backend processes"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "kill-orphans.ps1")
 
 # --- Vendor: use committed vendor/ by default (opt-in -SyncVendor for monorepo) ----
@@ -355,9 +355,16 @@ function Install-CudaTorch {
   Write-Host "==> Ensuring CUDA torch (cu128)"
   Write-LongStepHint "CUDA wheels are large (often 2+ GB). Downloads can take several minutes."
   Write-LongStepHint "uv shows download progress below."
-  $null = Invoke-Pip -PipArgs @("uninstall", "-y", "torch", "torchvision", "torchaudio") `
-    -Activity "uninstalling previous torch" `
-    -HeartbeatSeconds 8
+  # Remove an old (e.g. CPU-only) torch first, but only what is really there:
+  # on a fresh venv uv would just warn "Skipping torch as it is not installed".
+  $sitePackages = Join-Path $VenvDir "Lib\site-packages"
+  $oldTorch = @("torch", "torchvision", "torchaudio") |
+    Where-Object { Test-Path -LiteralPath (Join-Path $sitePackages $_) }
+  if ($oldTorch.Count -gt 0) {
+    $null = Invoke-Pip -PipArgs (@("uninstall") + $oldTorch) `
+      -Activity "removing the previous torch ($($oldTorch -join ', '))" `
+      -HeartbeatSeconds 8
+  }
   # Avoid -q so failures and download progress stay visible. Index-only from pytorch cu128.
   $code = Invoke-Pip -PipArgs @(
     "install", "torch", "torchvision",

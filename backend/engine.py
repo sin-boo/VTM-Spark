@@ -60,20 +60,26 @@ STREAM_COMPILE_WARMUP_RUNS = 2
 # Fast decode: Hybrid TinyVAE (same SD latents). SD-VAE stays for ref encode.
 STREAM_FAST_TINY_VAE = True
 STREAM_FIXED_SEED = 42
-# Stream can denoise 1 or 2 poses per DiT call (better GPU occupancy).
-STREAM_BATCH_MAX = 2
+# Poses denoised per DiT call (better GPU occupancy, more keys/s, more lag).
+# Past 4 a 5060 Ti gains ~10% keys/s for 50% more VRAM, and the display
+# already tops out at 20 fps.
+STREAM_BATCH_MAX = 4
 # How strongly each new frame blends over the previous display (1 = no smooth).
 # Lower = less Batch×2 flicker / sample pop, more leftover hair after a turn.
 STREAM_TEMPORAL_EMA = 0.58
-# Extra pictures drawn between two DiT frames (0 = keys only).
-STREAM_INBETWEENS = 1
+# Extra pictures drawn between two DiT frames (0 = keys only, -1 = Auto:
+# as many as fit the display at this PC's key rate, up to the max).
+STREAM_INBETWEENS_AUTO = -1
+STREAM_INBETWEENS = STREAM_INBETWEENS_AUTO
 STREAM_MAX_INBETWEENS = 3
 # Master switch for print / inbetween. Slider still picks the count.
 STREAM_INTERPOLATE = True
-# Cap on generated keys per second (0 = as fast as the GPU goes). Idle time
-# between keys is real idle time, so a cap leaves GPU for other apps.
+# Cap on generated keys per second (0 = Auto). Idle time between keys is real
+# idle time, so a cap leaves GPU for other apps.
 STREAM_MAX_GEN_FPS = 0
-STREAM_MAX_GEN_FPS_LIMIT = 60
+# = frame_interp.SHOW_FPS_MAX. The preview / virtual cam show at most this many
+# pictures a second, so any key past it is drawn and then thrown away.
+STREAM_MAX_GEN_FPS_LIMIT = 20
 STREAM_MIN_BLEND = 0.05
 STREAM_MAX_BLEND = 1.0
 # Start the next DiT sample from the last generated latent (img2img hold).
@@ -116,7 +122,7 @@ def _clip_inbetweens(value: object) -> int:
     except (TypeError, ValueError):
         return STREAM_INBETWEENS
     if raw < 0:
-        return 0
+        return STREAM_INBETWEENS_AUTO
     if raw > STREAM_MAX_INBETWEENS:
         return STREAM_MAX_INBETWEENS
     return raw
@@ -126,6 +132,15 @@ def interpolate_on(value: object) -> bool:
     if value is None:
         return STREAM_INTERPOLATE
     return bool(value)
+
+
+def _clip_batch(value: object) -> int:
+    """Batch setting: 0 = Auto, else 1..STREAM_BATCH_MAX poses per DiT call."""
+    try:
+        raw = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(raw, STREAM_BATCH_MAX))
 
 
 def _clip_max_fps(value: object) -> int:
@@ -144,18 +159,47 @@ def gen_hold_s(max_fps: object, last_start: float, now: float, *, batch: int = 1
 
     A batch×2 call yields two keys, so it is allowed twice the interval.
     """
-    cap = _clip_max_fps(max_fps)
-    if cap <= 0 or last_start <= 0.0:
+    try:
+        cap = min(float(max_fps), float(STREAM_MAX_GEN_FPS_LIMIT))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return 0.0
-    interval = float(max(1, int(batch))) / float(cap)
+    if cap <= 0.0 or last_start <= 0.0:
+        return 0.0
+    interval = float(max(1, int(batch))) / cap
     return max(0.0, interval - (float(now) - float(last_start)))
 
 
 def effective_inbetweens(enabled: object, count: object) -> int:
-    """How many mids to print. Off toggle always wins over the slider."""
+    """Most mids to print per key gap. Off toggle always wins over the slider.
+
+    Auto asks for the max; playout keeps only what fits the display at the
+    key rate this PC actually reaches (a slow card gets more, a fast one 1).
+    """
     if not interpolate_on(enabled):
         return 0
-    return _clip_inbetweens(count)
+    n = _clip_inbetweens(count)
+    return STREAM_MAX_INBETWEENS if n < 0 else n
+
+
+# Auto in-betweens: real keys up to this rate, mids fill the rest of the display.
+STREAM_AUTO_KEY_FPS = 10.0
+
+
+def auto_gen_fps(enabled: object, count: object) -> float:
+    """Keys per second that, with the in-betweens, just fill the display.
+
+    One in-between → 10 keys + 10 mids = 20 shown. Generating faster only
+    squeezes the mids out and burns GPU on keys nobody sees longer.
+    """
+    if interpolate_on(enabled) and _clip_inbetweens(count) < 0:
+        return STREAM_AUTO_KEY_FPS
+    return float(STREAM_MAX_GEN_FPS_LIMIT) / float(effective_inbetweens(enabled, count) + 1)
+
+
+def gen_cap(max_fps: object, enabled: object, count: object) -> float:
+    """The key rate the stream is held to: the user's cap, else Auto."""
+    cap = _clip_max_fps(max_fps)
+    return float(cap) if cap > 0 else auto_gen_fps(enabled, count)
 
 
 # Face travel in norm_crop. Below tight = full hold. Above loose = drop hold
@@ -190,6 +234,19 @@ def hold_ease(delta: float, *, tight: float = _HOLD_MOVE_TIGHT, loose: float = _
     span = max(float(loose) - float(tight), 1e-6)
     amount = (float(delta) - float(tight)) / span
     return float(min(max(1.0 - amount, 0.0), 1.0))
+
+
+# Snap (the display blend) only smooths a face that is holding still. Its job
+# is hiding sample flicker; on a real move every leftover percent of the last
+# picture is hair trailing behind the face for several keys.
+_SNAP_MOVE_TIGHT = 0.006
+_SNAP_MOVE_LOOSE = 0.025
+
+
+def snap_alpha(alpha: float, move: float) -> float:
+    """Share of the new key to show: ``alpha`` when still, 1 once the face moves."""
+    ease = hold_ease(move, tight=_SNAP_MOVE_TIGHT, loose=_SNAP_MOVE_LOOSE)
+    return 1.0 - (1.0 - float(alpha)) * ease
 
 
 def hold_plan(move: float, drift: float) -> tuple[float, float]:
@@ -1243,8 +1300,34 @@ class StreamEngine:
         self.image_size = IMAGE_SIZE
 
     def set_stream_batch_size(self, batch_size: int) -> None:
-        """1 = one pose/denoise; 2 = two poses in one DiT forward."""
+        """Poses per DiT forward (1..STREAM_BATCH_MAX)."""
         self.stream_batch_size = max(1, min(int(batch_size), STREAM_BATCH_MAX))
+
+    def time_batch(self, batch_size: int, runs: int = 6) -> float:
+        """Median seconds per stream call at ``batch_size`` on this PC.
+
+        Same call the stream makes (pose prep, denoise, decode). Warm this size
+        first or the first run is a compile. Hold-last state is put back.
+        """
+        if self._ref_keypoints is None:
+            raise RuntimeError("Load a character before timing the model")
+        bsz = max(1, min(int(batch_size), STREAM_BATCH_MAX))
+        kps = np.asarray(self._ref_keypoints, dtype=np.float32)
+        if bsz > 1:
+            kps = np.stack([kps] * bsz, axis=0)
+        saved = (self.hold_last, self._last_gen_latent, self._last_hold_kps)
+        self.hold_last = False
+        times: list[float] = []
+        try:
+            for _ in range(max(1, int(runs)) + 1):
+                t0 = time.perf_counter()
+                self.generate_batch_from_keypoints(kps, sanitize="constrained")
+                times.append(time.perf_counter() - t0)
+        finally:
+            self.hold_last, self._last_gen_latent, self._last_hold_kps = saved
+        # The first run pays leftover lazy setup; the median ignores stalls.
+        timed = sorted(times[1:])
+        return timed[len(timed) // 2]
 
     def set_hold_last(self, enabled: bool) -> None:
         self.hold_last = bool(enabled)
@@ -1536,7 +1619,7 @@ class StreamEngine:
         if not bool(cfg.get("use_keypoint_conditioning", False)):
             raise RuntimeError(
                 f"{self.checkpoint.name} is not keypoint-conditioned; "
-                "VTM Studio requires use_keypoint_conditioning=True"
+                "VTM Spark requires use_keypoint_conditioning=True"
             )
         from .model_layout import keypoint_layout_from_config
 

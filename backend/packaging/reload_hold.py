@@ -35,7 +35,7 @@ class HoldConfig:
 
 
 def parse_args(argv: list[str] | None = None) -> HoldConfig:
-    parser = argparse.ArgumentParser(description="VTM Studio reload hold window")
+    parser = argparse.ArgumentParser(description="VTM Spark reload hold window")
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -161,7 +161,7 @@ def _show_window(cfg: HoldConfig) -> int:
         return run_reload(cfg)
 
     root = tk.Tk()
-    root.title("VTM Studio")
+    root.title("VTM Spark")
     root.configure(bg="#2b2b2b")
     root.resizable(False, False)
     try:

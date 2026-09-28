@@ -1,6 +1,6 @@
 # Third-party model notices
 
-Apache License 2.0 in [LICENSE](LICENSE) covers **VTM Studio source code** and **our original training work** (the DiT checkpoint and the tracker fine-tunes we trained). It does **not** re-license anyone else’s weights.
+Apache License 2.0 in [LICENSE](LICENSE) covers **VTM Spark source code** and **our original training work** (the DiT checkpoint and the tracker fine-tunes we trained). It does **not** re-license anyone else’s weights.
 
 A third-party model you add later keeps the license of the person or org that published it. Apache here does not attach to that file.
 

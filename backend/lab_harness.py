@@ -1,4 +1,4 @@
-"""HTTP client from VTM Studio to the Track Lab harness."""
+"""HTTP client from VTM Spark to the Track Lab harness."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ SLOW_OPS: dict[str, float] = {
     "start": 180.0,
     "stop": 30.0,
     "track": 180.0,
+    # Packaged mesh; only detects hair when the pack has none yet.
+    "set_rest": 180.0,
     "set_source": 60.0,
     "reset": 30.0,
 }

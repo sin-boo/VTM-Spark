@@ -76,7 +76,7 @@ def test_pump_resends_reference_still() -> None:
         width = 32
         height = 32
         fps = 30
-        device = "VTM Studio Cam"
+        device = "VTM Spark"
         backend = "unitycapture"
 
         def send(self, frame: np.ndarray) -> None:
@@ -107,7 +107,7 @@ def test_pump_resends_reference_still() -> None:
 def _vcam_ready_to_install(monkeypatch, tmp_path):
     from backend import vcam_device
 
-    for name in ("UnityCaptureFilter64.dll", "UnityCaptureFilter32.dll", "Install-VTMStudioCam.bat"):
+    for name in ("UnityCaptureFilter64.dll", "UnityCaptureFilter32.dll", "Install-VTMSparkCam.bat"):
         (tmp_path / name).write_bytes(b"")
     monkeypatch.setattr(vcam_device, "vcam_bundle_dir", lambda: tmp_path)
     monkeypatch.setattr(vcam_device, "device_available", lambda: False)
@@ -142,3 +142,48 @@ def test_camera_notice_comes_before_the_admin_prompt(monkeypatch, tmp_path) -> N
     assert order == ["notice", "uac"]
     notice = vcam_device.ADMIN_NOTICE
     assert "administrator" in notice and "virtual camera" in notice and "webcam" in notice
+
+
+def test_camera_is_named_vtm_spark() -> None:
+    from backend import vcam_device
+
+    assert vcam_device.DEVICE_NAME == "VTM Spark"
+    bat = vcam_device.install_script()
+    assert bat.name == "Install-VTMSparkCam.bat"
+    assert "UnityCaptureName=VTM Spark" in bat.read_text(encoding="utf-8")
+
+
+def test_stale_registration_is_not_ready(monkeypatch, tmp_path) -> None:
+    from backend import vcam_device
+
+    live = tmp_path / "UnityCaptureFilter64.dll"
+    live.write_bytes(b"")
+    gone = tmp_path / "moved" / "UnityCaptureFilter32.dll"
+    monkeypatch.setattr(vcam_device.sys, "platform", "win32")
+    monkeypatch.setattr(vcam_device, "device_available", lambda: True)
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [live, gone])
+    assert vcam_device.registration_ok() is False
+    assert vcam_device.device_ready() is False
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [live, None])
+    assert vcam_device.registration_ok() is False
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [])
+    assert vcam_device.registration_ok() is False
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [live])
+    assert vcam_device.device_ready() is True
+
+
+def test_stale_registration_reinstalls_even_when_the_device_opens(monkeypatch, tmp_path) -> None:
+    vcam_device, ran = _vcam_ready_to_install(monkeypatch, tmp_path)
+    monkeypatch.setattr(vcam_device, "device_available", lambda: True)
+    monkeypatch.setattr(vcam_device, "registration_ok", lambda: False)
+    monkeypatch.setattr(vcam_device, "confirm_admin_prompt", lambda: True)
+    monkeypatch.setattr(
+        vcam_device.subprocess, "run",
+        lambda *a, **k: ran.append(a) or type("P", (), {"stderr": "", "stdout": "", "returncode": 1})(),
+    )
+    monkeypatch.setattr(vcam_device.time, "sleep", lambda _s: None)
+    try:
+        vcam_device.ensure_installed(allow_prompt=True)
+    except RuntimeError:
+        pass
+    assert len(ran) == 1

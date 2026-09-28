@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from backend.character_fit import (
+    POINT_SLOTS,
     SKELETON_LABELS,
     build_fit_view,
     read_character_fit,
@@ -55,6 +56,21 @@ def test_build_fit_view_puts_skeleton_and_body_in_pixels() -> None:
     assert body[1] < body[3]
     assert 0.0 <= body[0] <= width
     assert 0.0 <= body[3] <= height
+
+
+def test_build_fit_view_lists_face_iris_and_body_points() -> None:
+    kps = neutral_keypoints().copy()
+    kps[30, 3] = 0.0
+    view = build_fit_view(width=200, height=160, keypoints=kps, hair_norm=[], box=default_travel_box())
+    by_id = {row["id"]: row for row in view["points"]}
+    assert set(by_id) == set(POINT_SLOTS)
+    assert by_id[13]["group"] == "face" and by_id[13]["label"] == "EYE.L.OUT"
+    assert by_id[28]["group"] == "iris"
+    assert by_id[31]["group"] == "body" and by_id[31]["label"] == SKELETON_LABELS[31]
+    hidden = kps.copy()
+    hidden[13, 3] = 0.0
+    view = build_fit_view(width=200, height=160, keypoints=hidden, hair_norm=[], box=default_travel_box())
+    assert 13 not in {row["id"] for row in view["points"]}
 
 
 def test_update_character_fit_roundtrip(tmp_path: Path) -> None:

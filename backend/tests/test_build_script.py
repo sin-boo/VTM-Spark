@@ -96,7 +96,7 @@ def test_node_tools_script_parses() -> None:
 def test_missing_nvidia_driver_only_warns() -> None:
     text = _text()
     assert "nvidia-smi" in text
-    assert "WARNING: VTM Studio needs an NVIDIA GPU" in text
+    assert "WARNING: VTM Spark needs an NVIDIA GPU" in text
     nvidia = text.index("Test-NvidiaDriver")
     ui = text.index('Write-Host "==> Building UI (Vite)"')
     assert nvidia < ui

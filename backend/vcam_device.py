@@ -1,4 +1,4 @@
-"""Install / locate the bundled 'VTM Studio Cam' DirectShow virtual camera."""
+"""Install / locate the bundled 'VTM Spark' DirectShow virtual camera."""
 
 from __future__ import annotations
 
@@ -9,13 +9,15 @@ from pathlib import Path
 
 from .paths import package_root
 
-DEVICE_NAME = "VTM Studio Cam"
+DEVICE_NAME = "VTM Spark"
+# DirectShow "Video Input Device" category: where Windows lists webcams.
+_VIDEO_INPUT = r"SOFTWARE\Classes\CLSID\{860BB310-5D01-11d0-BD3B-00A0C911CE86}\Instance"
 
 # Shown before the UAC prompt so it is clear what the admin rights are for.
 ADMIN_NOTICE = (
-    f"{DEVICE_NAME} needs a one-time setup.\n\n"
+    f"The {DEVICE_NAME} camera needs a one-time setup.\n\n"
     "Windows will now ask for administrator permission. This is only for the "
-    "virtual camera: it lets OBS, Discord, Zoom and other apps use VTM Studio "
+    "virtual camera: it lets OBS, Discord, Zoom and other apps use VTM Spark "
     "as a webcam, and Windows only allows adding a camera as admin.\n\n"
     'The prompt may say "Windows Command Processor" - that is this step. '
     "Click Yes.\n\n"
@@ -24,7 +26,7 @@ ADMIN_NOTICE = (
 
 
 def vcam_bundle_dir() -> Path:
-    return package_root() / "vendor" / "tools" / "vtm_studio_cam"
+    return package_root() / "vendor" / "tools" / "vtm_spark_cam"
 
 
 def filter_dlls() -> list[Path]:
@@ -36,7 +38,7 @@ def filter_dlls() -> list[Path]:
 
 
 def install_script() -> Path:
-    return vcam_bundle_dir() / "Install-VTMStudioCam.bat"
+    return vcam_bundle_dir() / "Install-VTMSparkCam.bat"
 
 
 def device_available() -> bool:
@@ -63,6 +65,68 @@ def device_available() -> bool:
         return False
 
 
+def registered_filters() -> list[Path | None]:
+    """Filter DLLs Windows loads for our camera, 64- and 32-bit.
+
+    None marks a registration with no DLL path. Empty = not registered.
+    """
+    if not sys.platform.startswith("win"):
+        return []
+    import winreg
+
+    out: list[Path | None] = []
+    for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+        access = winreg.KEY_READ | view
+        try:
+            devices = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _VIDEO_INPUT, 0, access)
+        except OSError:
+            continue
+        with devices:
+            index = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(devices, index)
+                except OSError:
+                    break
+                index += 1
+                try:
+                    with winreg.OpenKey(devices, sub) as key:
+                        name = winreg.QueryValueEx(key, "FriendlyName")[0]
+                        clsid = winreg.QueryValueEx(key, "CLSID")[0]
+                except OSError:
+                    continue
+                if name != DEVICE_NAME:
+                    continue
+                server = rf"SOFTWARE\Classes\CLSID\{clsid}\InprocServer32"
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, server, 0, access) as key:
+                        dll = str(winreg.QueryValueEx(key, "")[0] or "")
+                except OSError:
+                    dll = ""
+                out.append(Path(dll) if dll else None)
+    return out
+
+
+def registration_ok() -> bool:
+    """True when every registration of our camera points at a DLL that exists.
+
+    A camera registered from a copy of the app that was moved or deleted still
+    opens for sending, but OBS / Discord cannot load it and show nothing.
+    """
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        dlls = registered_filters()
+    except Exception:
+        return True
+    return bool(dlls) and all(dll is not None and dll.is_file() for dll in dlls)
+
+
+def device_ready() -> bool:
+    """Registered from files that exist, and open for sending."""
+    return registration_ok() and device_available()
+
+
 def confirm_admin_prompt() -> bool:
     """Explain the coming UAC prompt in a dialog. False = the user cancelled."""
     if not sys.platform.startswith("win"):
@@ -76,19 +140,19 @@ def confirm_admin_prompt() -> bool:
         MB_TOPMOST = 0x40000
         IDOK = 1
         flags = MB_OKCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST
-        return ctypes.windll.user32.MessageBoxW(None, ADMIN_NOTICE, "VTM Studio", flags) == IDOK
+        return ctypes.windll.user32.MessageBoxW(None, ADMIN_NOTICE, "VTM Spark", flags) == IDOK
     except Exception:
         return True
 
 
 def ensure_installed(*, allow_prompt: bool = True) -> None:
-    """Register VTM Studio Cam if missing. May show a UAC prompt once."""
-    if device_available():
+    """Register VTM Spark if missing or stale. May show a UAC prompt once."""
+    if device_ready():
         return
     missing = [p for p in filter_dlls() if not p.is_file()]
     if missing:
         raise RuntimeError(
-            "VTM Studio Cam filters missing — re-run install.bat "
+            f"{DEVICE_NAME} camera filters missing — re-run install.bat "
             f"(expected under {vcam_bundle_dir()})"
         )
     script = install_script()
@@ -128,7 +192,7 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
 
     # UAC-elevated child may return before regsvr32 finishes; poll briefly.
     for _ in range(20):
-        if device_available():
+        if device_ready():
             return
         time.sleep(0.35)
 

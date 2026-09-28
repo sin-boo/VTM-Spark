@@ -9,7 +9,8 @@ import sys
 import threading
 import time
 import traceback
-from contextlib import contextmanager
+from collections import deque
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -36,6 +37,7 @@ from .engine import (
     STREAM_DEFAULT_POSE_CFG,
     STREAM_DEFAULT_STEPS,
     STREAM_HOLD_LAST,
+    STREAM_BATCH_MAX,
     STREAM_INBETWEENS,
     STREAM_INTERPOLATE,
     STREAM_MAX_GEN_FPS,
@@ -50,22 +52,26 @@ from .engine import (
     list_stream_checkpoints,
     remember_checkpoint_location,
     neutral_keypoints,
+    _clip_batch,
     _clip_blend,
     _clip_cfg,
     _clip_inbetweens,
     _clip_max_fps,
     effective_inbetweens,
+    face_pose_delta,
+    gen_cap,
     gen_hold_s,
     interpolate_on,
+    snap_alpha,
 )
 from .load_timing import StageClock, StageMeter
 from .frame_interp import (
     PLAYOUT_QUEUE_MAX,
     SHOW_FPS_MAX,
-    inbetween_frames,
+    inbetween_maker,
     inbetween_pacing,
+    inbetween_ts,
     playout_gap,
-    print_inbetween_count,
     lerp_stream_hair,
     lerp_stream_pose,
 )
@@ -144,31 +150,47 @@ def pack_stream_batch(
     prev_hair: np.ndarray | None,
     batch_n: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Poses for one DiT call.
+    """Poses for one DiT call: ``batch_n`` even steps from the last call's pose to now.
 
     Batch×2 used to stack [prev, current], which re-drew the pose already on
-    screen and popped. Mid + now continues the motion with two unseen poses.
+    screen and popped. Even steps (1/2, now; 1/3, 2/3, now; …) continue the
+    motion with unseen poses only.
 
-    The first call of a stream has no previous pose; it still sends two (now,
-    now). torch.compile and the decoder were warmed at this batch size, and a
-    lone batch-1 call first recompiled both — ~14 s with no frame on screen.
+    The first call of a stream has no previous pose; it still sends ``batch_n``
+    copies of now. torch.compile and the decoder were warmed at this batch
+    size, and a lone batch-1 call first recompiled both — ~14 s with no frame.
     """
     now = np.asarray(current, dtype=np.float32)
     hair = np.asarray(current_hair, dtype=np.float32)
-    if int(batch_n) <= 1:
+    n = int(batch_n)
+    if n <= 1:
         return now, hair
     if prev is None:
-        return np.stack([now, now], axis=0), np.stack([hair, hair], axis=0)
-    mid = lerp_stream_pose(prev, now, 0.5)
-    mid_hair = lerp_stream_hair(prev_hair, hair, 0.5)
-    return np.stack([mid, now], axis=0), np.stack([mid_hair, hair], axis=0)
+        return np.stack([now] * n, axis=0), np.stack([hair] * n, axis=0)
+    poses = [lerp_stream_pose(prev, now, (i + 1) / n) for i in range(n - 1)] + [now]
+    hairs = [lerp_stream_hair(prev_hair, hair, (i + 1) / n) for i in range(n - 1)] + [hair]
+    return np.stack(poses, axis=0), np.stack(hairs, axis=0)
 
 Listener = Callable[[dict[str, Any]], None]
 
 # Start stream's one bar: moving weights back to the GPU, then warmup, then
 # "Starting stream…" until the first picture.
 GPU_MOVE_SHARE = 0.10
+# FPS readout window: pictures shown in the last second.
+SHOWN_FPS_WINDOW_S = 1.0
+# A gap between DiT calls longer than this is a stall or pause, not the rate.
+KEY_INTERVAL_MAX_S = 3.0
 WARMUP_SHARE_END = 0.95
+
+# Track Lab skeleton joints (keypoint slot -> name), as skeleton.py writes them.
+_LAB_SKELETON_NAMES = {
+    31: "neck",
+    32: "right_shoulder",
+    33: "right_elbow",
+    34: "left_shoulder",
+    35: "left_elbow",
+    36: "chest",
+}
 
 
 def _process_rss_bytes() -> int:
@@ -352,7 +374,7 @@ class StreamRuntime:
             "use_body": True,
             "fast_mode": True,
             "compile_model": bool(getattr(self.engine, "compile_model", STREAM_COMPILE_MODEL)),
-            "batch2": False,
+            "batch": 0,
             "auto_sync_track": True,
             "gen_fps": 0.0,
             "show_fps": 0.0,
@@ -445,8 +467,13 @@ class StreamRuntime:
         self._last_lab_hair: list | None = None
         self._lab_rest_hair: list | None = None
         self._ema_frame: np.ndarray | None = None
+        self._ema_kps: np.ndarray | None = None
         self._fast_warmed: bool = False
-        self._batch2_auto_tried: bool = False
+        self._batch_picked: bool = False
+        # {batch: seconds per call} measured on this PC (hw_profile).
+        self._batch_rates: dict[int, float] = {}
+        # (batch, seconds) of live stream calls, folded into the profile on Stop.
+        self._live_calls: list[tuple[int, float]] = []
         self._gen_busy: bool = False
         self._offload_pending: bool = False
         # Start stream keeps its bar up until the first picture is on screen.
@@ -459,8 +486,9 @@ class StreamRuntime:
         self._display_busy = False
         self._playout_next = 0.0
         self._last_interp_s = 0.0
-        self._last_display_t = 0.0
-        self._last_key_t = 0.0
+        self._last_call_done_t = 0.0
+        self._key_interval = 0.0
+        self._shown_times: deque[float] = deque(maxlen=128)
         self._model_load_lock = threading.Lock()
         self._pending_checkpoint: Path | None = None
         self._worker_stop = threading.Event()
@@ -521,6 +549,7 @@ class StreamRuntime:
         )
         raw_cap = session.get("max_fps")
         self._status["max_fps"] = STREAM_MAX_GEN_FPS if raw_cap is None else _clip_max_fps(raw_cap)
+        self._status["batch"] = _clip_batch(session.get("batch"))
         self.engine.set_hold_last(hold_last)
         self.engine.num_steps = steps
         self.engine.set_guidance(pose_cfg=pose_cfg, id_cfg=id_cfg)
@@ -594,7 +623,34 @@ class StreamRuntime:
             self._status.update(self._compile_status_fields())
             snap = dict(self._status)
         snap["boot"] = self.boot_snapshot()
+        snap["gen_cap"] = gen_cap(
+            snap.get("max_fps"), snap.get("interpolate"), snap.get("inbetweens")
+        )
+        snap["gpu_util"] = self._gpu_util() if getattr(self, "_streaming", False) else None
+        snap["batch_rates"] = self._batch_rate_view()
         return snap
+
+    def _batch_rate_view(self) -> dict[str, dict[str, Any]]:
+        """Keys/s per batch size on this PC: measured, or predicted from them."""
+        from .hw_profile import keys_per_s
+
+        rates = dict(getattr(self, "_batch_rates", {}) or {})
+        out: dict[str, dict[str, Any]] = {}
+        for b in range(1, STREAM_BATCH_MAX + 1):
+            fps = keys_per_s(rates, b)
+            if fps:
+                out[str(b)] = {"fps": round(fps, 1), "measured": b in rates}
+        return out
+
+    def _gpu_util(self) -> int | None:
+        """Whole-card GPU busy % for the readout (only while streaming, so
+        status polls never wake CUDA just to name the card)."""
+        from .gpu_monitor import device_uuid, gpu_utilization
+
+        uuid = getattr(self, "_gpu_uuid", None)
+        if uuid is None:
+            uuid = self._gpu_uuid = device_uuid(getattr(self.engine, "device", None))
+        return gpu_utilization(uuid)
 
     def boot_snapshot(self) -> dict[str, Any]:
         with self._boot_lock:
@@ -666,7 +722,11 @@ class StreamRuntime:
         with self._boot_lock:
             self._boot["running"] = False
             self._boot["ready"] = True
-        self._publish_boot(busy=False, message="Ready")
+        # The last boot stage left progress at 100%. A later Create / Load reads
+        # the bar from here, so a stale value would pin it at 100% the whole time.
+        self._publish_boot(
+            busy=False, message="Ready", progress=0.0, progress_label="", progress_kind=""
+        )
 
     def _boot_model(self) -> None:
         self._set_boot_stage(
@@ -865,6 +925,9 @@ class StreamRuntime:
         path = self._write_lab_source()
         if path is None:
             return
+        # A .vtm already carries its rest mesh; read it before set_source
+        # clears the lab so loading never re-runs the detection models.
+        rest = self._packaged_lab_rest(probe)
         prev_gen = int(getattr(self, "_lab_seen_generation", 0) or 0)
         src_ack = lab_harness.put_source(str(path))
         nested = src_ack.get("status") if isinstance(src_ack.get("status"), dict) else {}
@@ -876,11 +939,18 @@ class StreamRuntime:
         if prev_gen and src_gen and src_gen <= prev_gen:
             raise RuntimeError("Track Lab did not load the new character still")
         self._accept_lab_overlay(src_packet or src_ack)
-        track_ack = self._lab_ack("track")
+        if rest is not None:
+            track_ack = self._lab_ack("set_rest", rest)
+        else:
+            track_ack = self._lab_ack("track")
         packet = self._lab_packet_from_ack(track_ack)
         self._accept_lab_overlay(packet or track_ack)
         got_hair = self._adopt_lab_hair(packet)
         self.adopt_lab_overlay(packet, emit=True)
+        if rest is not None and "hair" not in rest and got_hair:
+            # First load of a pack without hair: keep what the lab found so
+            # the next load is fully packaged too.
+            self._store_pack_hair()
         overlay = self._last_overlay_kps
         if overlay is not None:
             try:
@@ -892,6 +962,77 @@ class StreamRuntime:
         if not got_hair:
             self._hair_capture_done = False
             self._maybe_capture_hair(rest_keypoints=self._last_overlay_kps)
+
+    def _packaged_lab_rest(self, probe: dict[str, Any]) -> dict[str, Any] | None:
+        """The loaded pack's rest mesh as a Track Lab ``set_rest`` body.
+
+        Face, iris and skeleton come from the pack's keypoints; hair from its
+        fit when saved. None = not a pack, the lab lacks ``set_rest``, or the
+        mesh is unusable, and the caller runs full detection instead.
+        """
+        from .character_fit import norm_hair_to_pixels, read_character_fit
+
+        ref = getattr(self, "_ref_path", None)
+        if ref is None or ref.suffix.lower() != ".vtm":
+            return None
+        commands = probe.get("commands")
+        if isinstance(commands, list) and "set_rest" not in commands:
+            return None
+        image = self._last_image
+        kps = self._last_overlay_kps
+        if image is None or kps is None:
+            return None
+        k = np.asarray(kps, dtype=np.float32)
+        if k.ndim != 2 or k.shape[0] < 37 or k.shape[1] < 4:
+            return None
+        if int(np.count_nonzero(k[:28, 3] >= 0.5)) < 20:
+            return None
+        w, h = image.size
+
+        def px(i: int) -> list[float]:
+            return [
+                round((float(k[i, 0]) + 1.0) * 0.5 * w, 3),
+                round((float(k[i, 1]) + 1.0) * 0.5 * h, 3),
+            ]
+
+        def score(i: int) -> float:
+            s = float(k[i, 2])
+            return round(s if s >= 0.05 else 1.0, 4)
+
+        body: dict[str, Any] = {
+            "points": [px(i) + [round(float(k[i, 2]), 4)] for i in range(28)],
+            # Slots 28 / 29 are the two irises, 31-36 the lab skeleton.
+            "iris": [
+                {"id": i, "x": px(i)[0], "y": px(i)[1], "score": score(i), "visible": True}
+                for i in (28, 29)
+                if k[i, 3] >= 0.5
+            ],
+            "skeleton": [
+                {"id": i, "name": name, "x": px(i)[0], "y": px(i)[1], "score": score(i)}
+                for i, name in _LAB_SKELETON_NAMES.items()
+                if k[i, 3] >= 0.5
+            ],
+        }
+        try:
+            hair = read_character_fit(ref.stem).get("hair")
+        except Exception:
+            hair = None
+        if isinstance(hair, list) and hair:
+            body["hair"] = norm_hair_to_pixels(hair, w, h)
+        return body
+
+    def _store_pack_hair(self) -> None:
+        """Save lab-detected hair into the loaded pack's fit (first load only)."""
+        from .character_fit import update_character_fit
+
+        ref = getattr(self, "_ref_path", None)
+        hair = getattr(self, "_last_lab_hair", None)
+        if ref is None or ref.suffix.lower() != ".vtm" or not hair:
+            return
+        try:
+            update_character_fit(ref.stem, {"hair": [dict(seg) for seg in hair]})
+        except Exception as exc:
+            print(f"Could not store hair in {ref.name}: {exc}")
 
     def _compile_status_fields(self) -> dict[str, Any]:
         """Derive UI compile light from the engine (always fresh)."""
@@ -914,6 +1055,10 @@ class StreamRuntime:
             wanted = bool(getattr(engine, "compile_model", False))
         except Exception:
             wanted = False
+        try:
+            batch_size = max(1, int(getattr(engine, "stream_batch_size", 1) or 1))
+        except (TypeError, ValueError):
+            batch_size = 1
         return {
             "compile_status": st,
             "compile_on": st == "on",
@@ -921,6 +1066,9 @@ class StreamRuntime:
             "compile_detail": detail,
             "keypoint_layout": layout,
             "models_on_gpu": bool(getattr(engine, "_gpu_resident", False)),
+            # Poses per DiT call right now (the Batch setting, or what Auto took).
+            "batch_size": batch_size,
+            "batch2": batch_size > 1,
         }
 
     def _set_progress(
@@ -1036,6 +1184,7 @@ class StreamRuntime:
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
+        self._ema_kps = None
         if emit_blank:
             blank = Image.new("RGB", (16, 16), (8, 8, 8))
             self._emit({"type": "frame", **self._frame_payload(blank, None)})
@@ -1366,7 +1515,7 @@ class StreamRuntime:
                     self._reload_character_after_model()
                     meter.stage("done", "Model ready")
                 self._fast_warmed = False
-                self._batch2_auto_tried = False
+                self._batch_picked = False
                 try:
                     self.engine.set_stream_batch_size(1)
                 except Exception:
@@ -1379,7 +1528,6 @@ class StreamRuntime:
                     model_ready=True,
                     state="ready",
                     error="",
-                    batch2=False,
                 )
                 from .ui_session import save_ui_session
 
@@ -1418,6 +1566,9 @@ class StreamRuntime:
             busy=True,
             message="Creating character…" if silent else "Applying reference…",
             error="",
+            progress=0.0,
+            progress_label="",
+            progress_kind="",
         )
         try:
             # Load DiT+VAE first so status can say "Loading…" instead of looking stuck.
@@ -1776,15 +1927,26 @@ class StreamRuntime:
         if self._streaming and not quiet:
             raise RuntimeError("Stop the stream before loading a character")
         path = resolve_character_id(ident)
+
+        def step(frac: float, label: str) -> None:
+            # Real checkpoints only; quiet loads run under another job's bar.
+            if not quiet:
+                self._set_progress(frac, label=label, kind="character")
+
+        if not quiet:
+            self._set_status(busy=True, message="Reading character…", error="")
+        step(0.05, "Reading character")
         self._migrate_character_pack(path)
         pack = read_character_pack(path)
         if not quiet:
             self._set_status(busy=True, message=f"Loading {pack.name}…", error="")
-            self._set_progress(0.28, label=f"Loading {pack.name}", kind="character")
+        step(0.2, f"Loading {pack.name}")
         try:
             if not getattr(self.engine, "_ready", False):
                 self.ensure_model(keep_busy=True)
+                step(0.3, f"Loading {pack.name}")
             can_reuse = self._pack_latents_usable(pack)
+            step(0.35, "Placing character" if can_reuse else "Encoding character")
             if can_reuse:
                 self.engine.load_encoded_reference(
                     keypoints=pack.keypoints,
@@ -1811,7 +1973,9 @@ class StreamRuntime:
                         tmp,
                         pack.keypoints,
                         skip_crop=pack.skip_crop,
-                        on_progress=None,
+                        on_progress=lambda frac, _label: step(
+                            0.35 + 0.3 * max(0.0, min(1.0, float(frac))), "Encoding character"
+                        ),
                     )
                 finally:
                     try:
@@ -1824,6 +1988,7 @@ class StreamRuntime:
             kps = getattr(self.engine, "_ref_keypoints", None)
             if kps is None:
                 raise RuntimeError("Character pack did not install a rest pose")
+            step(0.68, "Placing character")
             size = int(getattr(self.engine, "image_size", 0) or pack.image_size or 768)
             preview = self._cel_still(
                 pack.preview_rgb,
@@ -1833,8 +1998,16 @@ class StreamRuntime:
             frame = self._install_loaded_reference(preview, np.asarray(kps))
             self._mark_current_character(path, pack.name)
             self._apply_character_limiters()
+            overlay_band = (
+                nullcontext()
+                if quiet
+                else self._run_progress_band(
+                    kind="character", start=0.72, end=0.88, label="Fitting overlay…", expected_s=8.0
+                )
+            )
             try:
-                self._sync_lab_character(replace=replace_lab)
+                with overlay_band:
+                    self._sync_lab_character(replace=replace_lab)
             except Exception:
                 pass
             if not self._last_lab_hair:
@@ -1848,12 +2021,16 @@ class StreamRuntime:
             # Repair after Track Lab holds this still. Before that, the plan is
             # still rebased onto the previous character's face.
             # A mismatch does not keep the previous character on the desk.
+            step(0.9, "Checking blend shapes")
             self._character_shape_gate(
                 path.stem,
                 repair=repair,
                 require_compatible=False,
             )
-            self._set_status(busy=False)
+            if quiet:
+                self._set_status(busy=False)
+            else:
+                self._clear_progress(busy=False)
             result: dict[str, Any] = {
                 "character": self._character_card_safe(path),
                 "frame": frame,
@@ -2236,7 +2413,7 @@ class StreamRuntime:
             self.engine.ensure_gpu()
         except Exception:
             pass
-        self._pick_auto_batch2()
+        self._pick_batch()
         steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
         # Carry on from the GPU move's slice so Start reads as one bar.
         with self._lock:
@@ -2248,29 +2425,32 @@ class StreamRuntime:
         lo = max(0.02, min(carried, GPU_MOVE_SHARE))
         self._set_status(busy=True, fast_warming=True, message="Preparing stream", error="")
 
-        def _warm(batch: int) -> None:
+        def _warm(batch: int, label: str = "Preparing stream") -> None:
             keys = self.engine.warmup_plan(batch_size=batch)
             with self._stage_meter(
                 keys,
                 kind="warmup",
                 lo=lo,
                 hi=WARMUP_SHARE_END,
-                label="Preparing stream",
+                label=label,
                 fast_warming=True,
             ) as meter:
                 self.engine.warmup(num_steps=steps, batch_size=batch, on_stage=meter.stage)
 
         try:
             _warm(int(getattr(self.engine, "stream_batch_size", 1) or 1))
+            if self._batch_is_auto():
+                self._tune_batch(_warm)
             self._fast_warmed = True
             compile_on = bool(getattr(self.engine, "compile_status", "") == "on")
             msg = "Ready — speed boost on" if compile_on else "Ready"
-            if bool(self.status().get("batch2")):
+            batch_n = int(getattr(self.engine, "stream_batch_size", 1) or 1)
+            if batch_n > 1:
                 used = gpu_used_fraction(self.engine)
                 if used is not None:
-                    msg = f"{msg} · batch ×2 (GPU {used:.0%} VRAM)"
+                    msg = f"{msg} · batch ×{batch_n} (GPU {used:.0%} VRAM)"
                 else:
-                    msg = f"{msg} · batch ×2"
+                    msg = f"{msg} · batch ×{batch_n}"
             self._clear_progress(
                 busy=False,
                 fast_warming=False,
@@ -2278,25 +2458,18 @@ class StreamRuntime:
                 error="",
             )
         except Exception as exc:
-            if (
-                int(getattr(self.engine, "stream_batch_size", 1) or 1) > 1
-                and _is_cuda_oom(exc)
-            ):
-                print("[batch2] warmup OOM — falling back to batch 1")
-                try:
-                    self.engine.set_stream_batch_size(1)
-                    self.engine._restore_eager_model()
-                    self.engine._compile_failed = False
-                except Exception:
-                    pass
-                self._set_status(batch2=False)
+            failed_batch = int(getattr(self.engine, "stream_batch_size", 1) or 1)
+            if failed_batch > 1 and _is_cuda_oom(exc):
+                print(f"[batch] ×{failed_batch} warmup OOM — falling back to batch 1")
+                self._note_batch_oom(failed_batch)
+                self._recover_after_oom(1)
                 try:
                     _warm(1)
                     self._fast_warmed = True
                     self._clear_progress(
                         busy=False,
                         fast_warming=False,
-                        message="Ready — batch ×2 skipped (GPU full)",
+                        message=f"Ready — batch ×{failed_batch} skipped (GPU full)",
                         error="",
                     )
                     return
@@ -2311,31 +2484,154 @@ class StreamRuntime:
             )
             print(f"[warmup] failed: {exc}")
 
-    def _pick_auto_batch2(self) -> None:
-        """Choose Batch×2 *before* torch.compile so we capture once."""
-        if self._batch2_auto_tried or self._streaming:
+    def _batch_is_auto(self) -> bool:
+        return _clip_batch(self.status().get("batch")) <= 0
+
+    def _hw_key(self) -> str:
+        """Profile key: this GPU, model, steps and speed boost."""
+        from .hw_profile import profile_key
+
+        engine = self.engine
+        gpu = ""
+        try:
+            device = getattr(engine, "device", None)
+            if getattr(device, "type", "") == "cuda":
+                import torch
+
+                gpu = str(torch.cuda.get_device_name(device.index or 0))
+        except Exception:
+            gpu = ""
+        st = self.status()
+        steps = int(st.get("steps") or STREAM_DEFAULT_STEPS)
+        boost = bool(st.get("fast_mode")) and bool(getattr(engine, "compile_model", False))
+        return profile_key(gpu, checkpoint_label(engine.checkpoint), steps, boost)
+
+    def _auto_batch_plan(self) -> int:
+        """Batch Auto would stream at, from what this PC measured before."""
+        from .hw_profile import load_failed, load_rates, plan_batch
+
+        used = gpu_used_fraction(self.engine)
+        if used is not None and not should_auto_batch2(used):
+            self._set_status(message=f"GPU at {used:.0%} VRAM, keeping batch 1")
+            return 1
+        key = self._hw_key()
+        self._batch_rates = load_rates(key)
+        batch, _ = plan_batch(
+            self._batch_rates, self._gen_cap(), STREAM_BATCH_MAX, failed=load_failed(key)
+        )
+        return batch
+
+    def _tune_batch(self, warm: Callable[[int, str], None]) -> None:
+        """Batch Auto: time this PC, then settle on the size ``plan_batch`` picks.
+
+        Timings are saved per GPU/model, so this costs one extra warmup the
+        first time and nothing after. A fast card that reaches the target at
+        ×1 is never tried bigger; a size that runs out of memory is remembered.
+        """
+        from .hw_profile import TIME_RUNS, load_failed, load_rates, plan_batch, save_rate
+
+        used = gpu_used_fraction(self.engine)
+        if used is not None and not should_auto_batch2(used):
             return
-        if bool(self.status().get("batch2")):
-            self._batch2_auto_tried = True
+        key = self._hw_key()
+        rates = load_rates(key)
+        failed = load_failed(key)
+        target = self._gen_cap()
+        engine = self.engine
+        for _ in range(4):
+            cur = int(getattr(engine, "stream_batch_size", 1) or 1)
+            if cur not in rates:
+                self._set_status(message=f"Timing batch ×{cur} on this PC")
+                rates = save_rate(key, cur, engine.time_batch(cur, TIME_RUNS))
+                self._batch_rates = rates
+            batch, measure = plan_batch(rates, target, STREAM_BATCH_MAX, failed=failed)
+            nxt = measure or batch
+            if nxt == cur:
+                break
+            engine.set_stream_batch_size(nxt)
             try:
-                self.engine.set_stream_batch_size(2)
+                warm(nxt, "Tuning for this PC")
+            except Exception as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                print(f"[batch] ×{nxt} ran out of memory while tuning")
+                self._note_batch_oom(nxt)
+                failed = load_failed(key)
+                self._recover_after_oom(cur)
+                warm(cur, "Preparing stream")
+        self._batch_rates = rates
+        n = int(getattr(engine, "stream_batch_size", 1) or 1)
+        secs = rates.get(n)
+        if secs:
+            print(f"[batch] auto ×{n}: {n / secs:.1f} keys/s here, target {target:.1f}")
+
+    def _note_batch_oom(self, batch: int) -> None:
+        from .hw_profile import save_failed
+
+        try:
+            save_failed(self._hw_key(), batch)
+        except Exception:
+            pass
+
+    def _recover_after_oom(self, batch: int) -> None:
+        try:
+            self.engine.set_stream_batch_size(batch)
+            self.engine._restore_eager_model()
+            self.engine._compile_failed = False
+        except Exception:
+            pass
+        if self.engine.device.type == "cuda":
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
             except Exception:
                 pass
+
+    def _note_live_call(self, batch: int, seconds: float) -> None:
+        if seconds > 0.0:
+            self._live_calls.append((int(batch), float(seconds)))
+            if len(self._live_calls) > 2000:
+                del self._live_calls[:1000]
+
+    def _save_live_rate(self) -> None:
+        """Fold this stream's real call times into the PC profile, so Auto
+        follows what the card manages with a game or OBS running too."""
+        from .hw_profile import save_rate
+
+        calls, self._live_calls = self._live_calls, []
+        if not calls:
             return
-        used = gpu_used_fraction(self.engine)
-        if not should_auto_batch2(used):
-            self._batch2_auto_tried = True
-            if used is not None:
-                self._set_status(
-                    message=f"GPU at {used:.0%} VRAM, keeping batch 1",
-                )
+        batch = calls[-1][0]
+        secs = sorted(s for b, s in calls if b == batch)
+        if len(secs) < 20:
             return
-        self._batch2_auto_tried = True
         try:
-            self.engine.set_stream_batch_size(2)
-            self._set_status(batch2=True, message="GPU headroom — compiling batch ×2")
+            self._batch_rates = save_rate(
+                self._hw_key(), batch, secs[len(secs) // 2], weight=0.3
+            )
         except Exception as exc:
-            print(f"[batch2-auto] skipped: {exc}")
+            print(f"[batch] could not save timing: {exc}")
+
+    def _pick_batch(self) -> None:
+        """Set the stream batch size *before* torch.compile so we capture once.
+
+        A fixed Batch setting is used as-is. Auto starts at what this PC's
+        timings say; warmup then tunes it (see ``_tune_batch``).
+        """
+        if self._batch_picked or self._streaming:
+            return
+        self._batch_picked = True
+        want = _clip_batch(self.status().get("batch"))
+        if want <= 0:
+            want = self._auto_batch_plan()
+        try:
+            self.engine.set_stream_batch_size(want)
+        except Exception as exc:
+            print(f"[batch] could not set ×{want}: {exc}")
+            return
+        if want > 1:
+            self._set_status(message=f"Compiling batch ×{want}")
 
     def _ensure_compile_ready(self) -> None:
         """Block Generate / Stream until Fast compile+warmup finishes."""
@@ -2378,6 +2674,7 @@ class StreamRuntime:
             "use_body",
             "fast_mode",
             "compile_model",
+            "batch",
             "batch2",
             "auto_sync_track",
             "camera_index",
@@ -2417,6 +2714,11 @@ class StreamRuntime:
             updates["inbetweens"] = _clip_inbetweens(updates["inbetweens"])
         if "max_fps" in updates:
             updates["max_fps"] = _clip_max_fps(updates["max_fps"])
+        if "batch2" in updates:
+            # Old Batch ×2 switch (dev panel / older desks).
+            updates["batch"] = 2 if updates.pop("batch2") else 1
+        if "batch" in updates:
+            updates["batch"] = _clip_batch(updates["batch"])
         old_travel = None
         if "travel_box" in updates:
             old_travel = self._status.get("travel_box")
@@ -2553,21 +2855,31 @@ class StreamRuntime:
                 self._set_status(error=str(exc), compile_model=want)
                 snap = self.status()
                 snap["compile_model"] = want
-        if "batch2" in updates:
-            try:
-                self.engine.set_stream_batch_size(2 if updates["batch2"] else 1)
-                # Keep the compiled wrapper. Warmup captures the new batch
-                # shape as a second inductor graph (no full recompile).
-                if (
-                    bool(self.status().get("fast_mode"))
-                    and getattr(self.engine, "_model_compiled", False)
-                    and not self._streaming
-                ):
-                    self._fast_warmed = False
-                    self._run_fast_warmup_if_needed(force=True)
-                    snap = self.status()
-            except Exception:
-                pass
+        if any(k in updates for k in ("max_fps", "inbetweens", "interpolate")) and not self._streaming:
+            # Auto batch aims at the key rate these set; re-plan at next warmup.
+            if self._batch_is_auto():
+                self._batch_picked = False
+                self._fast_warmed = False
+        if "batch" in updates:
+            from .ui_session import save_ui_session
+
+            save_ui_session(batch=updates["batch"])
+            # Every size is its own compiled graph: pick it again and re-warm.
+            # Mid-stream the running size stays until the next Start.
+            self._batch_picked = False
+            self._fast_warmed = False
+            if not self._streaming:
+                try:
+                    self._pick_batch()
+                    # Keep the compiled wrapper. Warmup captures the new batch
+                    # shape as another inductor graph (no full recompile).
+                    if bool(self.status().get("fast_mode")) and getattr(
+                        self.engine, "_model_compiled", False
+                    ):
+                        self._run_fast_warmup_if_needed(force=True)
+                except Exception as exc:
+                    self._set_status(error=str(exc))
+                snap = self.status()
         self._emit({"type": "status", "status": snap})
         if overlay_touched and self._last_image is not None:
             self._emit(
@@ -3550,7 +3862,7 @@ class StreamRuntime:
         return self._last_image
 
     def start_virtual_cam(self) -> None:
-        """Open VTM Studio Cam and keep the current still/gen picture pumping."""
+        """Open the VTM Spark camera and keep the current still/gen picture pumping."""
         from .vcam_device import DEVICE_NAME
         from .virtual_cam import VCAM_FPS, get_virtual_cam
 
@@ -3616,12 +3928,10 @@ class StreamRuntime:
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
+        self._ema_kps = None
         self._inbetween_prev = None
         self._inbetween_prev_kps = None
-        self._last_display_t = 0.0
-        self._last_key_t = 0.0
-        self._last_interp_s = 0.0
-        self._playout_next = 0.0
+        self._reset_display_clock()
         self._display_busy = False
         self._drain_display_queue()
         self._set_status(
@@ -3669,12 +3979,12 @@ class StreamRuntime:
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
+        self._ema_kps = None
         self._inbetween_prev = None
         self._inbetween_prev_kps = None
-        self._last_display_t = 0.0
-        self._last_key_t = 0.0
-        self._playout_next = 0.0
+        self._reset_display_clock()
         self._drain_display_queue()
+        self._save_live_rate()
         self._offload_pending = True
         self._end_first_frame_wait()
         self._set_status(
@@ -3720,6 +4030,8 @@ class StreamRuntime:
         if not self._paused:
             return
         self._paused = False
+        # The paused gap is not a key interval.
+        self._last_call_done_t = 0.0
         self._set_status(paused=False, message="Streaming")
         if not self._frame_in_flight:
             self._schedule_next_frame()
@@ -3730,7 +4042,7 @@ class StreamRuntime:
         # Max FPS: hold the next DiT call so the GPU idles between keys.
         batch_n = max(1, int(getattr(self.engine, "stream_batch_size", 1) or 1))
         hold = gen_hold_s(
-            self._status.get("max_fps"),
+            self._gen_cap(),
             self._last_gen_start,
             time.perf_counter(),
             batch=batch_n,
@@ -3762,6 +4074,14 @@ class StreamRuntime:
         steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
         self._enqueue_generate(
             steps=steps, streaming=True, keypoints=keypoints, hair_maps=hair_maps
+        )
+
+    def _gen_cap(self) -> float:
+        """Keys/s the stream is held to: Max FPS, or Auto from the in-betweens."""
+        return gen_cap(
+            self._status.get("max_fps"),
+            self._status.get("interpolate"),
+            self._status.get("inbetweens"),
         )
 
     def _resume_after_gen_hold(self) -> None:
@@ -3796,13 +4116,24 @@ class StreamRuntime:
             except queue.Full:
                 pass
 
-    def _blend_display_frame(self, image: Image.Image) -> Image.Image:
-        """Light temporal EMA so Batch×2 A/B samples don't hard-pop each other."""
+    def _blend_display_frame(
+        self, image: Image.Image, keypoints: np.ndarray | None = None
+    ) -> Image.Image:
+        """Light temporal EMA so Batch×2 A/B samples don't hard-pop each other.
+
+        Only while the face holds still: blending through a move left the last
+        head and hair on screen for 3–4 keys (hair trailing the face).
+        """
         arr = np.asarray(image.convert("RGB"), dtype=np.float32)
         try:
             alpha = _clip_blend(float(self._status.get("frame_blend") or STREAM_TEMPORAL_EMA))
         except (TypeError, ValueError):
             alpha = STREAM_TEMPORAL_EMA
+        prev_kps = getattr(self, "_ema_kps", None)
+        if keypoints is not None:
+            self._ema_kps = np.asarray(keypoints, dtype=np.float32).copy()
+            if prev_kps is not None:
+                alpha = snap_alpha(alpha, face_pose_delta(prev_kps, self._ema_kps))
         if self._ema_frame is None or self._ema_frame.shape != arr.shape:
             self._ema_frame = arr
             return image
@@ -3834,25 +4165,11 @@ class StreamRuntime:
                     break
 
     def _enqueue_display(self, item: dict[str, Any]) -> None:
-        queued = 0
-        try:
-            queued = int(self._display_queue.qsize())
-        except Exception:
-            queued = 0
-        count = print_inbetween_count(
-            int(item.get("count") or 0),
-            busy=bool(self._display_busy),
-            queued=queued,
-            last_interp_s=self._last_interp_s,
-            gen_fps=float(self._status.get("gen_fps") or 0.0),
-        )
-        if count <= 0:
-            if not self._display_busy and queued <= 0:
-                # Last print was too slow — retry after a couple of keys.
-                self._last_interp_s *= 0.5
-            item = dict(item)
-            item["count"] = 0
-            item["prev"] = None
+        """Queue one DiT call's keys for playout.
+
+        Whether mids fit is decided at play time, not here: a job arriving while
+        the last one is still on screen is the normal case, not a backlog.
+        """
         # Keep the newest quarter-second. Older keys would only add lag.
         while True:
             try:
@@ -3871,7 +4188,7 @@ class StreamRuntime:
                 self._display_queue.task_done()
             except Exception:
                 pass
-        self._display_queue.put_nowait(item)
+        self._display_queue.put_nowait({**item, "queued_at": time.perf_counter()})
 
     def _display_worker_loop(self) -> None:
         while not self._worker_stop.is_set():
@@ -3892,45 +4209,79 @@ class StreamRuntime:
                     pass
 
     def _play_display_job(self, job: dict[str, Any]) -> None:
+        """Show one call's keys with mids between each pair, evenly over the
+        time that call covers. Batch×2 is two keys here, not two jobs — as two
+        jobs the second always looked queued and every mid was skipped."""
         self._display_busy = True
         try:
-            image = job["image"]
-            keypoints = job.get("keypoints")
+            keys = job.get("keys") or [(job["image"], job.get("keypoints"))]
             prev = job.get("prev")
             prev_kps = job.get("prev_kps")
-            try:
-                queued = int(self._display_queue.qsize())
-            except Exception:
-                queued = 0
-            count = print_inbetween_count(
-                int(job.get("count") or 0),
-                busy=False,
-                queued=queued,
-                last_interp_s=self._last_interp_s,
-                gen_fps=float(self._status.get("gen_fps") or 0.0),
+            interval = float(job.get("key_interval") or 0.0)
+            rate = (1.0 / interval) if interval > 0.0 else 0.0
+            wanted = int(job.get("count") or 0)
+            count, gap_s = inbetween_pacing(
+                rate, wanted, mid_cost_s=float(self._last_interp_s or 0.0)
             )
-            gen_fps = float(self._status.get("gen_fps") or 0.0)
-            count, gap_s = inbetween_pacing(gen_fps, count if prev is not None else 0)
-            if prev is not None and count > 0:
-                started = time.perf_counter()
-                try:
-                    mids = inbetween_frames(prev, image, count)
-                except Exception as exc:
-                    print(f"inbetween failed: {exc}")
-                    mids = []
-                self._last_interp_s = time.perf_counter() - started
-                for amount, mid in mids:
-                    if not self._streaming or self._paused or self._display_queue.qsize():
-                        break
-                    posed = keypoints
-                    if prev_kps is not None and keypoints is not None:
-                        posed = lerp_stream_pose(prev_kps, keypoints, amount)
-                    self._pace_display(gap_s)
-                    self._publish_display_frame(mid, posed, key=False)
-            self._pace_display(gap_s)
-            self._publish_display_frame(image, keypoints, key=True)
+            with self._lock:
+                self._status["inbetweens_live"] = count
+            if count < inbetween_pacing(rate, wanted)[0]:
+                # Skipped for render cost: nothing re-measures it while mids
+                # are off, so let it decay or one slow first mid (cv2 warm-up)
+                # turns them off for the whole stream.
+                self._last_interp_s = float(self._last_interp_s or 0.0) * 0.8
+            for image, keypoints in keys:
+                behind = self._display_behind(interval)
+                if behind:
+                    # A newer call is waiting: drop mids, catch up at 20 fps.
+                    count, gap_s = inbetween_pacing(0.0, 0)
+                if prev is not None and count > 0:
+                    make = inbetween_maker(prev, image)
+                    for amount in inbetween_ts(count):
+                        if not self._streaming or self._paused or self._display_behind(interval):
+                            break
+                        started = time.perf_counter()
+                        try:
+                            mid = make(amount)
+                        except Exception as exc:
+                            print(f"inbetween failed: {exc}")
+                            break
+                        cost = time.perf_counter() - started
+                        last = float(self._last_interp_s or 0.0)
+                        self._last_interp_s = cost if last <= 0.0 else 0.7 * last + 0.3 * cost
+                        posed = keypoints
+                        if prev_kps is not None and keypoints is not None:
+                            posed = lerp_stream_pose(prev_kps, keypoints, amount)
+                        self._pace_display(gap_s)
+                        self._publish_display_frame(mid, posed, key=False)
+                self._pace_display(gap_s)
+                self._publish_display_frame(image, keypoints, key=True)
+                prev, prev_kps = image, keypoints
         finally:
             self._display_busy = False
+
+    def _display_behind(self, key_interval: float) -> bool:
+        """True when playout is really late, not just when the next call is in.
+
+        A big batch plays over several key intervals and the next call often
+        lands a few ms before the last key is up — dropping mids for that cost
+        ×3/×4 a fifth of them. Late = two calls waiting, or one that has waited
+        longer than a key interval.
+        """
+        q = self._display_queue
+        with q.mutex:
+            waiting = list(q.queue)
+        if not waiting:
+            return False
+        if len(waiting) >= 2:
+            return True
+        first = waiting[0]
+        if not isinstance(first, dict):
+            return True
+        queued_at = float(first.get("queued_at") or 0.0)
+        if queued_at <= 0.0:
+            return True
+        return time.perf_counter() - queued_at > max(float(key_interval), 0.05)
 
     def _pace_display(self, gap_s: float = 0.0) -> None:
         """Hold until the next shown picture is due: ``gap_s`` after the last one
@@ -3949,21 +4300,44 @@ class StreamRuntime:
         while self._streaming and not self._paused and time.perf_counter() < end:
             time.sleep(min(0.02, end - time.perf_counter()))
 
-    def _ema_fps(self, attr: str, key: str, now: float) -> float:
-        """Wall-clock rate of pictures that actually left this path."""
-        prev = float(getattr(self, attr) or 0.0)
-        setattr(self, attr, now)
-        if prev <= 0:
-            return float(self._status.get(key) or 0.0)
-        dt = now - prev
-        if dt <= 1e-4:
-            return float(self._status.get(key) or 0.0)
-        inst = 1.0 / dt
+    def _shown_fps(self, now: float) -> float:
+        """Pictures published over the last second (keys + mids).
+
+        An EMA of 1/gap overshoots on uneven gaps — a Batch×2 pair 2 ms apart
+        read as ~170 fps.
+        """
+        times = getattr(self, "_shown_times", None)
+        if times is None:
+            times = self._shown_times = deque(maxlen=128)
+        times.append(now)
+        while times and now - times[0] > SHOWN_FPS_WINDOW_S:
+            times.popleft()
         with self._lock:
-            old = float(self._status.get(key) or 0.0)
-            ema = inst if old <= 0 else (0.7 * old + 0.3 * inst)
-            self._status[key] = ema
-            return ema
+            if len(times) >= 2 and times[-1] - times[0] > 0.25:
+                self._status["show_fps"] = (len(times) - 1) / (times[-1] - times[0])
+            return float(self._status.get("show_fps") or 0.0)
+
+    def _note_key_interval(self, now: float, keys: int) -> float:
+        """Seconds per generated key, smoothed. Measured on DiT calls, not on
+        the display, so pacing and Gen FPS do not feed back into each other."""
+        last = float(getattr(self, "_last_call_done_t", 0.0) or 0.0)
+        self._last_call_done_t = now
+        ema = float(getattr(self, "_key_interval", 0.0) or 0.0)
+        dt = now - last
+        if last > 0.0 and 0.0 < dt < KEY_INTERVAL_MAX_S:
+            per = dt / float(max(1, keys))
+            ema = per if ema <= 0.0 else 0.7 * ema + 0.3 * per
+            self._key_interval = ema
+            with self._lock:
+                self._status["gen_fps"] = 1.0 / ema
+        return ema
+
+    def _reset_display_clock(self) -> None:
+        self._last_call_done_t = 0.0
+        self._key_interval = 0.0
+        self._shown_times = deque(maxlen=128)
+        self._last_interp_s = 0.0
+        self._playout_next = 0.0
 
     def _publish_display_frame(
         self,
@@ -3980,13 +4354,9 @@ class StreamRuntime:
         self._last_image = image
         if self._vcam_wanted:
             self._push_virtual_cam(image)
-        now = time.perf_counter()
-        show_fps = self._ema_fps("_last_display_t", "show_fps", now)
-        gen_fps = float(self._status.get("gen_fps") or 0.0)
-        if key:
-            gen_fps = self._ema_fps("_last_key_t", "gen_fps", now)
+        show_fps = self._shown_fps(time.perf_counter())
         frame = self._frame_payload(image, posed)
-        frame["fps"] = show_fps or gen_fps
+        frame["fps"] = show_fps or float(self._status.get("gen_fps") or 0.0)
         self._emit({"type": "frame", **frame})
         if key and self._first_frame_pending:
             self._end_first_frame_wait(message="Streaming")
@@ -4036,19 +4406,25 @@ class StreamRuntime:
                     )
                 n = max(1, len(images))
                 per = float(elapsed) / float(n) if elapsed > 0 else 0.0
-                for i, image in enumerate(images):
-                    if streaming:
-                        image = self._blend_display_frame(image)
-                    kps_i = kps_list[i] if i < len(kps_list) else None
-                    is_last = i == len(images) - 1
-                    self._on_frame(
-                        image,
-                        per,
-                        timings,
-                        kps_i,
-                        streaming=streaming,
-                        schedule_next=is_last if streaming else False,
-                    )
+                if streaming:
+                    self._note_live_call(len(images), float(elapsed))
+                    shown = [
+                        self._blend_display_frame(
+                            image, kps_list[i] if i < len(kps_list) else None
+                        )
+                        for i, image in enumerate(images)
+                    ]
+                    self._on_stream_keys(shown, kps_list, per, timings)
+                else:
+                    for i, image in enumerate(images):
+                        self._on_frame(
+                            image,
+                            per,
+                            timings,
+                            kps_list[i] if i < len(kps_list) else None,
+                            streaming=False,
+                            schedule_next=False,
+                        )
             except Exception as exc:
                 if streaming:
                     self._streaming = False
@@ -4076,16 +4452,7 @@ class StreamRuntime:
                     pass
                 self._maybe_offload_after_stop()
 
-    def _on_frame(
-        self,
-        image: Image.Image,
-        elapsed: float,
-        timings: dict,
-        keypoints: np.ndarray | None,
-        *,
-        streaming: bool,
-        schedule_next: bool | None = None,
-    ) -> None:
+    def _note_timing(self, elapsed: float, timings: dict, *, streaming: bool) -> str:
         dit_fps = (1.0 / elapsed) if elapsed > 0 else 0.0
         with self._lock:
             den = float(timings.get("denoise_s", timings.get("denoise", 0)) or 0)
@@ -4110,34 +4477,70 @@ class StreamRuntime:
                 update["gen_fps"] = dit_fps
                 update["show_fps"] = dit_fps
             self._status.update(update)
-        if streaming:
-            prev = self._inbetween_prev
-            prev_kps = self._inbetween_prev_kps
-            count = self._effective_inbetweens()
-            self._inbetween_prev = image.copy()
-            self._inbetween_prev_kps = (
+        return timing
+
+    def _on_stream_keys(
+        self,
+        images: list[Image.Image],
+        keypoints: list[np.ndarray | None],
+        elapsed: float,
+        timings: dict,
+        *,
+        schedule_next: bool = True,
+    ) -> None:
+        """One streaming DiT call is done: start the next, queue these keys."""
+        self._note_timing(elapsed, timings, streaming=True)
+        key_interval = self._note_key_interval(time.perf_counter(), len(images))
+        keys = [
+            (
+                image,
                 None
-                if keypoints is None
-                else np.asarray(keypoints, dtype=np.float32).copy()
+                if i >= len(keypoints) or keypoints[i] is None
+                else np.asarray(keypoints[i], dtype=np.float32).copy(),
             )
-            # Next DiT call starts now. Optical flow cannot steal generate time.
-            if schedule_next is not False:
-                self._frame_in_flight = False
-                if self._streaming and not self._paused:
-                    self._schedule_next_frame()
-            self._enqueue_display(
-                {
-                    "image": image,
-                    "keypoints": None
-                    if keypoints is None
-                    else np.asarray(keypoints, dtype=np.float32).copy(),
-                    "prev": prev,
-                    "prev_kps": prev_kps,
-                    "count": count,
-                }
+            for i, image in enumerate(images)
+        ]
+        prev = self._inbetween_prev
+        prev_kps = self._inbetween_prev_kps
+        self._inbetween_prev = keys[-1][0].copy()
+        self._inbetween_prev_kps = keys[-1][1]
+        # Next DiT call starts now. Optical flow cannot steal generate time.
+        if schedule_next:
+            self._frame_in_flight = False
+            if self._streaming and not self._paused:
+                self._schedule_next_frame()
+        self._enqueue_display(
+            {
+                "keys": keys,
+                "prev": prev,
+                "prev_kps": prev_kps,
+                "count": self._effective_inbetweens(),
+                "key_interval": key_interval,
+            }
+        )
+        self._emit({"type": "status", "status": self.status()})
+
+    def _on_frame(
+        self,
+        image: Image.Image,
+        elapsed: float,
+        timings: dict,
+        keypoints: np.ndarray | None,
+        *,
+        streaming: bool,
+        schedule_next: bool | None = None,
+    ) -> None:
+        if streaming:
+            self._on_stream_keys(
+                [image],
+                [keypoints],
+                elapsed,
+                timings,
+                schedule_next=schedule_next is not False,
             )
-            self._emit({"type": "status", "status": self.status()})
             return
+        timing = self._note_timing(elapsed, timings, streaming=False)
+        dit_fps = (1.0 / elapsed) if elapsed > 0 else 0.0
         self._last_image = image
         if keypoints is not None:
             self._last_overlay_kps = np.asarray(keypoints, dtype=np.float32)
@@ -4407,6 +4810,46 @@ class StreamRuntime:
                     }
                 )
             update_character_fit(ident, {"skeleton": body})
+        if self._last_image is not None:
+            self._emit(
+                {
+                    "type": "frame",
+                    **self._frame_payload(self._last_image, self._last_overlay_kps),
+                }
+            )
+        return self.character_fit()
+
+    def move_character_point(self, idx: int, x: float, y: float) -> dict[str, Any]:
+        """Place one rest tracking point: a face point, an iris, or a skeleton joint.
+
+        The rest mesh is saved into the ``.vtm`` and Track Lab moves the same
+        rest point, dropping any overlay nudge on it so the edit is not
+        applied twice.
+        """
+        from .character_fit import POINT_SLOTS, SKELETON_LABELS
+
+        slot = int(idx)
+        if slot in SKELETON_LABELS:
+            return self.move_character_skeleton(slot, x, y)
+        image = self._last_image
+        kps = self._last_overlay_kps
+        if image is None or kps is None:
+            raise RuntimeError("Create a character before moving its points")
+        if slot not in POINT_SLOTS:
+            raise ValueError(f"Point {slot} cannot be moved here")
+        width, height = image.size
+        nx, ny = pixels_to_normalized(float(x), float(y), width, height)
+        edited = np.asarray(kps, dtype=np.float32).copy()
+        edited[slot, 0] = nx
+        edited[slot, 1] = ny
+        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
+        edited[slot, 3] = 1.0
+        self._install_fit_keypoints(edited)
+        try:
+            px, py = self._desk_px_to_lab(float(x), float(y))
+            self._lab_ack("set_rest_point", {"id": slot, "x": float(px), "y": float(py)})
+        except Exception as exc:
+            print(f"Point move kept on the desk; Track Lab did not store it: {exc}")
         if self._last_image is not None:
             self._emit(
                 {

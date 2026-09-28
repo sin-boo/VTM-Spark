@@ -1,4 +1,4 @@
-"""Hat mark -> Windows ICO with real alpha (no white square)."""
+"""VTM Spark logo -> Windows ICO with real alpha (no white square)."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ from io import BytesIO
 from pathlib import Path
 
 ICO_SIZES = (16, 24, 32, 48, 64, 256)
-APP_USER_MODEL_ID = "VTM.Studio"
+APP_USER_MODEL_ID = "VTM.Spark"
 
 
 def hat_png_path() -> Path | None:
     from backend.paths import package_root, ui_dist_dir
 
     for folder in (package_root() / "ui" / "public", ui_dist_dir()):
-        path = folder / "splash-mark.png"
+        path = folder / "app-icon.png"
         if path.is_file():
             return path
     return None
@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     png = Path(args[0]) if args else hat_png_path()
     ico = Path(args[1]) if len(args) > 1 else hat_ico_path()
     if png is None or not png.is_file():
-        print("missing splash-mark.png", file=sys.stderr)
+        print("missing app-icon.png", file=sys.stderr)
         return 1
     write_hat_ico(png, ico)
     print(ico)

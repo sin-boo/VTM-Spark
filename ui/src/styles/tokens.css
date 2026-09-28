@@ -76,6 +76,28 @@
 
 
 
+/* Segoe UI has no kana or kanji; Windows' Japanese UI faces take over for those. */
+
+:root:lang(ja) {
+
+  --font-display: "Segoe UI", "Yu Gothic UI", "Meiryo UI", "Meiryo", system-ui, sans-serif;
+
+  --font-body: "Segoe UI", "Yu Gothic UI", "Meiryo UI", "Meiryo", system-ui, sans-serif;
+
+}
+
+
+
+/* Japanese text inside an English desk (the 日本語 choice, the first-run picker). */
+
+[lang="ja"] {
+
+  font-family: "Segoe UI", "Yu Gothic UI", "Meiryo UI", "Meiryo", system-ui, sans-serif;
+
+}
+
+
+
 *,
 
 *::before,

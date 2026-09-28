@@ -1,63 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-
-// Shown under a bar once it has run a few seconds, so a long compile or
-// model load reads as busy backstage, not frozen. Flavour only: the real
-// step stays in the label above.
-const BACKSTAGE_LINES = [
-  'Waking up the avatar…',
-  'Teaching the eyes to blink…',
-  'Placing character on layer 1…',
-  'Asking chat to hold on…',
-  'Ironing the green screen…',
-  'Tuning the hair physics…',
-  'Rehearsing the intro wave…',
-  'Warming up the vocal cords…',
-  'Loading kawaii.dll…',
-  'Polishing the cat ears…',
-  'Rigging the smile…',
-  'Setting the lighting to cozy…',
-  'Convincing the GPU it is showtime…',
-  'Counting eyelashes…',
-  'Finding outfit…',
-  'Feeding the tracker a snack…',
-  'Stretching before stream…',
-  'Straightening the hoodie strings…',
-  'Practicing the “otsukare”…',
-  'Adding sparkles to the highlights…',
-  'Checking the mic is not muted…',
-  'Hiding the spaghetti code…',
-  'Loading today’s catchphrase…',
-  'Finding the good camera angle…',
-  'Taping down the cables…',
-  'Practicing the head tilt…',
-  'Warming up the smile…',
-  'Checking the stream title for typos…',
-  'Picking the thumbnail face…',
-  'Rehearsing the “welcome back”…',
-  'Dusting off the webcam…',
-  'Adjusting the chair height…',
-  'Hiding the messy desk…',
-  'Loading the idle bounce…',
-  'Adding shine to the eyes…',
-  'Tuning the blush…',
-  'Warming up the mouth shapes…',
-  'Double-checking the overlay…',
-  'Clearing the throat…',
-  'Straightening the headset…',
-  'Choosing the opening line…',
-  'Filling up the energy bar…',
-  'Syncing lips to the voice…',
-  'Practicing the surprised face…',
-  'Waving at the early viewers…',
-  'Adjusting the key light…',
-  'Loading the signature pose…',
-  'Hanging the stream banner…',
-  'Practicing the laugh…',
-  'Spinning up the GPU fans…',
-  'Getting into character…',
-  'Rehearsing the goodbye wave…',
-  'Setting the scene…',
-]
+import { BACKSTAGE_LINES, useI18n } from '../i18n'
 
 // Each line stays up for a random 4–6 s, so the changes do not tick like a clock.
 const LINE_MIN_MS = 4000
@@ -70,9 +12,9 @@ const CREEP_TAU_MS = 9000
 // the bar; only this long with no bar on screen starts a new wait.
 const SESSION_GAP_MS = 2000
 
-/** Every line once, in random order, before any repeats. */
-function shuffledLines(): string[] {
-  const out = [...BACKSTAGE_LINES]
+/** Every line once, in random order, before any repeats. Indexes, so a language switch keeps the order. */
+function shuffledLines(): number[] {
+  const out = BACKSTAGE_LINES.en.map((_, i) => i)
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1))
     ;[out[i], out[j]] = [out[j], out[i]]
@@ -80,7 +22,7 @@ function shuffledLines(): string[] {
   return out
 }
 
-type WaitSession = { started: number; seen: number; lines: string[]; holds: number[] }
+type WaitSession = { started: number; seen: number; lines: number[]; holds: number[] }
 let waitSession: WaitSession | null = null
 
 /** The running wait: shared start time (the seconds counter) and line order. */
@@ -94,8 +36,8 @@ function currentWait(now: number): WaitSession {
   return waitSession
 }
 
-/** The line showing ``elapsed`` ms into a wait (loops after the last one). */
-function lineAt(wait: WaitSession, elapsed: number): string {
+/** Index of the line showing ``elapsed`` ms into a wait (loops after the last one). */
+function lineAt(wait: WaitSession, elapsed: number): number {
   const total = wait.holds.reduce((sum, ms) => sum + ms, 0)
   let t = total > 0 ? elapsed % total : 0
   for (let i = 0; i < wait.lines.length; i++) {
@@ -115,6 +57,7 @@ export function ProgressMeter({
   value: number
   children?: ReactNode
 }) {
+  const { lang } = useI18n()
   // Never step back, count the whole wait, and keep something moving so a
   // long compile never looks frozen.
   const [now, setNow] = useState(() => Date.now())
@@ -135,7 +78,7 @@ export function ProgressMeter({
   const pct = Math.max(0, Math.min(100, Math.round(shown.current * 100)))
   const elapsed = Math.max(0, now - wait.started)
   const secs = Math.floor(elapsed / 1000)
-  const line = lineAt(wait, elapsed)
+  const line = BACKSTAGE_LINES[lang][lineAt(wait, elapsed)]
   return (
     <div
       className="progress"
@@ -174,8 +117,9 @@ export function Lamp({
   idle?: boolean
   label: string
 }) {
+  const { t } = useI18n()
   const kind = pending ? 'is-pending' : on ? 'is-on' : idle ? 'is-idle' : 'is-off'
-  const copy = pending ? 'hold' : on ? 'live' : idle ? 'ok' : 'off'
+  const copy = t(pending ? 'lamp.hold' : on ? 'lamp.live' : idle ? 'lamp.ok' : 'lamp.off')
   return (
     <span className={`lamp ${kind}`} title={label} aria-label={label}>
       {copy}
@@ -202,6 +146,7 @@ export function Toggle({
   title?: string
   className?: string
 }) {
+  const { t } = useI18n()
   return (
     <label
       className={['toggle', checked ? 'is-on' : '', disabled ? 'is-disabled' : '', className ?? '']
@@ -220,7 +165,7 @@ export function Toggle({
         <span
           className={`signal-light is-${light}`}
           title={lightTitle || undefined}
-          aria-label={lightTitle || `status ${light}`}
+          aria-label={lightTitle || t('toggle.status', { light })}
         />
       ) : null}
     </label>

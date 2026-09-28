@@ -1,4 +1,4 @@
-"""Headless LivePoser tracker for VTM Studio.
+"""Headless LivePoser tracker for VTM Spark.
 
 Embeds tools/live-poser camera + OSF → KEYPOINT_SCHEMA (37,4) bridge.
 """

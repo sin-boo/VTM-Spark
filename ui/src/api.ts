@@ -45,8 +45,12 @@ export type AppStatus = {
   frame_blend: number
   inbetweens?: number
   interpolate?: boolean
-  /** Cap on generated keys per second; 0 = as fast as the GPU goes. */
+  /** Cap on generated keys per second; 0 = Auto (fill the 20 fps display with in-betweens). */
   max_fps?: number
+  /** Keys/s the stream is actually held to (the cap, or what Auto picked). */
+  gen_cap?: number
+  /** Whole-card GPU busy %, while streaming. null = no NVIDIA readout. */
+  gpu_util?: number | null
   hold_last?: boolean
   track_fps: number
   drive_pose: boolean
@@ -66,6 +70,14 @@ export type AppStatus = {
   fast_mode: boolean
   compile_model: boolean
   batch2: boolean
+  /** Batch setting: poses per model call, 0 = Auto. */
+  batch?: number
+  /** Poses per model call right now (the setting, or what Auto took). */
+  batch_size?: number
+  /** Keys/s per batch size on this PC: measured, or predicted from them. */
+  batch_rates?: Record<string, { fps: number; measured: boolean }>
+  /** In-betweens actually drawn per key gap right now (what Auto chose). */
+  inbetweens_live?: number
   auto_sync_track: boolean
   gen_fps: number
   show_fps?: number
@@ -135,6 +147,7 @@ export type CharacterFit = {
   face_height: number
   hair: { class: string; polygon: number[][] }[]
   skeleton: { id: number; label: string; x: number; y: number }[]
+  points: { id: number; label: string; group: 'face' | 'iris' | 'body'; x: number; y: number }[]
   boxes: {
     head_tight: FitBox
     head: FitBox
@@ -266,13 +279,6 @@ async function exportCharacter(id: string, name: string): Promise<CharacterExpor
   return { saved, native: false, cancelled: false }
 }
 
-/** One line for the desk after an export; empty when the user cancelled. */
-export function exportNote(name: string, res: CharacterExportResult): string {
-  if (res.cancelled) return ''
-  if (res.native) return res.saved ? `Saved ${name} to ${res.saved}` : `Saved ${name}.`
-  return `Exported ${name} as ${res.saved}.`
-}
-
 export type CharacterLoadResult = {
   ok: boolean
   incompatible?: boolean
@@ -282,6 +288,17 @@ export type CharacterLoadResult = {
   status?: AppStatus
 }
 export type CameraInfo = { index: number; name: string }
+export type GpuInfo = { index: number; uuid: string; name: string; memory_mb: number }
+/** GPU picker state. `selected` / `active` are UUIDs; "" = automatic. */
+export type GpuState = {
+  gpus: GpuInfo[]
+  selected: string
+  active: string
+  in_use: string
+  /** CUDA_VISIBLE_DEVICES set outside the app; the picker is locked. */
+  external: string
+  restart_needed: boolean
+}
 export type MixWeights = {
   A: number
   I: number
@@ -542,6 +559,20 @@ export const api = {
     fetch('/api/checkpoint/browse', { method: 'POST' }).then((r) =>
       json<{ cancelled: boolean; path?: string | null; status: AppStatus }>(r),
     ),
+  uiPrefs: () => fetch('/api/ui-prefs').then((r) => json<{ language: string }>(r)),
+  setUiPrefs: (body: { language: string }) =>
+    fetch('/api/ui-prefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<{ language: string }>(r)),
+  gpus: () => fetch('/api/gpus').then((r) => json<GpuState>(r)),
+  setGpu: (uuid: string) =>
+    fetch('/api/gpu', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uuid }),
+    }).then((r) => json<GpuState>(r)),
   settings: (body: Partial<AppStatus>) =>
     fetch('/api/settings', {
       method: 'POST',
@@ -576,6 +607,12 @@ export const api = {
     }).then((r) => json<{ ok: boolean; fit: CharacterFit }>(r)),
   fitSkeleton: (id: number, x: number, y: number) =>
     fetch('/api/characters/fit/skeleton', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, x, y }),
+    }).then((r) => json<{ ok: boolean; fit: CharacterFit }>(r)),
+  fitPoint: (id: number, x: number, y: number) =>
+    fetch('/api/characters/fit/point', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, x, y }),

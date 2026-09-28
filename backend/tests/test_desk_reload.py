@@ -160,7 +160,9 @@ def test_settings_has_reload_backend_button() -> None:
     rail = (ui / "components" / "ControlRail.tsx").read_text(encoding="utf-8")
     app = (ui / "App.tsx").read_text(encoding="utf-8")
     api = (ui / "api.ts").read_text(encoding="utf-8")
-    assert "Reload backend" in rail
+    words = (ui / "i18n.ts").read_text(encoding="utf-8")
+    assert "t('app.reload')" in rail
+    assert "'app.reload': 'Reload backend'" in words
     assert "onReloadBackend" in rail
     assert "api.reloadBackend" in app
     assert "fetch('/api/reload'" in api

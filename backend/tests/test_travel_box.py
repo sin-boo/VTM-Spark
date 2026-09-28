@@ -259,5 +259,5 @@ def test_limiter_panel_has_the_simple_set() -> None:
     text = (root / "ui" / "src" / "components" / "TravelBox.tsx").read_text(encoding="utf-8")
     for gone in ("pad_px", "body_yaw", "body_rotate", "eye_x", "Size pad", "Skel rotate"):
         assert gone not in text
-    for kept in ("body_left", "body_up", "pitch_up", "Head", "Body", "Eyes", "Show"):
+    for kept in ("body_left", "body_up", "pitch_up", "'travel.head'", "'travel.body'", "'travel.eyes'", "'common.show'"):
         assert kept in text

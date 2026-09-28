@@ -299,7 +299,7 @@ def _window_hwnd(window: object | None) -> int:
         user32 = ctypes.windll.user32  # type: ignore[attr-defined]
         user32.FindWindowW.restype = ctypes.c_void_p
         user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
-        found = user32.FindWindowW(None, "VTM Studio")
+        found = user32.FindWindowW(None, "VTM Spark")
         return int(found or 0)
     except Exception:
         return 0
@@ -1444,8 +1444,8 @@ def create_splash_window(
     if js_api is not None:
         kw["js_api"] = js_api
     if url is not None:
-        return webview.create_window("VTM Studio", url, **kw)
-    return webview.create_window("VTM Studio", html=html, **kw)
+        return webview.create_window("VTM Spark", url, **kw)
+    return webview.create_window("VTM Spark", html=html, **kw)
 
 
 WEBVIEW2_ARGS = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
@@ -1861,7 +1861,14 @@ def _patch_edge_permission(edge: object) -> None:
     chrome.on_webview_ready = on_webview_ready
 
 
-UI_PUBLIC_FILES = ("splash-art.png", "splash-mark.png", "favicon.svg", "favicon.ico", "icons.svg")
+UI_PUBLIC_FILES = (
+    "splash-art.png",
+    "splash-mark.png",
+    "vtm-spark-logo.svg",
+    "favicon.svg",
+    "favicon.ico",
+    "icons.svg",
+)
 
 
 def ui_public_files(dist: Path) -> dict[str, Path]:
@@ -1923,27 +1930,35 @@ def early_splash_html(
     error: str = "",
     label: str = "Starting…",
     api_origin: str = "",
+    language: str | None = None,
 ) -> str:
     """Splash HTML. Load from a file beside splash-art.png so the art appears immediately."""
+    from .ui_prefs import splash_strings, ui_language
+
+    lang = language or ui_language()
+    words = splash_strings(lang)
     art = splash_art_path()
-    mark = splash_mark_path()
     art_css = "background-image:url('splash-art.png');" if art is not None else ""
-    mark_html = (
-        '<img class="mark" src="splash-mark.png" width="72" height="72" alt="" />'
-        if mark is not None
-        else ""
+    # The VTM Spark wordmark, as on the website and the desk's splash; plain text if the file is missing.
+    logo_html = (
+        '<img class="logo" src="vtm-spark-logo.svg" width="176" height="60" alt="VTM Spark" />'
+        if _public_png("vtm-spark-logo.svg") is not None
+        else "VTM Spark"
     )
-    notice = html.escape(error.strip()) if error.strip() else ""
+    notice = html.escape(words.get(error.strip(), error.strip())) if error.strip() else ""
     notice_html = f'<p class="err" id="err">{notice}</p>' if notice else '<p class="err" id="err" hidden></p>'
-    line = html.escape(label or "Starting…")
+    first = label or "Starting…"
+    line = html.escape(words.get(first, first))
+    # JSON inside <script>: escape "<" so a label can never close the tag.
+    words_js = json.dumps(words, ensure_ascii=False).replace("<", "\u003c")
     origin = html.escape((api_origin or "").strip().rstrip("/"), quote=True)
     version = html.escape(APP_VERSION)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{lang}">
 <head>
   <meta charset="utf-8" />
   <link rel="icon" type="image/png" href="splash-mark.png" />
-  <title>VTM Studio</title>
+  <title>VTM Spark</title>
   <style>
     html, body {{
       margin: 0;
@@ -1997,24 +2012,16 @@ def early_splash_html(
       align-items: center;
       gap: 28px;
     }}
-    .mark {{
+    .logo {{
       display: block;
-      width: 72px;
-      height: 72px;
-      margin: 0 auto 12px;
+      width: 176px;
+      height: 60px;
       object-fit: contain;
-      background: transparent;
-    }}
-    .kicker {{
-      margin: 0;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-align: center;
-      color: #8d8d8d;
     }}
     h1 {{
-      margin: 4px 0 0;
+      display: flex;
+      justify-content: center;
+      margin: 0;
       font-size: 22px;
       font-weight: 600;
       letter-spacing: 0.04em;
@@ -2022,7 +2029,7 @@ def early_splash_html(
       color: #cfcfcf;
     }}
     .ver {{
-      margin: 6px 0 0;
+      margin: 10px 0 0;
       color: #8d8d8d;
       font-size: 11px;
       text-align: center;
@@ -2090,9 +2097,7 @@ def early_splash_html(
       <aside class="krita-splash-panel">
       <div class="krita-splash-plate">
       <header>
-        {mark_html}
-        <p class="kicker">VTM</p>
-        <h1>Studio</h1>
+        <h1>{logo_html}</h1>
         <p class="ver">{version}</p>
       </header>
       <div class="status">
@@ -2107,6 +2112,15 @@ def early_splash_html(
   </div>
   <script>
     const API = "{origin}";
+    const WORDS = {words_js};
+    function tr(text) {{
+      if (!text) return text;
+      if (WORDS[text]) return WORDS[text];
+      if (text.indexOf("Character: ") === 0 && WORDS["Character: "]) {{
+        return WORDS["Character: "] + text.slice(11);
+      }}
+      return text;
+    }}
     const WEIGHTS = {{ model: 0.46, character: 0.34, lab: 0.2 }};
     const started = Date.now();
     const lineEl = document.getElementById("line");
@@ -2137,7 +2151,7 @@ def early_splash_html(
       const next = clamp(pct, 0, 100);
       lastPct = Math.max(lastPct, next);
       const shown = Math.round(lastPct);
-      if (lineEl) lineEl.textContent = label || "Loading resources…";
+      if (lineEl) lineEl.textContent = tr(label || "Loading resources…");
       if (fillEl) fillEl.style.width = lastPct.toFixed(1) + "%";
       if (barEl) barEl.setAttribute("aria-valuenow", String(shown));
     }}
@@ -2173,7 +2187,7 @@ def early_splash_html(
       if (errEl) {{
         const msg = String(boot.error || "").trim();
         errEl.hidden = !msg;
-        errEl.textContent = msg;
+        errEl.textContent = tr(msg);
       }}
     }};
 

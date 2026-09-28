@@ -6,6 +6,8 @@ stream looks like more FPS without stretching the last still toward live pose.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from PIL import Image
 
@@ -99,44 +101,43 @@ def playout_gap(
     return float(next_at) - float(now), float(next_at) + slot
 
 
-def inbetween_pacing(gen_fps: float, count: int, *, fps_max: float = SHOW_FPS_MAX) -> tuple[int, float]:
-    """``(mids to show, seconds between shown pictures)`` for one key interval.
+# Pictures are spaced over this share of the key interval, so the next key
+# lands in a short idle instead of behind a backlog (which skips its mids).
+PACE_MARGIN = 0.95
+# A mid may run a touch under the 20 fps slot (~22 fps) rather than drop out
+# the moment the measured key rate jitters above 10.
+SLOT_SLACK = 0.9
+# A mid has to render in this share of its own slot or it would show late.
+RENDER_SHARE = 0.9
 
-    Mids and the key share the gap between two keys evenly instead of firing
-    every 50 ms and then waiting: at 6 keys/s one mid gives 83 ms steps, not
-    50 ms then 117 ms. Mids that would not fit under ``fps_max`` are dropped so
-    the queue never backs up and then bursts.
+
+def inbetween_pacing(
+    gen_fps: float,
+    count: int,
+    *,
+    fps_max: float = SHOW_FPS_MAX,
+    mid_cost_s: float = 0.0,
+) -> tuple[int, float]:
+    """``(mids per key gap, seconds between shown pictures)`` at ``gen_fps`` keys/s.
+
+    Mids and keys share the gap between two keys evenly instead of firing
+    every 50 ms and then waiting: at 6 keys/s one mid gives ~80 ms steps, not
+    50 ms then 117 ms. Mids that would not fit under ``fps_max``, or that take
+    too long to render, are dropped so the display never backs up and bursts.
+    Unknown rate (first key): keys only.
     """
     n = max(0, int(count))
     slot = 1.0 / max(1.0, float(fps_max))
     fps = float(gen_fps)
     if fps <= 0.0:
-        return n, slot
-    interval = 1.0 / fps
-    fit = int(interval / slot + 1e-6) - 1
-    n = max(0, min(n, fit))
-    if n <= 0:
         return 0, slot
-    return n, max(slot, interval / float(n + 1))
-
-
-def print_inbetween_count(
-    wanted: int,
-    *,
-    busy: bool = False,
-    queued: int = 0,
-    last_interp_s: float = 0.0,
-    gen_fps: float = 0.0,
-) -> int:
-    """How many mids to print. 0 if a mid would make us skip a generated key."""
-    n = max(0, int(wanted))
-    if n <= 0 or busy or int(queued) > 0:
-        return 0
-    fps = float(gen_fps)
-    elapsed = float(last_interp_s)
-    if elapsed > 0.0 and fps > 1.0 and elapsed > (0.45 / fps):
-        return 0
-    return n
+    span = PACE_MARGIN / fps
+    fit = int(span / (slot * SLOT_SLACK) + 1e-6) - 1
+    n = max(0, min(n, fit))
+    cost = max(0.0, float(mid_cost_s))
+    while n > 0 and cost > RENDER_SHARE * span / float(n + 1):
+        n -= 1
+    return n, max(slot * SLOT_SLACK, span / float(n + 1))
 
 
 def _cv2():
@@ -217,10 +218,13 @@ def _mix_warp(prev: np.ndarray, nxt: np.ndarray, flow: np.ndarray, t: float) -> 
     Warping only prev and fading in a still next left a faint double image on
     anything that moved.
     """
+    cv2 = _cv2()
+
     left = _warp_rgb(prev, flow, t)
     right = _warp_rgb(nxt, flow, t - 1.0)
-    out = (1.0 - t) * left.astype(np.float32) + t * right.astype(np.float32)
-    return Image.fromarray(np.clip(out, 0.0, 255.0).astype(np.uint8), mode="RGB")
+    # addWeighted: ~1 ms at 768², a float32 numpy mix was ~15 ms per mid.
+    out = cv2.addWeighted(left, 1.0 - float(t), right, float(t), 0.0)
+    return Image.fromarray(out, mode="RGB")
 
 
 def inbetween_image(prev: Image.Image, current: Image.Image, t: float) -> Image.Image:
@@ -240,6 +244,30 @@ def inbetween_image(prev: Image.Image, current: Image.Image, t: float) -> Image.
         return blend_images(prev, current, amount)
 
 
+def inbetween_maker(
+    prev: Image.Image, current: Image.Image
+) -> Callable[[float], Image.Image]:
+    """``make(t)`` for pictures between two keys. Flow is worked out once, on
+    the first call, so each mid can be drawn just before it is due."""
+    a = np.asarray(prev.convert("RGB"))
+    b = np.asarray(current.convert("RGB"))
+    if a.shape != b.shape:
+        return lambda t: blend_images(prev, current, t)
+    flow: list[np.ndarray | None] = []
+
+    def make(t: float) -> Image.Image:
+        if not flow:
+            try:
+                flow.append(_flow_forward(a, b))
+            except Exception:
+                flow.append(None)
+        if flow[0] is None:
+            return blend_images(prev, current, t)
+        return _mix_warp(a, b, flow[0], t)
+
+    return make
+
+
 def inbetween_frames(
     prev: Image.Image, current: Image.Image, count: int
 ) -> list[tuple[float, Image.Image]]:
@@ -247,12 +275,5 @@ def inbetween_frames(
     amounts = inbetween_ts(count)
     if not amounts:
         return []
-    a = np.asarray(prev.convert("RGB"))
-    b = np.asarray(current.convert("RGB"))
-    if a.shape != b.shape:
-        return [(t, blend_images(prev, current, t)) for t in amounts]
-    try:
-        flow = _flow_forward(a, b)
-    except Exception:
-        return [(t, blend_images(prev, current, t)) for t in amounts]
-    return [(t, _mix_warp(a, b, flow, t)) for t in amounts]
+    make = inbetween_maker(prev, current)
+    return [(t, make(t)) for t in amounts]

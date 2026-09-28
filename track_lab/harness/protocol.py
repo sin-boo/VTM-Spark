@@ -1,6 +1,6 @@
 """Harness packet and command schema.
 
-A consumer (later: VTM Studio) talks to Track Lab over this protocol instead
+A consumer (later: VTM Spark) talks to Track Lab over this protocol instead
 of embedding the tracker. Frames carry the character-space overlay mesh.
 Commands mutate the same settings the lab UI already exposes.
 """
@@ -33,6 +33,7 @@ COMMANDS: dict[str, str] = {
     "start": "Start live tracking. body: camera?, source? (camera|ifm), host?, port?",
     "stop": "Stop live tracking.",
     "track": "Fit the rest mesh on the still (same as Track).",
+    "set_rest": "Install a packaged rest mesh on the still without detection. body: points (28 x [x, y, score]), iris, skeleton, hair? (hair is detected when omitted). Character pixels.",
     "set_source": "Load the character still. body: path (file the lab can read)",
     "reset": "Tear down the tracker and restore rest.",
     "set_camera": "Pick a webcam. body: index (must be in the cameras list)",
@@ -51,6 +52,7 @@ COMMANDS: dict[str, str] = {
     "set_mouth_point": "Toggle / remap an OSF lip landmark. body: id, on?, to?",
     "set_eye_point": "Toggle / remap an OSF eye landmark. body: id, on?, to?",
     "set_skeleton_point": "Nudge a rest skeleton joint. body: id, x, y",
+    "set_rest_point": "Move one rest face point (0-27) or iris (28-29) on the still and drop its overlay nudge. body: id, x, y (character pixels).",
     "set_hair": "Replace rest hair polygons. body: hair: [{class, polygon}] in character pixels.",
     "set_point": "Nudge any overlay point. body: id, x, y (character pixels). Offset rides on live tracking.",
     "reset_points": "Clear overlay nudges. body: id? (omit = all).",

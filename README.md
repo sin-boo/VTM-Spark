@@ -1,4 +1,4 @@
-# VTM Studio
+# VTM Spark
 
 Windows desktop app for real-time pose-driven anime generation (keypoint DiT + live tracking).
 
@@ -49,6 +49,6 @@ Vendor code is committed under `vendor/`. Only pass `-SyncVendor` to `backend\pa
 
 **License**
 
-Apache License 2.0 covers VTM Studio source and **our** original / fine-tune training work — see [LICENSE](LICENSE). That grant does **not** cover third-party model weights, and it does not apply to models added later.
+Apache License 2.0 covers VTM Spark source and **our** original / fine-tune training work — see [LICENSE](LICENSE). That grant does **not** cover third-party model weights, and it does not apply to models added later.
 
 Third-party weights keep the official license of the publisher who released them. Inventory and source URLs: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenSeeFace binary library notices: `vendor/tools/openseeface/Licenses/`.

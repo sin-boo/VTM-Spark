@@ -10,8 +10,8 @@ from backend.frame_interp import (
     inbetween_slot_s,
     inbetween_ts,
     lerp_stream_pose,
+    inbetween_maker,
     playout_gap,
-    print_inbetween_count,
 )
 
 
@@ -41,14 +41,6 @@ def test_inbetween_slot_does_not_sleep() -> None:
     assert inbetween_slot_s(22.0, 0) == 0.0
     assert inbetween_slot_s(22.0, 1) == 0.0
     assert inbetween_slot_s(10.0, 2) == 0.0
-
-
-def test_print_inbetween_skips_when_behind() -> None:
-    assert print_inbetween_count(1) == 1
-    assert print_inbetween_count(2, busy=True) == 0
-    assert print_inbetween_count(2, queued=1) == 0
-    assert print_inbetween_count(1, last_interp_s=0.08, gen_fps=10.0) == 0
-    assert print_inbetween_count(1, last_interp_s=0.02, gen_fps=10.0) == 1
 
 
 def _blob(cx: float, size: int = 192) -> np.ndarray:
@@ -87,18 +79,51 @@ def test_inbetween_image_lands_halfway() -> None:
 
 
 def test_inbetween_pacing_spreads_evenly() -> None:
-    # 6 keys/s, one mid: two 83 ms steps, not 50 ms then 117 ms.
+    # 6 keys/s, one mid: two even ~80 ms steps, not 50 ms then 117 ms.
     n, gap = inbetween_pacing(6.0, 1)
     assert n == 1
-    assert abs(gap - 1.0 / 12.0) < 1e-6
+    assert abs(gap - 0.95 / 12.0) < 1e-6
     # 10 keys/s cannot fit three mids under 20 fps: only one survives.
     n, gap = inbetween_pacing(10.0, 3)
     assert n == 1
-    assert abs(gap - 0.05) < 1e-6
+    assert abs(gap - 0.0475) < 1e-6
     # 20 keys/s: no room for mids at all.
     assert inbetween_pacing(20.0, 2)[0] == 0
-    # Unknown rate: keep the count, fall back to the 20 fps slot.
-    assert inbetween_pacing(0.0, 2) == (2, 0.05)
+    # Unknown rate (first key): keys only.
+    assert inbetween_pacing(0.0, 2) == (0, 0.05)
+
+
+def test_inbetween_pacing_survives_rate_jitter() -> None:
+    """Auto holds keys at 10/s; a measured 10.3 must not drop the mid.
+
+    The old exact fit flipped to zero mids on any jitter above 10 keys/s.
+    """
+    assert inbetween_pacing(10.3, 1)[0] == 1
+    assert inbetween_pacing(9.7, 1)[0] == 1
+
+
+def test_inbetween_pacing_spreads_keys_without_mids() -> None:
+    # Batch×2 keys with no mids: one per key interval, not 50 ms apart.
+    n, gap = inbetween_pacing(2.0, 0)
+    assert n == 0
+    assert abs(gap - 0.475) < 1e-6
+
+
+def test_inbetween_pacing_drops_mids_that_render_too_slow() -> None:
+    assert inbetween_pacing(10.0, 1, mid_cost_s=0.02)[0] == 1
+    assert inbetween_pacing(10.0, 1, mid_cost_s=0.06)[0] == 0
+    # Slow keys leave time: 3 mids at 2 keys/s even at 60 ms each.
+    assert inbetween_pacing(2.0, 3, mid_cost_s=0.06)[0] == 3
+
+
+def test_inbetween_maker_matches_frames() -> None:
+    a = Image.new("RGB", (16, 16), (10, 10, 10))
+    b = Image.new("RGB", (16, 16), (200, 200, 200))
+    make = inbetween_maker(a, b)
+    lazy = [np.asarray(make(t)) for t in (1.0 / 3.0, 2.0 / 3.0)]
+    eager = [np.asarray(img) for _, img in inbetween_frames(a, b, 2)]
+    for x, y in zip(lazy, eager):
+        np.testing.assert_array_equal(x, y)
 
 
 def test_inbetween_frames_count() -> None:

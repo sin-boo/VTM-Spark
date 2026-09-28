@@ -11,20 +11,23 @@ def test_toon_preview_opens_library() -> None:
     lib = _ui("components", "CharacterLibrary.tsx")
     rail = _ui("components", "ControlRail.tsx")
     css = _ui("App.css")
+    words = _ui("i18n.ts")
     assert "char-preview" in lib
     assert "char-dock" not in lib
-    assert "No character" in lib
-    assert "Click to add" in lib
+    assert "t('lib.noCharacter')" in lib
+    assert "t('lib.clickToAdd')" in lib
+    assert "'lib.noCharacter': 'No character'" in words
+    assert "'lib.clickToAdd': 'Click to add'" in words
     assert "libraryOpen" in lib
     assert "setLibraryOpen(true)" in lib
     assert "pickFile()" not in lib.split("function openDock")[1].split("async function beginCreate")[0]
-    assert "                    Create" in lib
+    assert "                    {t('lib.create')}" in lib
     ctx = lib.split('className="char-ctx"')[1]
-    assert "Repair" in ctx
+    assert "t('common.repair')" in ctx
     assert "shapes_compatible === false" in ctx
-    assert ctx.index("Edit") < ctx.index("Repair")
-    assert ctx.index("Repair") < ctx.index("Rename")
-    assert ctx.index("Rename") < ctx.index("Remove")
+    assert ctx.index("t('common.edit')") < ctx.index("t('common.repair')")
+    assert ctx.index("t('common.repair')") < ctx.index("t('common.rename')")
+    assert ctx.index("t('common.rename')") < ctx.index("t('common.remove')")
     assert "beginEdit" in lib
     assert "chooseCard" in lib
     assert "onDoubleClick" not in lib
@@ -59,8 +62,9 @@ def test_desk_settings_has_no_lab_overlay_flags() -> None:
     assert "use_visemes" not in rail
     assert "invert_look" not in rail
     assert "invert_pitch" not in rail
-    assert 'label="Mirror"' in rail
-    assert 'label="Invert"' not in rail
+    assert "label={t('track.mirror')}" in rail
+    assert "'track.mirror': 'Mirror'" in _ui("i18n.ts")
+    assert "Invert" not in rail
     assert "Start Track Lab to edit these." not in rail
     assert 'group-subtitle">Lab</h3>' not in rail
     assert ".overlay-controls .group-subtitle" not in css
@@ -87,9 +91,14 @@ def test_character_fit_screen() -> None:
     assert "CharacterFit" in lib
     assert "from './CharacterFit'" in lib
     assert "is-fit" in lib
-    assert "Hair" in fit
-    assert "Skeleton" in fit
-    assert "Limiters" in fit
+    words = _ui("i18n.ts")
+    assert "'fit.hair'" in fit
+    assert "'fit.points'" in fit
+    assert "api.fitPoint" in fit
+    assert "'fit.limiters'" in fit
+    assert "'fit.hair': 'Hair'" in words
+    assert "'fit.points': 'Points'" in words
+    assert "'fit.limiters': 'Limiters'" in words
     assert ".char-create.is-fit" in css
     assert ".char-fit" in css
     assert ".fit-frame" in css
