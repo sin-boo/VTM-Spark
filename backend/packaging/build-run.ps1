@@ -28,3 +28,10 @@ if ($LASTEXITCODE -ne 0) { throw "failed to write $Fav" }
 & $Csc /nologo /optimize /target:winexe /win32icon:"$Ico" /out:"$Out" "$Cs"
 if ($LASTEXITCODE -ne 0) { throw "csc failed" }
 Write-Host "wrote $Out"
+
+# The virtual camera's admin prompt shows this exe's name and logo, not cmd's.
+$CamCs = Join-Path $Pack "cam-setup.cs"
+$CamOut = Join-Path $Root "vendor\tools\vtm_spark_cam\VTM Spark Camera Setup.exe"
+& $Csc /nologo /optimize /target:winexe /platform:anycpu /win32icon:"$Ico" /out:"$CamOut" "$CamCs"
+if ($LASTEXITCODE -ne 0) { throw "csc failed on cam-setup.cs" }
+Write-Host "wrote $CamOut"

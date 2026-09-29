@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -107,7 +108,7 @@ def test_pump_resends_reference_still() -> None:
 def _vcam_ready_to_install(monkeypatch, tmp_path):
     from backend import vcam_device
 
-    for name in ("UnityCaptureFilter64.dll", "UnityCaptureFilter32.dll", "Install-VTMSparkCam.bat"):
+    for name in ("UnityCaptureFilter64.dll", "UnityCaptureFilter32.dll", "VTM Spark Camera Setup.exe"):
         (tmp_path / name).write_bytes(b"")
     monkeypatch.setattr(vcam_device, "vcam_bundle_dir", lambda: tmp_path)
     monkeypatch.setattr(vcam_device, "device_available", lambda: False)
@@ -148,9 +149,63 @@ def test_camera_is_named_vtm_spark() -> None:
     from backend import vcam_device
 
     assert vcam_device.DEVICE_NAME == "VTM Spark"
-    bat = vcam_device.install_script()
-    assert bat.name == "Install-VTMSparkCam.bat"
-    assert "UnityCaptureName=VTM Spark" in bat.read_text(encoding="utf-8")
+    assert vcam_device.setup_exe().is_file()
+    src = (Path(__file__).resolve().parents[1] / "packaging" / "cam-setup.cs").read_text(encoding="utf-8")
+    assert f'DeviceName = "{vcam_device.DEVICE_NAME}"' in src
+    assert "UnityCaptureName=" in src
+
+
+def _version_string(exe: Path, field: str) -> str:
+    import ctypes
+
+    ver = ctypes.windll.version
+    size = ver.GetFileVersionInfoSizeW(str(exe), None)
+    buf = ctypes.create_string_buffer(size)
+    assert ver.GetFileVersionInfoW(str(exe), 0, size, buf)
+    ptr = ctypes.c_void_p()
+    n = ctypes.c_uint()
+    assert ver.VerQueryValueW(buf, "\\VarFileInfo\\Translation", ctypes.byref(ptr), ctypes.byref(n))
+    lang, page = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ushort * 2)).contents
+    key = f"\\StringFileInfo\\{lang:04x}{page:04x}\\{field}"
+    assert ver.VerQueryValueW(buf, key, ctypes.byref(ptr), ctypes.byref(n))
+    return ctypes.wstring_at(ptr.value, n.value).rstrip("\0")
+
+
+def test_admin_prompt_names_vtm_spark_not_the_command_processor() -> None:
+    """The prompt shows the elevated program's name and icon. The .bat went
+    through cmd.exe: "Windows Command Processor" and the console icon."""
+    import sys
+
+    import pytest
+
+    from backend import vcam_device
+
+    if not sys.platform.startswith("win"):
+        pytest.skip("Windows version resources")
+    exe = vcam_device.setup_exe()
+    assert exe.stem == "VTM Spark Camera Setup"
+    assert _version_string(exe, "FileDescription") == "VTM Spark Camera Setup"
+    assert _version_string(exe, "ProductName") == "VTM Spark"
+    menu = (Path(__file__).resolve().parents[1] / "packaging" / "start-menu.ps1").read_text(encoding="utf-8-sig")
+    assert "VTM Spark Camera Setup.exe" in menu
+    assert "Windows Command Processor" not in menu
+    assert "Windows Command Processor" not in vcam_device.ADMIN_NOTICE
+
+
+def test_declined_admin_prompt_says_so(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    vcam_device, ran = _vcam_ready_to_install(monkeypatch, tmp_path)
+    monkeypatch.setattr(vcam_device, "confirm_admin_prompt", lambda: True)
+    monkeypatch.setattr(
+        vcam_device.subprocess, "run",
+        lambda *a, **k: ran.append(a[0])
+        or type("P", (), {"stderr": "", "stdout": "", "returncode": vcam_device.SETUP_DECLINED})(),
+    )
+    with pytest.raises(RuntimeError, match="Yes on the Windows prompt"):
+        vcam_device.ensure_installed(allow_prompt=True)
+    # The setup exe itself, not cmd.exe running a .bat.
+    assert ran == [[str(tmp_path / "VTM Spark Camera Setup.exe")]]
 
 
 def test_stale_registration_is_not_ready(monkeypatch, tmp_path) -> None:

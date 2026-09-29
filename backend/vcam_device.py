@@ -19,10 +19,12 @@ ADMIN_NOTICE = (
     "Windows will now ask for administrator permission. This is only for the "
     "virtual camera: it lets OBS, Discord, Zoom and other apps use VTM Spark "
     "as a webcam, and Windows only allows adding a camera as admin.\n\n"
-    'The prompt may say "Windows Command Processor" - that is this step. '
-    "Click Yes.\n\n"
+    'The prompt shows the VTM Spark logo and "VTM Spark Camera Setup" - that '
+    "is this step. Click Yes.\n\n"
     "You are only asked once."
 )
+# VTM Spark Camera Setup.exe's exit code when the admin prompt was declined.
+SETUP_DECLINED = 1223
 
 
 def vcam_bundle_dir() -> Path:
@@ -37,8 +39,18 @@ def filter_dlls() -> list[Path]:
     ]
 
 
-def install_script() -> Path:
-    return vcam_bundle_dir() / "Install-VTMSparkCam.bat"
+def setup_exe() -> Path:
+    """Registers the camera (backend/packaging/cam-setup.cs). The admin prompt
+    shows its name and logo; elevating a .bat showed "Windows Command Processor"."""
+    return vcam_bundle_dir() / "VTM Spark Camera Setup.exe"
+
+
+def _unblock(path: Path) -> None:
+    """Drop the downloaded-file mark, so no SmartScreen warning joins the prompt."""
+    try:
+        Path(f"{path}:Zone.Identifier").unlink()
+    except OSError:
+        pass
 
 
 def device_available() -> bool:
@@ -155,9 +167,9 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
             f"{DEVICE_NAME} camera filters missing — re-run install.bat "
             f"(expected under {vcam_bundle_dir()})"
         )
-    script = install_script()
-    if not script.is_file():
-        raise RuntimeError(f"Installer missing: {script}")
+    setup = setup_exe()
+    if not setup.is_file():
+        raise RuntimeError(f"Installer missing: {setup}")
 
     if not allow_prompt:
         raise RuntimeError(
@@ -170,14 +182,15 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
             f"{DEVICE_NAME} setup cancelled. Click Virtual camera again when you are ready."
         )
 
-    # Elevated installer (UAC). Wait for registration to settle.
+    # The setup exe asks for admin itself and returns once registering is done.
     creationflags = 0
     if sys.platform.startswith("win"):
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    _unblock(setup)
     try:
         proc = subprocess.run(
-            ["cmd.exe", "/c", str(script)],
-            cwd=str(script.parent),
+            [str(setup)],
+            cwd=str(setup.parent),
             check=False,
             capture_output=True,
             text=True,
@@ -189,8 +202,13 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
             f"Timed out installing {DEVICE_NAME}. Click Yes on the Windows prompt, "
             "then click Virtual camera again."
         ) from exc
+    if proc.returncode == SETUP_DECLINED:
+        raise RuntimeError(
+            f"{DEVICE_NAME} setup needs Yes on the Windows prompt. Click Virtual "
+            "camera again when you are ready."
+        )
 
-    # UAC-elevated child may return before regsvr32 finishes; poll briefly.
+    # A freshly registered filter can take a moment to open; poll briefly.
     for _ in range(20):
         if device_ready():
             return

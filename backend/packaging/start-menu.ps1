@@ -250,9 +250,11 @@ function Invoke-EnsureModel {
 function Invoke-EnsureVtmSparkCam {
   # Register bundled DirectShow filter as 'VTM Spark' (UAC once). Also re-registers
   # a camera left pointing at a copy of the app that was moved or deleted.
-  $installBat = Join-Path $Root "vendor\tools\vtm_spark_cam\Install-VTMSparkCam.bat"
+  # The setup exe (cam-setup.cs) carries the VTM Spark name and logo, which the
+  # admin prompt shows; elevating a .bat showed cmd.exe's name and icon.
+  $setupExe = Join-Path $Root "vendor\tools\vtm_spark_cam\VTM Spark Camera Setup.exe"
   $dll64 = Join-Path $Root "vendor\tools\vtm_spark_cam\UnityCaptureFilter64.dll"
-  if (-not (Test-Path -LiteralPath $installBat) -or -not (Test-Path -LiteralPath $dll64)) {
+  if (-not (Test-Path -LiteralPath $setupExe) -or -not (Test-Path -LiteralPath $dll64)) {
     Write-Ansi "==> VTM Spark camera filters missing under vendor\tools\vtm_spark_cam" amber
     return $false
   }
@@ -291,13 +293,16 @@ function Invoke-EnsureVtmSparkCam {
   Write-Ansi "    Windows will now ask for administrator permission." white
   Write-Ansi "    This is for the virtual camera. It lets OBS, Discord, Zoom and other apps" slate
   Write-Ansi "    use VTM Spark as a webcam, and Windows only allows adding a camera as admin." slate
-  Write-Ansi "    The prompt may say 'Windows Command Processor' - that is this step." slate
+  Write-Ansi "    The prompt shows the VTM Spark logo and 'VTM Spark Camera Setup' - that is this step." slate
   Write-Ansi "    Click Yes. You are only asked once." slate
   Write-Host ""
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
+  # A downloaded zip marks every file; a marked exe gets a SmartScreen warning
+  # on top of the admin prompt.
+  Unblock-File -LiteralPath $setupExe -ErrorAction SilentlyContinue
   try {
-    Start-Process -FilePath $installBat -WorkingDirectory (Split-Path $installBat -Parent) -Wait -Verb RunAs
+    Start-Process -FilePath $setupExe -WorkingDirectory (Split-Path $setupExe -Parent) -Wait -Verb RunAs
   } catch {
     Write-Ansi "Virtual camera skipped - the Windows permission prompt was declined." amber
     Write-Ansi "Everything else still works. Click Virtual camera in the app to add it later." slate
