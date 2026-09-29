@@ -903,6 +903,7 @@ class StreamRuntime:
         """A lab re-track re-detects hair and skeleton. Put the painted ones back."""
         # Track Lab was offline when the character loaded; hand it the limiters now.
         self._apply_character_limiters()
+        self._fit_new_character_limiters()
         try:
             changed = self._apply_character_fit()
         except Exception as exc:
@@ -2035,6 +2036,9 @@ class StreamRuntime:
                     self._sync_lab_character(replace=replace_lab)
             except Exception:
                 pass
+            # Track Lab holds this still now: a character without limiters
+            # gets them fitted to it.
+            self._fit_new_character_limiters()
             if not self._last_lab_hair:
                 self._hair_capture_done = False
                 self._maybe_capture_hair(rest_keypoints=self._last_overlay_kps)
@@ -3276,12 +3280,18 @@ class StreamRuntime:
             update_character_fit(ident, {"travel_box": normalize_travel_box(box)})
         except Exception as exc:
             print(f"Limiters did not save into the character: {exc}")
+            return
+        # Saved limiters are the character's own; a pending fit must not
+        # replace an edit made before Track Lab came up.
+        if getattr(self, "_limiters_unfitted", "") == ident:
+            self._limiters_unfitted = ""
 
     def _apply_character_limiters(self) -> None:
         """Install the limiters saved in the loaded character's ``.vtm``.
 
-        Packs made before limiters were saved per character adopt the desk's
-        current box, so each character keeps its own from then on.
+        A character with none saved gets limiters fitted to its still once
+        Track Lab holds it (``_fit_new_character_limiters``). Copying the
+        desk's box instead gave every new character the last one's limits.
         """
         from .character_fit import read_character_fit
 
@@ -3294,8 +3304,9 @@ class StreamRuntime:
             print(f"Character limiters unreadable: {exc}")
             return
         if not isinstance(saved, dict):
-            self._save_character_limiters(self._status.get("travel_box"))
+            self._limiters_unfitted = ident
             return
+        self._limiters_unfitted = ""
         from .ui_session import save_ui_session
 
         box = normalize_travel_box(saved)
@@ -3310,6 +3321,57 @@ class StreamRuntime:
             self._emit({"type": "status", "status": snap})
         if getattr(self, "_lab_seen_online", False):
             self._push_lab_limiters(user_edit=True)
+
+    def _fit_new_character_limiters(self) -> None:
+        """First load of a character with no limiters: fit them to its still.
+
+        Needs Track Lab to hold the still. Offline, the fit waits for the
+        lab's boot sync (``_restore_character_fit``).
+        """
+        ident = str(self._status.get("character_id") or "")
+        if not ident or getattr(self, "_limiters_unfitted", "") != ident:
+            return
+        try:
+            self.fit_character_limiters(start_from_default=True)
+        except Exception as exc:
+            print(f"Limiter fit waits for Track Lab: {exc}", flush=True)
+
+    def fit_character_limiters(self, *, start_from_default: bool = False) -> dict[str, Any]:
+        """Track Lab fits the limiters to the loaded still; they save into the character.
+
+        Head and body room come from where the character sits in the picture,
+        turn and tilt are centred on the pose it is drawn in. From default,
+        look / eyes / size start from the built-in limits (a new character);
+        otherwise they stay as they are.
+        """
+        from .ui_session import save_ui_session
+
+        ack = self._lab_ack("fit_travel", {"from": "default"} if start_from_default else {})
+        nested = ack.get("status") if isinstance(ack.get("status"), dict) else {}
+        raw = nested.get("travel_box") if isinstance(nested, dict) else None
+        if not isinstance(raw, dict):
+            raw = ack.get("travel_box")
+        if not isinstance(raw, dict):
+            raise RuntimeError("Track Lab sent no limiters back")
+        box = normalize_travel_box(raw)
+        old = self._status.get("travel_box")
+        with self._lock:
+            self._status["travel_box"] = box
+            snap = dict(self._status)
+        save_ui_session(travel_box=box)
+        # Saved even when the fit matches the current box: the character owns
+        # its limiters from here on.
+        self._save_character_limiters(box)
+        self._travel_from_desk = True
+        if normalize_travel_box(old) != box:
+            self._refresh_travel_preview(old, box)
+            self._emit({"type": "status", "status": snap})
+            # Redraw the walls on the still, as a slider edit does.
+            image = getattr(self, "_last_image", None)
+            if image is not None:
+                self._emit({"type": "frame", **self._frame_payload(image, self._last_overlay_kps)})
+        self._emit_live_limiter_pose(ack)
+        return self.status()
 
     def _lab_ack(self, op: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         from .lab_harness import lab as lab_harness

@@ -13,9 +13,9 @@ import numpy as np
 PARENT = {32: 31, 33: 32, 34: 31, 35: 34, 36: 31}
 CHAIN = (32, 34, 36, 33, 35)
 SKELETON_IDS = (31, 32, 33, 34, 35, 36)
-# The torso shares the face place: slide and size. The neck rides the head
-# (with a rig, through the head's turn); the rest hangs from the neck and takes
-# only part of a tilt. A head turn or nod never turns the torso.
+# The torso shares the face place: walk and size. The neck base (31) is on
+# the torso; the rest hangs from it and takes only part of a tilt. A head
+# turn or nod never turns or moves the torso.
 _TORSO_ROLL = 0.45
 _SHOULDER_FROM_MOUTH = 0.50
 _SHOULDER_HALF = 0.58
@@ -238,10 +238,13 @@ def _torso_roll(head_roll_deg: float) -> float:
 
 
 def _follow_with_rig(rest: list[dict[str, Any]], rig: Any) -> list[dict[str, Any]]:
-    """The neck rides the head; the torso hangs from it without the head's turn.
+    """The torso walks and grows with the body; the head turns on top of it.
 
-    Mapping every joint through the face card turned the torso with the head:
-    a big look swung the shoulders round the nose and folded them into a line.
+    Joint 31 is the base of the neck, on the torso: a turn or nod swings the
+    head round it and leaves it put. Riding the head's slide dragged the
+    shoulders down on every look-down and sideways on every turn, until the
+    body wall stopped them. Mapping every joint through the face card also
+    turned the torso: a big look folded the shoulders into a line.
     """
     place = rig.place()
     cx = float(place["cx"])
@@ -254,12 +257,14 @@ def _follow_with_rig(rest: list[dict[str, Any]], rig: Any) -> list[dict[str, Any
     neck = rest_by.get(31)
     if neck is None:
         return [dict(joint) for joint in joints]
-    nx, ny = rig.map_local(
-        np.array([float(neck["x"]) - cx], dtype=np.float64),
-        np.array([float(neck["y"]) - cy], dtype=np.float64),
-    )
     neck_rest = _xy(neck)
-    neck_xy = np.array([float(nx[0]), float(ny[0])], dtype=np.float32)
+    neck_xy = np.array(
+        [
+            cx + float(place.get("body_dx", 0.0)) + scale * (float(neck_rest[0]) - cx),
+            cy + float(place.get("body_dy", 0.0)) + scale * (float(neck_rest[1]) - cy),
+        ],
+        dtype=np.float32,
+    )
     roll = _torso_roll(math.degrees(float(rig.turn()["roll"])))
     out: list[dict[str, Any]] = []
     for joint in joints:

@@ -178,6 +178,12 @@ def test_preview_slides_the_whole_character() -> None:
     assert abs(float(out[CHEST, 0] - rest[CHEST, 0]) + 0.4 * fh) < 1e-4
     nod = preview_travel_pose(rest, _box(pitch_up=50.0), "pitch_up")
     assert np.linalg.norm(nod[list(FACE_SLOTS), :2] - rest[list(FACE_SLOTS), :2]) > 1e-3
+    # Look down shows a nod (it used to tilt the face sideways): the face
+    # drops, nothing moves across, and the torso stays where it is.
+    down = preview_travel_pose(rest, _box(pitch_down=12.0), "pitch_down")
+    assert float(down[15, 1]) > float(rest[15, 1])
+    np.testing.assert_allclose(down[list(FACE_SLOTS), 0], rest[list(FACE_SLOTS), 0])
+    np.testing.assert_allclose(down[[NECK, CHEST]], rest[[NECK, CHEST]])
     assert changed_preview_axis(default_travel_box(), _box(left=0.2)) == "left"
     assert changed_preview_axis(default_travel_box(), _box(left=0.2, right=0.1)) is None
 

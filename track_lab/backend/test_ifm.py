@@ -131,7 +131,7 @@ def test_turn_from_an_off_level_rest_is_just_a_turn() -> None:
     turned = parse_packet(f"jawOpen-0|=head#{_ifm_angles(rest_rot @ _rot_y(math.radians(-40.0)))},0,0,0")
     assert rest is not None and turned is not None
     prev = feel.payload()
-    feel.update({"max_yaw_left": 1.0, "max_yaw_right": 1.0, "max_pitch_up": 1.0, "max_pitch_down": 1.0, "max_roll_left": 1.0, "max_roll_right": 1.0})
+    feel.update({"smoothing": 0.0, "max_yaw_left": 1.0, "max_yaw_right": 1.0, "max_pitch_up": 1.0, "max_pitch_down": 1.0, "max_roll_left": 1.0, "max_roll_right": 1.0})
     try:
         rig = FaceRig()
         rig.apply(_anime_rest(), _anime_rest(), head_of(rest), pose_of(rest))
@@ -505,7 +505,7 @@ def test_ifm_turn_slides_the_head_like_the_webcam() -> None:
     turned = parse_packet("jawOpen-0|=head#0,20,0,0,0,0")
     assert straight is not None and turned is not None
     prev = feel.payload()
-    feel.update({"max_yaw_left": 1.0, "max_yaw_right": 1.0})
+    feel.update({"smoothing": 0.0, "max_yaw_left": 1.0, "max_yaw_right": 1.0})
     try:
         for selfie in (False, True):
             rig = FaceRig()
@@ -602,10 +602,13 @@ def test_ifm_look_up_nods_the_head_rig() -> None:
     assert out is not None
     assert pitch < 0.0
     rest_chin = abs(float(rest[2, 1] - rest[15, 1]))
+    rest_brow = abs(float(rest[15, 1] - rest[5, 1]))
     chin = abs(float(out[2, 1] - out[15, 1]))
-    # A look-up foreshortens the drawing. The chin stays a chin.
-    assert chin < rest_chin
-    assert chin > 0.75 * rest_chin
+    brow = abs(float(out[15, 1] - out[5, 1]))
+    # A look-up tips the face: the nose, in front, rises toward the brows.
+    # The chin stays a chin.
+    assert brow < 0.9 * rest_brow
+    assert 0.75 * rest_chin < chin < 1.15 * rest_chin
     assert float(out[5, 1]) < float(out[15, 1]) < float(out[2, 1])
 
 

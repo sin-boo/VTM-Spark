@@ -25,7 +25,7 @@ export const ZERO_TRAVEL: TravelBoxValue = {
   tilt_left: 22,
   tilt_right: 12,
   pitch_up: 14,
-  pitch_down: 3,
+  pitch_down: 12,
   eye: 0.56,
   size: 0,
 }
@@ -62,6 +62,7 @@ type Props = {
   value?: TravelBoxValue | null
   disabled?: boolean
   onChange: (patch: Partial<TravelBoxValue>) => void
+  onFit?: () => void
   onFocus?: (focus: TravelFocus | null) => void
 }
 
@@ -161,6 +162,17 @@ export function TravelBox(props: Props) {
       <div className="travel-box-head">
         <p className="side-label">Limiters</p>
         <div className="travel-box-actions">
+          {props.onFit ? (
+            <button
+              type="button"
+              className="ghost compact"
+              disabled={props.disabled}
+              onClick={() => props.onFit?.()}
+              title="Set head and body room from where the character sits in the picture, and centre turn and tilt on the pose it is drawn in. Look, eyes and size stay."
+            >
+              Fit
+            </button>
+          ) : null}
           <button
             type="button"
             className="ghost compact"

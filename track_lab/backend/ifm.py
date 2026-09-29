@@ -768,8 +768,9 @@ def head_of(packet: IfmPacket) -> dict[str, float]:
 def pose_of(packet: IfmPacket, sway: float = 0.0) -> dict[str, float]:
     # Face-local input: no box to measure, so scale is one face width and
     # the solved distance stays off (a look is not a zoom). Nothing sees the
-    # head move either: ``sway`` asks FaceRig to swing it round the neck by
-    # the drawn turn (0 keeps it in place). cx stays 0: viseme rest reads it.
+    # head or body move either: a pose with ``sway`` tells FaceRig so, and
+    # asks it to swing the head round the neck by the drawn turn (0 keeps it
+    # in place); the torso stays put. cx stays 0: viseme rest reads it.
     # Tilt is the head's roll so FaceRig does not shadow head.roll with 0.
     return {
         "cx": 0.0,

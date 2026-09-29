@@ -27,7 +27,7 @@ const ZERO: TravelBoxValue = {
   tilt_left: 22,
   tilt_right: 12,
   pitch_up: 14,
-  pitch_down: 3,
+  pitch_down: 12,
   eye: 0.56,
   size: 0,
 }
@@ -64,6 +64,7 @@ type Props = {
   show?: boolean
   onShow?: (on: boolean) => void
   onChange: (patch: TravelBoxValue) => void
+  onFit?: () => void
 }
 
 function clampRoom(n: number) {
@@ -152,6 +153,17 @@ export function TravelBox(props: Props) {
       <div className="group-head travel-box-head">
         <h2 className="group-title">{t('travel.title')}</h2>
         <div className="travel-box-actions">
+          {props.onFit ? (
+            <button
+              type="button"
+              className="btn ghost compact"
+              disabled={props.disabled}
+              onClick={() => props.onFit?.()}
+              title={t('travel.fitTitle')}
+            >
+              {t('travel.fit')}
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn ghost compact"

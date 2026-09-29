@@ -1,8 +1,9 @@
 """Drive jaw, brows, eyes, nose, and mouth from OSF.
 
-Brows, eyes, and nose copy the same image landmarks the camera preview
-draws. 3D landmarks are only a fallback, and their Y axis is flipped
-when the source face is Y-up.
+Brows, eyes, and nose read OSF's pose-free 3D landmarks, so the head's
+turn and nod reach them once, through the rig; their Y axis is flipped
+when the source face is Y-up. The lips copy the image landmarks the camera
+preview draws.
 
 Authored smile / sad / A I U E O mix inside the mouth box when those
 shapes exist. Otherwise camera lips are copied into that same box.
@@ -67,6 +68,7 @@ _LEFT_BROW = (5, 6, 7)
 _RIGHT_BROW = (8, 9, 10)
 _EYE_SLOTS = _LEFT_EYE + _RIGHT_EYE
 _BROW_SLOTS = _LEFT_BROW + _RIGHT_BROW
+_NOSE_SLOTS = (14, 15, 16)
 _EYE_IDX = tuple(i for i, slot in enumerate(_SLOTS) if slot in _EYE_SLOTS)
 _BROW_IDX = tuple(i for i, slot in enumerate(_SLOTS) if slot in _BROW_SLOTS)
 _REMAP_STEP = 0.04
@@ -301,6 +303,9 @@ class FaceExpr:
         self._live: np.ndarray | None = None
         self._mrest = np.zeros((66, 2), dtype=np.float32)
         self._mlive = np.zeros((66, 2), dtype=np.float32)
+        # The same lips in OSF's pose-free 3D frame, for the open amount.
+        self._lip3_rest = np.zeros((66, 2), dtype=np.float32)
+        self._lip3_live = np.zeros((66, 2), dtype=np.float32)
         self._erest = np.zeros((68, 2), dtype=np.float32)
         self._elive = np.zeros((68, 2), dtype=np.float32)
         self._mouth_uses_image_y = False
@@ -368,6 +373,8 @@ class FaceExpr:
         self._p_xsign = _source_x_sign(p3)
         self._erest = _eye_sources(p3)
         self._elive = self._erest.copy()
+        self._lip3_rest = p3[:66].copy()
+        self._lip3_live = self._lip3_rest.copy()
         self._box_ids = frozenset()
         self._dest_box = None
         self._box_w = None
@@ -450,16 +457,25 @@ class FaceExpr:
         return abs(float(arr[upper, 1] - arr[lower, 1]))
 
     def _camera_open(self) -> float:
-        """Live lip split vs the rest-locked camera ring. 0 = shut, 1 = wide."""
+        """Live lip split vs the rest-locked camera ring. 0 = shut, 1 = wide.
+
+        Read on OSF's pose-free 3D lips, in face widths like the image ring.
+        The image lips are divided by the face's width on screen, which a
+        turn narrows and a look-up tips: a 50 deg turn read as a half-open
+        mouth on a shut one.
+        """
         if not self.locked:
             return 0.0
+        rest3 = self._lip3_rest
+        live3 = self._lip3_live
+        span = max(abs(float(rest3[16, 0] - rest3[0, 0])), 1e-6)
         rest_w = max(
             float(self._src_w),
-            abs(float(self._mrest[58, 0] - self._mrest[62, 0])),
+            abs(float(rest3[58, 0] - rest3[62, 0])) / span,
             1e-6,
         )
-        rest_g = max(self._src_gap(self._mrest, 60, 64), self._src_gap(self._mrest, 51, 57))
-        live_g = max(self._src_gap(self._mlive, 60, 64), self._src_gap(self._mlive, 51, 57))
+        rest_g = max(self._src_gap(rest3, 60, 64), self._src_gap(rest3, 51, 57)) / span
+        live_g = max(self._src_gap(live3, 60, 64), self._src_gap(live3, 51, 57)) / span
         delta = (live_g - rest_g) / rest_w
         if delta <= 0.02:
             return 0.0
@@ -528,6 +544,7 @@ class FaceExpr:
             if i < len(mouth_xy):
                 self._mlive[i] = mouth_xy[i]
         self._elive = _eye_sources(p3)
+        self._lip3_live = p3[:66].copy()
         gain = feel.response()
         mesh_span = _span(rest)
         face_scale = mesh_span / self._osf_span
@@ -560,7 +577,10 @@ class FaceExpr:
         for i, slot in enumerate(_SLOTS):
             if slot in _JAW or slot in _BROW_SLOTS or slot in mapped_eyes:
                 continue
-            if slot in _EYE_SLOTS:
+            if slot in _EYE_SLOTS or slot in _NOSE_SLOTS:
+                # Pose-free 3D points: the image ones carry the head's own
+                # turn and nod, which the rig then drew again (a look-down
+                # folded the nose into a V).
                 delta = (self._plive[i] - self._prest[i]) * p_face_scale * gain - p_nose_d
                 dx = float(np.clip(x_p3 * delta[0], -cap, cap))
                 dy = float(np.clip(p_ysign * delta[1], -cap, cap))

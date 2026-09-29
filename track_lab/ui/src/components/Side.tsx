@@ -29,6 +29,7 @@ export type SideProps = {
   onCalibrate: (id: string) => void
   onFeel: (key: keyof FeelSettings, value: number) => void
   onTravel: (patch: Partial<TravelBoxValue>) => void
+  onFitTravel: () => void
   onTravelFocus: (focus: TravelFocus | null) => void
   onMirror: (on: boolean) => void
   onResetPoints: () => void
@@ -63,6 +64,7 @@ export function Side({
   onCalibrate,
   onFeel,
   onTravel,
+  onFitTravel,
   onTravelFocus,
   onMirror,
   onResetPoints,
@@ -75,7 +77,13 @@ export function Side({
   return (
     <aside className="side">
       {panel === 'limiters' ? (
-        <TravelBox value={travel} disabled={busy !== ''} onChange={onTravel} onFocus={onTravelFocus} />
+        <TravelBox
+          value={travel}
+          disabled={busy !== ''}
+          onChange={onTravel}
+          onFit={onFitTravel}
+          onFocus={onTravelFocus}
+        />
       ) : panel === 'blend' ? (
         <MouthSection
           live={live}

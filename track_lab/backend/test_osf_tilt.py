@@ -167,8 +167,10 @@ def _rig_rest() -> tuple[np.ndarray, dict]:
 def test_eye_line_lock_gives_way_to_the_first_clean_solve() -> None:
     """Kept on the stand-in zero, a camera 23 deg below eye level read as a
     permanent nod pinned at the pitch stop."""
+    from backend.feel import feel
     from backend.rig import _BAD_SOLVE_LOCK, FaceRig
 
+    feel.update({"smoothing": 0.0})  # the solve, not Smooth's ease of it
     rest, pose = _rig_rest()
     rig = FaceRig()
     for _ in range(_BAD_SOLVE_LOCK):
@@ -186,8 +188,10 @@ def test_eye_line_lock_gives_way_to_the_first_clean_solve() -> None:
 def test_bad_frame_keeps_the_tilt_continuous() -> None:
     """A bad frame's tilt is the bare eye line; mid-turn that sat ~10 deg off
     the solved roll and twitched the head for a frame."""
+    from backend.feel import feel
     from backend.rig import FaceRig
 
+    feel.update({"smoothing": 0.0})  # the solve, not Smooth's ease of it
     rest, pose = _rig_rest()
     rig = FaceRig()
     rig._sync(rest, {"yaw": 0.0, "pitch": 0.0}, dict(pose, tilt=0.0, tilt_eyes=0.0, head_ok=1.0))

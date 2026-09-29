@@ -50,6 +50,7 @@ const en = {
   'err.stream': 'Stream',
   'err.virtualCam': 'Virtual camera',
   'err.labFeel': 'Lab feel',
+  'err.limiters': 'Limiters',
   'err.input': 'Input',
   'err.camera': 'Camera',
   'err.download': 'Download',
@@ -126,7 +127,7 @@ const en = {
   // Feel + Track Lab lamp
   'feel.title': 'Feel',
   'feel.smooth': 'Smooth',
-  'feel.smoothTitle': 'Ease each new pose toward the last one. Higher is smoother. Pupils use the same ease; blinks stay instant.',
+  'feel.smoothTitle': 'Eases head turns, nods, tilts and moves, on webcam and iPhone alike. 0 is raw; higher is smoother and floatier. The mouth keeps its own lighter ease; pupils ease with it; blinks stay instant.',
   'feel.mouth': 'Mouth',
   'feel.sway': 'Head sway',
   'feel.swayTitle': 'iPhone only. How far a turn, nod or tilt carries the head around the neck, the way a webcam sees it. 0 turns in place.',
@@ -278,6 +279,9 @@ const en = {
   // Limiters
   'travel.title': 'Limiters',
   'travel.resetTitle': 'Reset head, body, turn, and eye limits',
+  'travel.fit': 'Fit',
+  'travel.fitTitle':
+    'Fit to this character: head and body room from where it sits in the picture, turn and tilt centred on the pose it is drawn in. Look, eyes, and size stay.',
   'travel.showTitle': 'Draw the head and body walls on the character',
   'travel.head': 'Head',
   'travel.headTitle': 'How far the head may move from rest, in face heights.',
@@ -427,6 +431,7 @@ const ja: Record<MessageKey, string> = {
   'err.stream': 'ストリーム',
   'err.virtualCam': '仮想カメラ',
   'err.labFeel': '動きの調整',
+  'err.limiters': '可動域',
   'err.input': '入力',
   'err.camera': 'カメラ',
   'err.download': 'ダウンロード',
@@ -495,7 +500,7 @@ const ja: Record<MessageKey, string> = {
 
   'feel.title': '動き',
   'feel.smooth': 'なめらかさ',
-  'feel.smoothTitle': '新しいポーズを直前のポーズへ徐々に近づけます。値が大きいほどなめらかになります。瞳にも同じ補正がかかります（まばたきは即座に反映されます）。',
+  'feel.smoothTitle': '頭の回転・うなずき・傾き・移動をなめらかにします（Webカメラ・iPhone共通）。0は補正なし、値が大きいほどなめらかでふんわりした動きになります。口の動きには軽い補正のみがかかり、瞳にも補正がかかります。まばたきは即座に反映されます。',
   'feel.mouth': '口の動き',
   'feel.sway': '首の振り',
   'feel.swayTitle': 'iPhone のみ。顔を向ける・うなずく・傾けるときに、首を支点に頭をどれだけ動かすか。Web カメラで見える動きに近づけます。0 はその場で回転します。',
@@ -635,6 +640,9 @@ const ja: Record<MessageKey, string> = {
 
   'travel.title': '可動域',
   'travel.resetTitle': '頭・体・回転・目の可動域をリセットします',
+  'travel.fit': '合わせる',
+  'travel.fitTitle':
+    'このキャラクターに合わせます。頭と体の可動域は絵の中の位置から、回転と傾きは描かれた向きを中心に決めます。見上げ・見下ろし・目・サイズはそのままです。',
   'travel.showTitle': 'キャラクターの上に頭と体の可動範囲の枠を表示します',
   'travel.head': '頭',
   'travel.headTitle': '頭が基準の位置から動ける距離です（単位: 顔の高さ）。',

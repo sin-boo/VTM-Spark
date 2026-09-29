@@ -434,6 +434,11 @@ export default function App() {
           })
         }
         onCalibrate={() => run(t('err.calibrate'), () => api.recenter())}
+        onFitLimiters={() =>
+          run(t('err.limiters'), async () => {
+            applyStatus(await api.fitLimiters())
+          })
+        }
         onGenerate={() => run(t('err.generate'), () => api.generate())}
         onToggleStream={() =>
           run(t('err.stream'), async () => {

@@ -49,6 +49,7 @@ from .osf_cam import OsfCam, OsfFrame
 from .skeleton import follow_skeleton, skeleton_from_still
 from .travel_box import (
     apply_limits,
+    default_travel_box,
     lab_feel_caps,
     limiter_rects_px,
     pack_overlay,
@@ -57,6 +58,7 @@ from .travel_box import (
     unpack_iris,
     unpack_skeleton,
 )
+from .travel_fit import fit_travel_box
 from harness.hub import hub
 from harness.pack import frame_from_bench, status_from_bench
 
@@ -68,7 +70,7 @@ from .presets import (
 )
 from .record import MovementRecorder
 from .retarget import FaceExpr
-from .rig import FaceRig, _mesh_scale
+from .rig import FaceRig
 from .sides import ifm_canonical, ifm_look_canonical, selfie_of, to_screen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,26 +139,6 @@ def _encode_jpeg(bgr: np.ndarray) -> bytes:
     return bytes(buf)
 
 
-# Smoothing that follows motion (the One-Euro idea): hold still and the Smooth
-# setting applies in full, hiding tracker jitter; move and it lets go, so the
-# head is not dragged ~50 ms behind. Measured as how far the new reading sits
-# from the smoothed face, in face sizes (median over points, so a blink or the
-# mouth alone does not count as moving).
-_MOTION_STILL = 0.006
-_MOTION_FAST = 0.04
-
-
-def motion_alpha(
-    base: float, posed: np.ndarray, smoothed: np.ndarray, face_scale: float
-) -> float:
-    """Blend toward the new reading: ``base`` when still, 1 when moving fast."""
-    gap = np.hypot(posed[:, 0] - smoothed[:, 0], posed[:, 1] - smoothed[:, 1])
-    move = float(np.median(gap)) / max(float(face_scale), 1.0)
-    t = (move - _MOTION_STILL) / (_MOTION_FAST - _MOTION_STILL)
-    t = min(max(t, 0.0), 1.0)
-    return float(base) + (1.0 - float(base)) * t
-
-
 # Iris 28 sits in eye 11-13, iris 29 in eye 17-19 (corners only: a blink
 # moves the lid, not the eye).
 _PUPIL_CORNERS = {28: (11, 13), 29: (17, 19)}
@@ -184,12 +166,11 @@ class FaceBench:
         self._expr = FaceExpr()
         self._lids = LidFilter()
         self._live_pts: np.ndarray | None = None
-        self._smooth_pts: np.ndarray | None = None
-        self._snap_smooth = False
+        # The eased expression (mouth, brows) in the still's frame, before
+        # the rig. The head's own ease lives in the rig (FaceRig / ease.py).
+        self._smooth_mesh: np.ndarray | None = None
         self._finishing = False
         self._live_pose: tuple[str, object, np.ndarray | None, np.ndarray | None] | None = None
-        self._smooth_hair: list[dict[str, object]] = []
-        self._smooth_skeleton: list[dict[str, object]] = []
         self._iris: list[dict[str, object]] = []
         # Eased pupil offsets from their eye's corner midpoint, by iris id.
         self._iris_ease: dict[int, tuple[float, float]] = {}
@@ -818,11 +799,28 @@ class FaceBench:
             feel.update(lab_feel_caps(box))
             # Held head pose: re-clip now, so the slider moves the overlay
             # without waiting for the next camera sample to ease in.
-            self._snap_smooth = True
             self._replay_live_pose()
         self.last_error = ""
         # Dispatch always publishes the ack. Skip a second storm on no-op.
         return self.status(publish=changed)
+
+    def fit_travel(self, body: object) -> dict[str, object]:
+        """Fit the limiters to the loaded still: room from its framing, turn
+        and tilt centred on the pose it is drawn in (see travel_fit).
+
+        body.from = "default" starts from the built-in limits (a character
+        that has none yet); otherwise look, eyes and size stay as they are.
+        """
+        self._ensure_source()
+        rest = self._rest_overlay()
+        if rest is None or self.source_bgr is None:
+            self.last_error = "Load a character still before fitting the limiters"
+            return self.status(publish=True)
+        opts = body if isinstance(body, dict) else {}
+        base = default_travel_box() if opts.get("from") == "default" else travel.payload()
+        h, w = self.source_bgr.shape[:2]
+        box = fit_travel_box(rest, w, h, base=base, image_bgr=self.source_bgr)
+        return self.set_travel(box)
 
     def _replay_live_pose(self) -> None:
         snap = self._live_pose
@@ -836,11 +834,11 @@ class FaceBench:
             return
         head = frame.head
         pose = frame.pose
+        # ``mixed`` is the eased expression as stored; the head lands on the
+        # re-clipped pose at once.
+        posed = self._rig.apply(mixed, rest, head, pose, snap=True)
         if kind == "osf":
-            posed = self._rig.apply(mixed, rest, head, pose)
             posed = self._expr.place_brows(posed, rest, self._rig)
-        else:
-            posed = self._rig.apply(mixed, rest, head, pose)
         self._finish_live(frame, posed)
 
     def set_mouth_point(self, body: object) -> dict[str, object]:
@@ -991,7 +989,6 @@ class FaceBench:
         with self._lock:
             self._hair = cleaned
             self._hair_rig = rig
-            self._smooth_hair = []
         self._save_parts()
         self.last_error = ""
         return self.status(publish=True)
@@ -1090,9 +1087,7 @@ class FaceBench:
         with self._lock:
             self._live_pose = None
             self._live_pts = None
-            self._smooth_pts = None
-            self._smooth_hair = []
-            self._smooth_skeleton = []
+            self._smooth_mesh = None
             self._iris_cam = []
             self._look = None
             self._restore_iris_rest()
@@ -1157,12 +1152,14 @@ class FaceBench:
             mixed = book.mix(frame.weights)
         selfie = self.selfie
         # Lids close after smoothing and the rig (_finish_live_body), not here.
-        driven = drive_ifm(
-            self.rest_pts,
-            frame.weights,
-            None,
-            to_screen(getattr(frame, "brow", None), selfie),
-            mixed=mixed,
+        driven = self._ease_mesh(
+            drive_ifm(
+                self.rest_pts,
+                frame.weights,
+                None,
+                to_screen(getattr(frame, "brow", None), selfie),
+                mixed=mixed,
+            )
         )
         self._live_pose = ("ifm", frame, None if driven is None else driven.copy(), self.rest_pts)
         posed = self._rig.apply(driven, self.rest_pts, frame.head, frame.pose)
@@ -1174,22 +1171,39 @@ class FaceBench:
         if viseme_pts is None and self.rest_pts is not None:
             viseme_pts = self.rest_pts.copy()
         # Lids close after smoothing and the rig (_finish_live_body), not here.
-        mixed = self._expr.apply(
-            viseme_pts,
-            self.rest_pts,
-            frame.pts_3d,
-            None,
-            mouth_pts=frame.mouth_2d,
-            keep_mouth=use_visemes,
+        mixed = self._ease_mesh(
+            self._expr.apply(
+                viseme_pts,
+                self.rest_pts,
+                frame.pts_3d,
+                None,
+                mouth_pts=frame.mouth_2d,
+                keep_mouth=use_visemes,
+            )
         )
         self._live_pose = ("osf", frame, None if mixed is None else mixed.copy(), self.rest_pts)
         posed = self._rig.apply(mixed, self.rest_pts, frame.head, frame.pose)
         posed = self._expr.place_brows(posed, self.rest_pts, self._rig)
         return posed
 
+    def _ease_mesh(self, mesh: np.ndarray | None) -> np.ndarray | None:
+        """Ease the expression (mouth, brows) in the still's frame, per frame.
+
+        The head's turn, slide and size are eased once, in the rig, by
+        Smooth. Easing the drawn points again after it dragged every move a
+        second time. This stays the light per-frame ease, so a strong Smooth
+        does not blur lip sync.
+        """
+        if mesh is None:
+            return None
+        if self._smooth_mesh is None or self._smooth_mesh.shape != mesh.shape:
+            self._smooth_mesh = mesh.copy()
+        else:
+            self._smooth_mesh += feel.alpha() * (mesh - self._smooth_mesh)
+        return self._smooth_mesh.copy()
+
     def _finish_live(self, frame: OsfFrame, posed: np.ndarray | None) -> None:
         if self._finishing:
-            self._snap_smooth = True
             return
         self._finishing = True
         try:
@@ -1198,21 +1212,10 @@ class FaceBench:
             self._finishing = False
 
     def _finish_live_body(self, frame: OsfFrame, posed: np.ndarray | None) -> None:
-        snap = self._snap_smooth
-        self._snap_smooth = False
-        alpha = 1.0 if snap else feel.alpha()
-        if posed is not None:
-            if self._smooth_pts is None or self._smooth_pts.shape != posed.shape:
-                self._smooth_pts = posed.copy()
-            else:
-                if not snap:
-                    alpha = motion_alpha(alpha, posed, self._smooth_pts, self._face_scale())
-                self._smooth_pts += alpha * (posed - self._smooth_pts)
-            posed = self._smooth_pts.copy()
         selfie = self.selfie
-        # Screen-side lid amounts. Laid on after smoothing so a blink is not
-        # dragged by Smooth, and kept out of _smooth_pts so the next frame
-        # eases the face, not the lid.
+        # Screen-side lid amounts. Laid on after smoothing and the rig so a
+        # blink is not dragged by Smooth, and kept out of the eased mesh so
+        # the next frame eases the face, not the lid.
         blink_screen = self._lids.update(to_screen(frame.blink, selfie))
         posed = shut_lids(posed, blink_screen)
         look = getattr(frame, "look", None)
@@ -1255,14 +1258,13 @@ class FaceBench:
                 self._mouth_box = self._expr.mouth_box()
                 self._mouth_cage = self._expr.mouth_cage()
             if posed is not None:
+                # Hair and the skeleton follow the rig's eased turn and place,
+                # so they ease with the head and need no ease of their own.
                 followed = follow_hair(self._hair_rig, posed, self._rig)
                 if followed:
-                    self._hair = self._smooth_records(
-                        self._smooth_hair, followed, alpha, polygons=True
-                    )
-                    self._smooth_hair = [dict(part) for part in self._hair]
+                    self._hair = followed
                 if self._skeleton_rest:
-                    skeleton = follow_skeleton(
+                    self._skeleton = follow_skeleton(
                         self._skeleton_rest,
                         posed,
                         head={
@@ -1273,10 +1275,6 @@ class FaceBench:
                         place=self._rig.place(),
                         rig=self._rig,
                     )
-                    self._skeleton = self._smooth_records(
-                        self._smooth_skeleton, skeleton, alpha
-                    )
-                    self._smooth_skeleton = [dict(joint) for joint in self._skeleton]
             if iris_rows:
                 self._iris = self._ease_pupils(iris_rows, posed, feel.gaze_alpha())
                 self._iris_method = iris_method
@@ -1351,14 +1349,6 @@ class FaceBench:
                 )
         self._publish(frame=True)
 
-    def _face_scale(self) -> float:
-        """Face size in character pixels (what motion is measured against)."""
-        if self._rig.locked:
-            return max(float(self._rig._rest_ms), 1.0)
-        if self.rest_pts is not None:
-            return max(float(_mesh_scale(self.rest_pts)), 1.0)
-        return 100.0
-
     def _ease_pupils(
         self,
         rows: list[dict[str, object]],
@@ -1397,46 +1387,6 @@ class FaceBench:
             record["y"] = cy + dy
             out.append(record)
         self._iris_ease = ease
-        return out
-
-    @staticmethod
-    def _smooth_records(
-        previous: list[dict[str, object]],
-        current: list[dict[str, object]],
-        alpha: float,
-        *,
-        polygons: bool = False,
-    ) -> list[dict[str, object]]:
-        """Apply the global Smooth value to every rendered overlay point."""
-        if not previous or len(previous) != len(current):
-            return [dict(item) for item in current]
-        out: list[dict[str, object]] = []
-        for old, new in zip(previous, current):
-            record = dict(new)
-            if polygons:
-                old_poly = old.get("polygon")
-                new_poly = new.get("polygon")
-                if (
-                    isinstance(old_poly, list)
-                    and isinstance(new_poly, list)
-                    and len(old_poly) == len(new_poly)
-                    and old.get("class") == new.get("class")
-                ):
-                    record["polygon"] = [
-                        [
-                            float(a[0]) + alpha * (float(b[0]) - float(a[0])),
-                            float(a[1]) + alpha * (float(b[1]) - float(a[1])),
-                        ]
-                        for a, b in zip(old_poly, new_poly)
-                    ]
-            else:
-                record["x"] = float(old["x"]) + alpha * (
-                    float(new["x"]) - float(old["x"])
-                )
-                record["y"] = float(old["y"]) + alpha * (
-                    float(new["y"]) - float(old["y"])
-                )
-            out.append(record)
         return out
 
     def _unoffset_xy(self, idx: int) -> tuple[float, float] | None:

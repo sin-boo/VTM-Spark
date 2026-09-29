@@ -75,7 +75,7 @@ DEFAULT_TRAVEL_BOX: dict[str, Any] = {
     "tilt_left": 22.0,
     "tilt_right": 12.0,
     "pitch_up": 14.0,
-    "pitch_down": 3.0,
+    "pitch_down": 12.0,
     "eye": 0.56,
     "size": 0.0,
 }

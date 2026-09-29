@@ -1,21 +1,25 @@
 """Drive the full 28-point mesh from OSF head pose.
 
 The tracked face writes one place for the whole character: slide, size,
-and turn. The chin rides with that place. Hair uses the same transform; the
-skeleton shares the slide and size, and only its neck rides the turn, so the
-body does not stay behind a moving face nor turn with a look.
+and turn. The chin rides with that place and hair uses the same transform.
+The head's slide is the body's walk plus its swing round the neck; the
+skeleton takes the walk and size only, so a turn or nod moves the head and
+leaves the torso where it is.
 
-The face and the skeleton turn as a flat drawing. A bowl would cave the
-jaw and fold distant bones into the head; a long lens keeps the authored
-spacing while a nod or turn still foreshortens.
+The face turns as a flat drawing lifted by a little depth per point. A
+bowl would cave the jaw and fold distant bones into the head; a long lens
+keeps the authored spacing while a nod or turn still foreshortens, and the
+depth carries the nose and mouth into the turn or nod.
 """
 
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
+from .ease import HeadEase
 from .feel import feel
 from .travel_box import SIZE_MAX, soft_barrier
 from .visemes import rest_stamp, session_rest_locked
@@ -97,9 +101,38 @@ def head_angles(rot: np.ndarray) -> tuple[float, float, float]:
 # Where the eyes sit from the neck's pivot, in face widths (the jaw span the
 # rig scales by). A webcam watches the eyes swing round that pivot on every
 # turn, nod and tilt, and the head slides with them; the iPhone only sends
-# angles, so its head is swung here (pose["sway"]).
+# angles. Both sources swing the drawn head here, by the turn as drawn, so a
+# turn / nod / tilt stop also stops the swing the same way on either.
 NECK_FORWARD = 0.55
 NECK_UP = 0.5
+# What the webcam's eyes still move once the head's swing is taken out is
+# the body walking or leaning. The torso ignores this much of it (face
+# widths), so a neck that swings a little unlike NECK_FORWARD does not drag
+# the shoulders on a nod.
+_WALK_DEADBAND = 0.08
+# How far each face point sits in front of the eye line (+) or behind it,
+# in head radii. A flat card only squashed: a nod read as the face sliding
+# down and a turn as it slimming, with the nose and mouth still centred
+# between the cheeks. With depth a look-down drops the nose toward the mouth
+# and raises the cheeks, and a turn carries the nose and mouth toward it
+# while the near cheek widens and the far one closes in.
+FACE_DEPTH = np.array(
+    [
+        -0.24, -0.14, 0.02, -0.14, -0.24,  # outline: cheek, jaw, chin, jaw, cheek
+        0.02, 0.02, 0.02, 0.02, 0.02, 0.02,  # brows
+        -0.05, 0.0, 0.0,  # eye: outer corner, lid, inner corner
+        0.06, 0.10, 0.06,  # nose
+        0.0, 0.0, -0.05,  # eye: inner corner, lid, outer corner
+        0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04,  # mouth
+    ],
+    dtype=np.float64,
+)
+# Each outline point and the feature it stays outside of: cheek past the
+# eye's outer corner, jaw past the mouth corner. Depth swings the far cheek
+# in on a turn; past the eye it drew the eye outside the face. The gap may
+# close to this share of the drawn one.
+_SILHOUETTE = ((0, 11), (1, 23), (4, 19), (3, 26))
+_SILHOUETTE_KEEP = 0.3
 
 
 def neck_offset(yaw_r: float, pitch_r: float, roll_r: float) -> tuple[float, float]:
@@ -108,12 +141,21 @@ def neck_offset(yaw_r: float, pitch_r: float, roll_r: float) -> tuple[float, flo
     round a neck behind them, a nod down or up round it, a tilt sideways
     round a pivot below them.
 
+    The pivot is below the eyes for a nod too, so a look-down drops them a
+    little further than a look-up raises them. Without that, a webcam's
+    look-down past the stop read the extra drop as the body walking down,
+    and its look-up sank back.
+
     Each motion keeps to its own axis. As one rigid rotation, the small
     tilt a real turn carries rolled the swung-out eyes up or down, and a
     plain turn read as the head rising (measured on a real phone).
     """
     x = NECK_FORWARD * math.sin(yaw_r) + NECK_UP * math.sin(roll_r)
-    y = NECK_FORWARD * math.sin(pitch_r) + NECK_UP * (1.0 - math.cos(roll_r))
+    y = (
+        NECK_FORWARD * math.sin(pitch_r)
+        + NECK_UP * (1.0 - math.cos(pitch_r))
+        + NECK_UP * (1.0 - math.cos(roll_r))
+    )
     return x, y
 
 
@@ -236,10 +278,19 @@ def plane_xy(
     focal: float | None = None,
     persp_min: float | None = None,
     persp_max: float | None = None,
+    depth: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Yaw/pitch a flat card. Overlay polygons stay shapes; they do not fold."""
+    """Yaw/pitch a flat card. Overlay polygons stay shapes; they do not fold.
+
+    ``depth`` (pixels toward the camera, per point) lifts points off the
+    card: one in front goes further on a turn or a nod. The rest pose and
+    the lens are the flat card's.
+    """
     xs = np.asarray(xs, dtype=np.float64) * scale
     ys = np.asarray(ys, dtype=np.float64) * scale
+    ds = np.zeros_like(xs)
+    if depth is not None:
+        ds = np.broadcast_to(np.asarray(depth, dtype=np.float64), xs.shape)
     radius = max(float(radius), 1.0)
     yaw_r = float(yaw_r)
     # Same look-up sign as _posed_sphere.
@@ -250,17 +301,17 @@ def plane_xy(
     cr, sr = math.cos(roll_r), math.sin(roll_r)
     z = radius
 
-    def _card(px: np.ndarray, py: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x2 = px * cy + z * sy
-        z2 = -px * sy + z * cy
+    def _card(px: np.ndarray, py: np.ndarray, pd: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x2 = px * cy + (z + pd) * sy
+        z2 = -px * sy + (z + pd) * cy
         y2 = py * cp - z2 * sp
-        z3 = py * sp + z2 * cp
+        z3 = py * sp + z2 * cp - pd
         xr = x2 * cr - y2 * sr
         yr = x2 * sr + y2 * cr
         return xr, yr, z3
 
-    xr, yr, zr = _card(xs, ys)
-    ox, oy, oz = _card(np.zeros(1), np.zeros(1))
+    xr, yr, zr = _card(xs, ys, ds)
+    ox, oy, oz = _card(np.zeros(1), np.zeros(1), np.zeros(1))
     z_rel = (zr - z) - (float(oz[0]) - z)
     focal_len = (_FOCAL if focal is None else float(focal)) * radius
     lo = _PERSP_MIN if persp_min is None else float(persp_min)
@@ -277,6 +328,7 @@ def face_xy(
     roll_r: float,
     radius: float,
     scale: float = 1.0,
+    depth: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Turn the drawn face. Feature spacing stays put; the jaw does not cave."""
     return plane_xy(
@@ -290,13 +342,74 @@ def face_xy(
         focal=_FACE_FOCAL,
         persp_min=_FACE_PERSP_MIN,
         persp_max=_FACE_PERSP_MAX,
+        depth=depth,
     )
+
+
+def face_depth(count: int, radius: float) -> np.ndarray:
+    """FACE_DEPTH for ``count`` face rows, in pixels at this radius."""
+    out = np.zeros(int(count), dtype=np.float64)
+    n = min(int(count), len(FACE_DEPTH))
+    out[:n] = FACE_DEPTH[:n] * float(radius)
+    return out
+
+
+def keep_silhouette(
+    x2: np.ndarray,
+    y2: np.ndarray,
+    flat: np.ndarray,
+    roll_r: float,
+    scale: float = 1.0,
+) -> None:
+    """Hold each cheek / jaw point outside its eye / mouth corner, in place.
+
+    ``x2`` / ``y2`` are the turned face rows, ``flat`` the same rows before
+    the turn ((n, 3): x, y, score). The gap is read along the tilted face's
+    across axis; it closes freely down to twice the floor, then eases onto
+    the floor and never crosses it.
+    """
+    ux, uy = math.cos(roll_r), math.sin(roll_r)
+    n = min(len(x2), len(flat))
+    for edge, inner in _SILHOUETTE:
+        if max(edge, inner) >= n or min(float(flat[edge, 2]), float(flat[inner, 2])) < 0.05:
+            continue
+        drawn = (float(flat[edge, 0]) - float(flat[inner, 0])) * scale
+        if abs(drawn) < 1e-6:
+            continue
+        side = 1.0 if drawn > 0.0 else -1.0
+        floor = _SILHOUETTE_KEEP * abs(drawn)
+        gap = side * ((x2[edge] - x2[inner]) * ux + (y2[edge] - y2[inner]) * uy)
+        if gap >= 2.0 * floor:
+            continue
+        held = floor * (1.0 + math.exp((gap - 2.0 * floor) / floor))
+        x2[edge] += side * (held - gap) * ux
+        y2[edge] += side * (held - gap) * uy
 
 
 def _turn_stop(deg: float, frac: tuple[float, float]) -> float:
     """Stop a turn or tilt at its (left, right) fractions; right is positive."""
     left, right = frac
     return soft_barrier(deg, -_MAX_TURN * left, _MAX_TURN * right, 0.0, give=_TURN_GIVE)
+
+
+def _nod_stop(deg: float) -> float:
+    """Stop a nod at Look up / Look down, eased like a turn; + looks down."""
+    return soft_barrier(
+        deg,
+        -_MAX_LOOK_UP * feel.max_pitch_up(),
+        _MAX_LOOK_DOWN * feel.max_pitch_down(),
+        0.0,
+        give=_TURN_GIVE,
+    )
+
+
+def _dead(x: float, y: float, band: float) -> tuple[float, float]:
+    """Zero inside the band, then carries on from its edge (no jump)."""
+    size = math.hypot(x, y)
+    if size <= band:
+        return 0.0, 0.0
+    keep = (size - band) / size
+    return x * keep, y * keep
 
 
 def project_head(
@@ -314,14 +427,7 @@ def project_head(
     yaw = math.radians(
         _turn_stop(yaw_deg, feel.max_yaw())
     )
-    pitch_deg = float(head.get("pitch", 0.0))
-    pitch = math.radians(
-        _clip(
-            pitch_deg,
-            -_MAX_LOOK_UP * feel.max_pitch_up(),
-            _MAX_LOOK_DOWN * feel.max_pitch_down(),
-        )
-    )
+    pitch = math.radians(_nod_stop(float(head.get("pitch", 0.0))))
     roll = math.radians(
         _turn_stop(roll_deg, feel.max_roll())
     )
@@ -378,8 +484,13 @@ class FaceRig:
         self._roll = 0.0
         self._rest_rot = np.eye(3)
         self._live: dict[str, float] | None = None
+        # Head slide = walk + the head's swing round the neck; the torso
+        # only walks (_bdx / _bdy), so a turn or nod never moves it.
         self._dx = 0.0
         self._dy = 0.0
+        self._walk = (0.0, 0.0)
+        self._bdx = 0.0
+        self._bdy = 0.0
         self._s = 1.0
         self._yaw_r = 0.0
         self._pitch_r = 0.0
@@ -394,6 +505,7 @@ class FaceRig:
         self._provisional = False
         # Solved roll minus the eye-line tilt on the last clean solve.
         self._eye_roll_gap = 0.0
+        self._ease = HeadEase()
 
     def _lock(self, rest: np.ndarray, head: dict[str, float], pose: dict[str, float]) -> None:
         self._rest_cx, self._rest_cy = mesh_center(rest)
@@ -418,6 +530,9 @@ class FaceRig:
             "yaw": self._yaw,
             "roll": self._roll,
         }
+        self._walk = (0.0, 0.0)
+        # A new zero lands at once, not eased in from the old one.
+        self._ease.reset()
         self.locked = True
         self._token = rest_stamp()
 
@@ -475,7 +590,14 @@ class FaceRig:
             seal_scale = med
         self._seal_size(seal_tz, seal_scale)
 
-    def _sync(self, rest: np.ndarray, head: dict[str, float], pose: dict[str, float]) -> bool:
+    def _sync(
+        self,
+        rest: np.ndarray,
+        head: dict[str, float],
+        pose: dict[str, float],
+        *,
+        snap: bool = False,
+    ) -> bool:
         if not pose.get("ok"):
             return False
         stamp = rest_stamp()
@@ -540,8 +662,7 @@ class FaceRig:
             "pnp_pitch": float(head.get("pitch", 0.0)),
             "pnp_roll": float(head.get("roll", 0.0)),
         }
-        # One ease only: the drawn points use Feel.smoothing. Blending the
-        # pose here too made the head trail a second time, so tracking felt late.
+        # The raw reading. Smooth eases the drawn head once, at the end.
         self._live = nxt
         live = self._live
         side = -1.0 if self.selfie else 1.0
@@ -558,29 +679,41 @@ class FaceRig:
             _turn_stop(yaw_delta, feel.max_yaw())
         )
         # Positive pitch is look-down. Up / down has no side, so no flip.
-        self._pitch_r = math.radians(
-            _clip(
-                pitch_delta,
-                -_MAX_LOOK_UP * feel.max_pitch_up(),
-                _MAX_LOOK_DOWN * feel.max_pitch_down(),
-            )
-        )
+        self._pitch_r = math.radians(_nod_stop(pitch_delta))
         self._roll_r = math.radians(
             _turn_stop(roll_delta, feel.max_roll())
         )
+        ms = self._rest_ms
         cam_s = max(self._cam_scale, 1.0)
-        img_s = self._rest_ms / cam_s
-        dx = side * (live["bx"] - self._cam_bx) * img_s
-        dy = (live["by"] - self._cam_by) * img_s
-        sway = float(pose.get("sway", 0.0) or 0.0)
-        if sway:
-            # No camera watches this head move (iPhone): swing it round the
-            # neck by the turn as drawn, so it slides as far as it turns.
-            nx, ny = neck_offset(self._yaw_r, self._pitch_r, self._roll_r)
-            dx += sway * nx * self._rest_ms
-            dy += sway * ny * self._rest_ms
-        self._dx = _clip(dx, -self._rest_ms * 2.2, self._rest_ms * 2.2)
-        self._dy = _clip(dy, -self._rest_ms * 1.6, self._rest_ms * 1.6)
+        # The head swings round the neck by the turn as drawn, so it slides
+        # as far as it turns: past a turn / nod / tilt stop the slide stops
+        # too, the same on either source. The torso never swings with it.
+        nx, ny = neck_offset(self._yaw_r, self._pitch_r, self._roll_r)
+        if "sway" in pose:
+            # iPhone: angles only; nothing sees the head or the body move.
+            sway = float(pose.get("sway") or 0.0)
+            swing = (sway * nx * ms, sway * ny * ms)
+            walk = (0.0, 0.0)
+        else:
+            # Webcam: the eyes move by the head's real swing plus any walk or
+            # lean. Take the real turn's swing out and what is left walks.
+            img_s = ms / cam_s
+            seen_x = side * (live["bx"] - self._cam_bx) * img_s
+            seen_y = (live["by"] - self._cam_by) * img_s
+            real_x, real_y = neck_offset(
+                math.radians(yaw_delta), math.radians(pitch_delta), math.radians(roll_delta)
+            )
+            if head_ok or self._provisional:
+                self._walk = (seen_x - real_x * ms, seen_y - real_y * ms)
+            # A bad solve holds the last turn, so its swing cannot be taken
+            # out of the eyes: the last walk holds with it.
+            swing = (nx * ms, ny * ms)
+            walk = self._walk
+        self._dx = _clip(walk[0] + swing[0], -ms * 2.2, ms * 2.2)
+        self._dy = _clip(walk[1] + swing[1], -ms * 1.6, ms * 1.6)
+        torso_x, torso_y = _dead(walk[0], walk[1], _WALK_DEADBAND * ms)
+        self._bdx = _clip(torso_x, -ms * 2.2, ms * 2.2)
+        self._bdy = _clip(torso_y, -ms * 1.6, ms * 1.6)
         # Size from solved distance. It is the same whether you face the
         # camera or turn, so a look never reads as a zoom. Box width is the
         # fallback when PnP is missing. Until the distance holds still, stay
@@ -595,13 +728,42 @@ class FaceRig:
             # Size limiter: stepping back must not shrink the face off the art.
             room = SIZE_MAX * feel.max_size()
             self._s = _clip(soft_barrier(raw_s, 1.0 - room, 1.0 + room, 1.0), 0.62, 1.70)
+        # Smooth: the one ease of the drawn head, for every source (ease.py).
+        # Turn, nod, tilt, slide and size share one weight so they land
+        # together, and past a stop the head settles into it softly. Hair and
+        # the skeleton read this turn and place, so they ease with it; the
+        # mouth and brows are eased apart (FaceBench) so lip sync stays quick.
+        unit = 1.0 / max(ms, 1.0)
+        eased = self._ease.step(
+            (self._yaw_r, self._pitch_r, self._roll_r, self._dx, self._dy, self._bdx, self._bdy, self._s),
+            (1.0, 1.0, 1.0, unit, unit, 0.0, 0.0, 1.0),
+            feel.smooth(),
+            time.perf_counter(),
+            snap=snap,
+        )
+        (
+            self._yaw_r,
+            self._pitch_r,
+            self._roll_r,
+            self._dx,
+            self._dy,
+            self._bdx,
+            self._bdy,
+            self._s,
+        ) = (float(value) for value in eased)
         return True
 
     def place(self) -> dict[str, float]:
-        """Face-owned location and size for child overlays (skeleton, hair)."""
+        """Face-owned location and size for child overlays (skeleton, hair).
+
+        dx / dy move the head (walk plus its swing round the neck);
+        body_dx / body_dy move the torso (walk only).
+        """
         return {
             "dx": float(self._dx),
             "dy": float(self._dy),
+            "body_dx": float(self._bdx),
+            "body_dy": float(self._bdy),
             "scale": float(self._s),
             "cx": float(self._rest_cx),
             "cy": float(self._rest_cy),
@@ -636,7 +798,11 @@ class FaceRig:
         xs: np.ndarray,
         ys: np.ndarray,
         max_turn: float | None = None,
+        *,
+        face_rows: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """``face_rows``: xs / ys are the 28 face points in order, so the turn
+        and nod get their depth (FACE_DEPTH)."""
         radius = max(self._rest_ms * 1.05 * self._s, 1.0)
         yaw = self._yaw_r
         pitch = self._pitch_r
@@ -644,7 +810,8 @@ class FaceRig:
             cap = math.radians(float(max_turn))
             yaw = _clip(yaw, -cap, cap)
             pitch = _clip(pitch, -cap, cap)
-        return face_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
+        depth = face_depth(len(xs), radius) if face_rows else None
+        return face_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s, depth=depth)
 
     def _plane(
         self,
@@ -660,20 +827,6 @@ class FaceRig:
             yaw = _clip(yaw, -cap, cap)
             pitch = _clip(pitch, -cap, cap)
         return plane_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
-
-    def map_local(
-        self,
-        xs: np.ndarray,
-        ys: np.ndarray,
-        max_turn: float | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Rest-centered coords into posed image space (same card turn as the face)."""
-        x2, y2 = self._project(
-            np.asarray(xs, dtype=np.float64),
-            np.asarray(ys, dtype=np.float64),
-            max_turn=max_turn,
-        )
-        return self._rest_cx + self._dx + x2, self._rest_cy + self._dy + y2
 
     def map_plane(
         self,
@@ -705,16 +858,22 @@ class FaceRig:
         rest: np.ndarray | None,
         head: dict[str, float],
         pose: dict[str, float],
+        *,
+        snap: bool = False,
     ) -> np.ndarray | None:
+        """``snap``: land on this pose without easing (a held pose re-drawn
+        after a limiter change)."""
         if mixed is None or rest is None:
             return mixed
-        if not self._sync(rest, head, pose) and not self.locked:
+        if not self._sync(rest, head, pose, snap=snap) and not self.locked:
             return mixed
         src = mixed
         out = src.copy()
         xs = src[:, 0] - self._rest_cx
         ys = src[:, 1] - self._rest_cy
-        x2, y2 = self._project(xs, ys)
+        x2, y2 = self._project(xs, ys, face_rows=True)
+        if src.shape[1] > 2:
+            keep_silhouette(x2, y2, src, self._roll_r, self._s)
         out[:, 0] = self._rest_cx + self._dx + x2
         out[:, 1] = self._rest_cy + self._dy + y2
         return out

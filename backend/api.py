@@ -787,6 +787,15 @@ def tracking_recenter() -> dict[str, Any]:
     return get_runtime().status()
 
 
+@app.post("/api/limiters/fit")
+def fit_limiters() -> dict[str, Any]:
+    """Fit the limiters to the loaded character's still (Track Lab does the fit)."""
+    try:
+        return get_runtime().fit_character_limiters()
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/lab/status")
 def lab_status() -> dict[str, Any]:
     packet = lab_harness.status()

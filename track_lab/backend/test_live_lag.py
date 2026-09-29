@@ -139,21 +139,109 @@ def test_ifm_processes_latest_packet_not_backlog(monkeypatch) -> None:
             pass
 
 
-def test_smoothing_holds_still_and_lets_go_on_a_move() -> None:
-    """A fixed Smooth dragged every head move ~50 ms; still jitter needs it."""
+def _settle_s(smooth: float, fps: float, move: float = 0.5, turn_s: float = 0.0) -> float:
+    """Seconds for the head ease to cover 90 % of a turn (radians) the head
+    makes in ``turn_s`` seconds (0 = at once)."""
+    from backend.ease import HeadEase
+
+    ease = HeadEase()
+    ease.step((0.0,), (1.0,), smooth, 0.0)
+    for i in range(1, int(fps * 5)):
+        now = i / fps
+        target = move * min(now / turn_s, 1.0) if turn_s > 0.0 else move
+        if float(ease.step((target,), (1.0,), smooth, now)[0]) >= 0.9 * move:
+            return now
+    return 5.0
+
+
+def test_stronger_smooth_eases_a_move_longer() -> None:
+    """The old blend let go on any move: Smooth only touched a still head."""
+    light = _settle_s(0.25, 30.0)
+    mid = _settle_s(0.5, 30.0)
+    strong = _settle_s(1.0, 30.0)
+    assert light < mid < strong
+    assert strong > 0.3
+    # Smooth 0 is the raw head.
+    assert _settle_s(0.0, 30.0) <= 1.0 / 30.0
+
+
+def test_head_ease_is_timed_in_seconds_not_frames() -> None:
+    """One Smooth feels the same on a 12 fps webcam and a 60 fps iPhone."""
+    for smooth in (0.5, 1.0):
+        # A brisk turn, 0.3 s end to end; 12 fps lands only every 83 ms.
+        slow = _settle_s(smooth, 12.0, turn_s=0.3)
+        fast = _settle_s(smooth, 60.0, turn_s=0.3)
+        assert abs(slow - fast) <= 1.0 / 12.0 + 0.2 * max(slow, fast)
+
+
+def test_head_ease_holds_jitter_and_keeps_easing_a_move() -> None:
     import numpy as np
 
-    from backend.face import motion_alpha
+    from backend.ease import HeadEase
 
-    base = 0.4
-    face = np.random.default_rng(0).normal(0, 40, (28, 2))
-    # Jitter well under 1 % of the face: full smoothing.
-    assert motion_alpha(base, face + 0.5, face, 200.0) == base
-    # A real move (5 % of the face this frame): follow at once.
-    assert motion_alpha(base, face + 10.0, face, 200.0) == 1.0
-    mid = motion_alpha(base, face + 3.0, face, 200.0)
-    assert base < mid < 1.0
-    # One point jumping (a blink, the mouth) is not the head moving.
-    blink = face.copy()
-    blink[3] += 30.0
-    assert motion_alpha(base, blink, face, 200.0) == base
+    rng = np.random.default_rng(0)
+    ease = HeadEase()
+    out = [float(ease.step((v,), (1.0,), 0.5, i / 30.0)[0]) for i, v in enumerate(rng.normal(0, 0.004, 90))]
+    # Tracker jitter held still: well under half of it gets through.
+    assert np.std(np.diff(out[30:])) < 0.5 * 0.004 * np.sqrt(2.0)
+    # A steady 12 fps turn: every frame trails the reading (still easing,
+    # not snapped to it), then settles on it once the head stops.
+    ease = HeadEase()
+    ease.step((0.0,), (1.0,), 0.5, 0.0)
+    for i in range(1, 7):
+        target = 0.08 * i
+        assert float(ease.step((target,), (1.0,), 0.5, i / 12.0)[0]) < target - 0.005
+    for i in range(7, 40):
+        got = float(ease.step((0.48,), (1.0,), 0.5, i / 12.0)[0])
+    assert abs(got - 0.48) < 0.005
+
+
+def test_rig_eases_the_turn_but_not_the_mouth(monkeypatch) -> None:
+    """Smooth eases the head in the rig; the mesh it is handed (mouth,
+    brows) goes through at once, so a strong Smooth does not blur lip sync."""
+    import math
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from backend import rig as rig_mod
+    from backend.feel import feel
+    from backend.rig import FaceRig
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rig_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"]))
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0, 0], rest[4, 0] = 0.0, 100.0
+    rest[15] = [50.0, 40.0, 1.0]
+    rest[21] = [50.0, 70.0, 1.0]
+    rest[25] = [50.0, 72.0, 1.0]
+    pose = {"cx": 200.0, "cy": 200.0, "bx": 200.0, "by": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
+    still = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    turned = {"pitch": 0.0, "yaw": 20.0, "roll": 0.0}
+
+    def yaw_after(smooth: float, frames: int) -> float:
+        feel.update({"smoothing": smooth, "max_yaw": 1.0})
+        rig = FaceRig()
+        clock["t"] = 0.0
+        rig.apply(rest, rest, still, pose)
+        for i in range(1, frames + 1):
+            clock["t"] = i / 30.0
+            rig.apply(rest, rest, turned, pose)
+        return math.degrees(rig.turn()["yaw"])
+
+    assert abs(yaw_after(0.0, 1) - 20.0) < 0.01
+    assert yaw_after(1.0, 1) < 0.25 * 20.0
+    assert yaw_after(0.5, 6) > yaw_after(1.0, 6)
+    assert abs(yaw_after(1.0, 90) - 20.0) < 0.5
+
+    feel.update({"smoothing": 1.0})
+    rig = FaceRig()
+    clock["t"] = 0.0
+    rig.apply(rest, rest, still, pose)
+    opened = rest.copy()
+    opened[25, 1] = 84.0
+    clock["t"] = 1.0 / 30.0
+    out = rig.apply(opened, rest, still, pose)
+    assert out is not None
+    assert abs(float(out[25, 1] - out[21, 1]) - 14.0) < 0.01

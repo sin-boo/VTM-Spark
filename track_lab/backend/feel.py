@@ -110,7 +110,12 @@ class Feel:
             return float(self.values.get(key, DEFAULTS[key]))
 
     def alpha(self) -> float:
+        """Per-frame ease of the expression (mouth, brows, viseme weights)."""
         return 0.72 - 0.56 * self._get("smoothing")
+
+    def smooth(self) -> float:
+        """Smooth 0-1 for the head's ease (ease.py). 0 is the raw head."""
+        return self._get("smoothing")
 
     def response(self) -> float:
         return 0.75 + 0.60 * self._get("response")

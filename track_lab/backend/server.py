@@ -201,6 +201,11 @@ async def set_travel(request: Request) -> dict:
     return await asyncio.to_thread(_command, "set_travel", body if isinstance(body, dict) else {})
 
 
+@app.post("/api/travel/fit")
+async def fit_travel() -> dict:
+    return await asyncio.to_thread(_command, "fit_travel", {})
+
+
 @app.post("/api/mirror")
 async def set_mirror(request: Request) -> dict:
     body = await request.json()

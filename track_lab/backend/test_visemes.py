@@ -328,7 +328,11 @@ def test_head_rig_yaws_in_place() -> None:
                 origin,
             )
         assert turned is not None
-        assert abs(float(turned[15, 0]) - float(rest[15, 0])) < 1.5
+        # A turn is not a walk: the eyes stay; the nose, in front of them,
+        # goes a little way into the turn.
+        eyes = 0.5 * (float(turned[11, 0]) + float(turned[18, 0]))
+        assert abs(eyes - 0.5 * (float(rest[11, 0]) + float(rest[18, 0]))) < 2.0
+        assert 2.0 < float(turned[15, 0]) - float(rest[15, 0]) < 0.12 * 100.0
         assert abs(float(turned[15, 1]) - float(rest[15, 1])) < 1.5
         d_left = float(turned[0, 0]) - float(rest[0, 0])
         d_right = float(turned[4, 0]) - float(rest[4, 0])
@@ -494,7 +498,9 @@ def test_head_rig_yaw_keeps_both_eyes() -> None:
     rest[18] = [70.0, 28.0, 1.0]
     rest[19] = [74.0, 38.0, 1.0]
     turned = _drive_head(rest, {"pitch": 0.0, "yaw": 35.0, "roll": 0.0})
-    assert abs(float(turned[15, 0]) - 50.0) < 1.5
+    # The eyes stay where they were; the nose goes into the turn.
+    assert abs(float(np.mean(turned[[11, 13, 17, 19], 0])) - 50.0) < 2.0
+    assert float(turned[15, 0]) > 52.0
     rest_left = abs(float(rest[12, 1] - rest[11, 1]))
     rest_right = abs(float(rest[18, 1] - rest[17, 1]))
     near = abs(float(turned[12, 1] - turned[11, 1]))
@@ -529,7 +535,8 @@ def test_ceiling_look_stops_at_the_look_up_cap() -> None:
         for _ in range(8):
             held = rig.apply(rest, rest, {"pitch": -70.0, "yaw": 0.0, "roll": 0.0}, origin)
         assert held is not None
-        assert abs(abs(math.degrees(rig._pitch_r)) - 12.0) < 0.05
+        # The stop eases in like a turn's and holds within its 10% give.
+        assert 12.0 <= abs(math.degrees(rig._pitch_r)) <= 12.0 * 1.1 + 1e-6
         assert float(held[2, 1]) > float(held[15, 1])
     finally:
         feel.update(prev)
@@ -547,17 +554,85 @@ def test_head_rig_look_keeps_the_jaw() -> None:
     rest_brow = abs(float(rest[15, 1] - rest[5, 1]))
     chin_down = abs(float(down[2, 1] - down[15, 1]))
     brow_down = abs(float(down[15, 1] - down[5, 1]))
-    # A nod foreshortens. It must not cave the chin into the mouth.
+    # A nod foreshortens, and the nose (in front) drops toward the chin on a
+    # look-down and rises toward the brows on a look-up, as a face's does.
+    # Near the stop that is a quarter of the span; it must not cave further.
     assert chin_down < rest_chin
-    assert chin_down > 0.75 * rest_chin
-    assert brow_down > 0.75 * rest_brow
+    assert chin_down > 0.7 * rest_chin
+    assert brow_down > 0.7 * rest_brow
     assert float(down[5, 1]) < float(down[15, 1]) < float(down[2, 1])
     up = _drive_head(rest, {"pitch": -28.0, "yaw": 0.0, "roll": 0.0})
     chin_up = abs(float(up[2, 1] - up[15, 1]))
     brow_up = abs(float(up[15, 1] - up[5, 1]))
-    assert 0.75 * rest_chin < chin_up < 1.15 * rest_chin
-    assert 0.75 * rest_brow < brow_up < 1.15 * rest_brow
+    assert 0.7 * rest_chin < chin_up < 1.15 * rest_chin
+    assert 0.7 * rest_brow < brow_up < 1.15 * rest_brow
     assert float(up[5, 1]) < float(up[15, 1]) < float(up[2, 1])
+
+
+def test_look_down_tips_the_face_not_just_slides_it() -> None:
+    """A flat card nodded by squashing about the nose, which read as the whole
+    face sliding down. The nose drops toward the mouth and the cheeks rise."""
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0] = [0.0, 40.0, 1.0]
+    rest[4] = [100.0, 40.0, 1.0]
+    rest[2] = [50.0, 90.0, 1.0]
+    for i, x in ((11, 20.0), (13, 38.0), (17, 62.0), (19, 80.0)):
+        rest[i] = [x, 36.0, 1.0]
+    rest[15] = [50.0, 56.0, 1.0]
+    rest[21] = [50.0, 70.0, 1.0]
+    still = _drive_head(rest, {"pitch": 0.0, "yaw": 0.0, "roll": 0.0})
+    np.testing.assert_allclose(still[:, :2], rest[:, :2], atol=1e-4)
+
+    def gaps(out: np.ndarray) -> tuple[float, float, float]:
+        eyes = float(np.mean(out[[11, 13, 17, 19], 1]))
+        cheeks = float(np.mean(out[[0, 4], 1]))
+        return float(out[15, 1]) - eyes, float(out[21, 1] - out[15, 1]), cheeks - eyes
+
+    eye_nose, nose_mouth, cheek_eye = gaps(rest)
+    down = gaps(_drive_head(rest, {"pitch": 15.0, "yaw": 0.0, "roll": 0.0}))
+    up = gaps(_drive_head(rest, {"pitch": -15.0, "yaw": 0.0, "roll": 0.0}))
+    assert down[0] > eye_nose + 1.0 and down[1] < nose_mouth - 1.0
+    assert down[2] < cheek_eye - 3.0
+    assert up[0] < eye_nose - 1.0 and up[2] > cheek_eye + 3.0
+
+
+def test_turn_carries_the_nose_and_mouth_into_it() -> None:
+    """A flat card turned by slimming: the nose and mouth stayed centred
+    between the cheeks, so the face did not read as turned (the hair did)."""
+    from .feel import feel
+
+    rest = np.zeros((28, 3), dtype=np.float32)
+    rest[:, 2] = 1.0
+    rest[0] = [0.0, 40.0, 1.0]
+    rest[4] = [100.0, 40.0, 1.0]
+    rest[2] = [50.0, 90.0, 1.0]
+    for i, x in ((11, 7.0), (13, 38.0), (17, 62.0), (19, 93.0)):
+        rest[i] = [x, 36.0, 1.0]
+    rest[15] = [50.0, 56.0, 1.0]
+    rest[21] = [50.0, 70.0, 1.0]
+    feel.update({"max_yaw": 1.0})
+
+    def centre_off(out: np.ndarray) -> tuple[float, float]:
+        mid = 0.5 * (float(out[0, 0]) + float(out[4, 0]))
+        return float(out[15, 0]) - mid, float(out[21, 0]) - mid
+
+    for selfie, sign in ((False, 1.0), (True, -1.0)):
+        turned = _drive_head(rest, {"pitch": 0.0, "yaw": 20.0, "roll": 0.0}, selfie=selfie)
+        nose, mouth = centre_off(turned)
+        # Into the turn, the nose further than the mouth, and the near
+        # cheek (the side it turns from) widens while the far one closes.
+        assert sign * nose > 8.0 and sign * mouth > 4.0 and sign * nose > sign * mouth
+        near, far = (turned[13, 0] - turned[0, 0], turned[4, 0] - turned[17, 0])
+        if sign < 0:
+            near, far = far, near
+        assert near > far + 8.0
+    # However far it turns, the far cheek stays outside the far eye.
+    for yaw in (30.0, 50.0, 70.0):
+        for sign in (1.0, -1.0):
+            out = _drive_head(rest, {"pitch": 0.0, "yaw": sign * yaw, "roll": 0.0})
+            assert out[4, 0] - out[19, 0] > 0.25 * 7.0
+            assert out[11, 0] - out[0, 0] > 0.25 * 7.0
 
 
 def test_stepping_back_stops_at_the_size_limiter() -> None:
@@ -1698,12 +1773,19 @@ def test_keep_mouth_camera_open_adds_lip_split() -> None:
     opened[57, 1] = 0.40
     opened[60, 1] = -0.20
     opened[64, 1] = 0.40
+    # OSF's 3D points are the same landmarks, pose-free; the open amount is
+    # read there (jaw span 2 here, so twice the face-local numbers).
+    osf_closed = osf.copy()
+    osf_open = osf.copy()
+    for row, points in ((osf_closed, closed), (osf_open, opened)):
+        for i in (51, 57, 58, 60, 62, 64):
+            row[i, :2] = 2.0 * points[i, :2] + np.array([0.0, 0.5], dtype=np.float32)
     expr = FaceExpr()
     prev = feel.payload()
     try:
         feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
-        expr.apply(rest, rest, osf, mouth_pts=closed, keep_mouth=True)
-        out = expr.apply(rest, rest, osf, mouth_pts=opened, keep_mouth=True)
+        expr.apply(rest, rest, osf_closed, mouth_pts=closed, keep_mouth=True)
+        out = expr.apply(rest, rest, osf_open, mouth_pts=opened, keep_mouth=True)
         assert out is not None
         assert float(out[25, 1]) > float(rest[25, 1]) + 3.0
         assert float(out[21, 1]) < float(rest[21, 1]) - 2.0
@@ -1938,47 +2020,103 @@ def test_head_rig_holds_when_camera_drops() -> None:
         feel.update(prev)
 
 
-def test_head_turn_moves_the_torso_with_the_face() -> None:
+def _webcam_pose(head: dict[str, float], lean: float = 0.0) -> dict[str, float]:
+    """A 100 px face in the camera whose eyes swing round the neck as the
+    head turns (the way a webcam sees them), plus a sideways lean in face
+    widths."""
+    import math
+
+    from .rig import neck_offset
+
+    nx, ny = neck_offset(
+        math.radians(head["yaw"]), math.radians(head["pitch"]), math.radians(head["roll"])
+    )
+    x = 200.0 + 100.0 * (nx + lean)
+    y = 200.0 + 100.0 * ny
+    return {"cx": x, "cy": y, "bx": x, "by": y, "scale": 100.0, "tilt": head["roll"], "ok": 1.0}
+
+
+def test_head_turn_and_nod_leave_the_torso_put() -> None:
+    """The torso rode the head's slide: every look-down pulled the shoulders
+    down and every turn slid them sideways, until the body wall held them.
+    The head swings round the neck; the body did not move."""
+    from .feel import feel
+    from .ifm import IfmPacket, pose_of
+    from .rig import FaceRig
+    from .skeleton import follow_skeleton, skeleton_from_face
+
+    rest, _osf = _toy_face()
+    body = skeleton_from_face(rest)
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    looks = (
+        {"pitch": 20.0, "yaw": 0.0, "roll": 0.0},
+        {"pitch": -15.0, "yaw": 30.0, "roll": 0.0},
+    )
+    feel.update({"smoothing": 0.0})
+    for source in ("webcam", "iphone"):
+        for look in looks:
+            rig = FaceRig()
+            if source == "webcam":
+                start, moved = _webcam_pose(head0), _webcam_pose(look)
+            else:
+                start = moved = pose_of(IfmPacket(), 1.0)
+            parked_face = rig.apply(rest, rest, head0, start)
+            parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+            turned_face = rig.apply(rest, rest, look, moved)
+            turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+            assert parked_face is not None and turned_face is not None
+            # The head swings.
+            assert float(np.hypot(*(turned_face[21, :2] - parked_face[21, :2]))) > 5.0
+            for idx, joint in parked.items():
+                assert abs(turned[idx]["x"] - joint["x"]) < 0.2, (source, look, idx)
+                assert abs(turned[idx]["y"] - joint["y"]) < 0.2, (source, look, idx)
+
+
+def test_webcam_lean_still_moves_the_torso() -> None:
+    """Only the swing is taken out of the webcam's eyes: leaning is a walk."""
     from .feel import feel
     from .rig import FaceRig
     from .skeleton import follow_skeleton, skeleton_from_face
 
     rest, _osf = _toy_face()
     body = skeleton_from_face(rest)
-    origin = {
-        "cx": 200.0,
-        "cy": 200.0,
-        "bx": 200.0,
-        "by": 200.0,
-        "scale": 100.0,
-        "tilt": 0.0,
-        "ok": 1.0,
-    }
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
-    prev = feel.payload()
-    feel.update({"smoothing": 0.0, "max_yaw": 1.0, "max_pitch_up": 1.0})
-    try:
-        rig = FaceRig()
-        rig.apply(rest, rest, head0, origin)
-        parked_face = rig.apply(rest, rest, head0, origin)
-        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-        turned_face = rest
-        for _ in range(12):
-            turned_face = rig.apply(
-                rest, rest, {"pitch": -24.0, "yaw": 35.0, "roll": 0.0}, origin
-            )
-        turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-    finally:
-        feel.update(prev)
-    assert parked_face is not None and turned_face is not None
-    chin_dx = float(turned_face[2, 0]) - float(parked_face[2, 0])
-    chin_dy = float(turned_face[2, 1]) - float(parked_face[2, 1])
-    assert abs(chin_dx) > 1.0 or abs(chin_dy) > 1.0
-    neck_dx = float(turned[31]["x"]) - float(parked[31]["x"])
-    neck_dy = float(turned[31]["y"]) - float(parked[31]["y"])
-    assert abs(neck_dx) > 1.0 or abs(neck_dy) > 1.0
-    assert abs(neck_dx - chin_dx) < 12.0
-    assert abs(neck_dy - chin_dy) < 12.0
+    feel.update({"smoothing": 0.0})
+    rig = FaceRig()
+    face0 = rig.apply(rest, rest, head0, _webcam_pose(head0))
+    neck0 = next(j for j in follow_skeleton(body, rest, rig=rig) if j["id"] == 31)
+    face1 = rig.apply(rest, rest, head0, _webcam_pose(head0, lean=0.5))
+    neck1 = next(j for j in follow_skeleton(body, rest, rig=rig) if j["id"] == 31)
+    assert face0 is not None and face1 is not None
+    face_w = float(rest[4, 0] - rest[0, 0])
+    assert abs(float(face1[15, 0] - face0[15, 0]) - 0.5 * face_w) < 0.5
+    # A little lean is the neck's; past that the torso goes along.
+    assert 0.3 * face_w < neck1["x"] - neck0["x"] < 0.5 * face_w
+
+
+def test_turn_stop_stops_the_slide_on_webcam_and_iphone_alike() -> None:
+    """The iPhone swung its head by the turn as drawn, so it stopped sliding
+    at the turn stop; the webcam's eyes kept going to the head wall."""
+    from .feel import feel
+    from .ifm import IfmPacket, pose_of
+    from .rig import FaceRig
+
+    rest, _osf = _toy_face()
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    feel.update({"smoothing": 0.0, "max_yaw": 20.0 / 80.0, "max_pitch_down": 10.0 / 32.0})
+    for look in ({"pitch": 0.0, "yaw": 45.0, "roll": 0.0}, {"pitch": 30.0, "yaw": 0.0, "roll": 0.0}):
+        places = []
+        for webcam in (True, False):
+            rig = FaceRig()
+            start = _webcam_pose(head0) if webcam else pose_of(IfmPacket(), 1.0)
+            moved = _webcam_pose(look) if webcam else pose_of(IfmPacket(), 1.0)
+            rig.apply(rest, rest, head0, start)
+            rig.apply(rest, rest, look, moved)
+            places.append((rig.place()["dx"], rig.place()["dy"]))
+        (cam_x, cam_y), (ifm_x, ifm_y) = places
+        assert abs(cam_x - ifm_x) < 1e-6 and abs(cam_y - ifm_y) < 1e-6
+    # And it is the stop's swing, not the full turn's.
+    assert abs(cam_y) < 0.55 * 0.25 * float(rest[4, 0] - rest[0, 0])
 
 
 def test_big_head_turn_does_not_turn_the_torso() -> None:
@@ -2145,25 +2283,6 @@ def test_skeleton_translates_with_the_head() -> None:
     )
     grow_sh = next(j for j in grown if j["id"] == 32)
     assert abs(float(grow_sh["x"]) - float(rest[15, 0])) > abs(float(park_sh["x"]) - float(rest[15, 0])) + 2.0
-
-
-def test_global_smoothing_blends_skeleton_and_hair_points() -> None:
-    from .face import FaceBench
-
-    skeleton = FaceBench._smooth_records(
-        [{"id": 31, "x": 0.0, "y": 10.0}],
-        [{"id": 31, "x": 10.0, "y": 30.0}],
-        0.25,
-    )
-    assert skeleton[0]["x"] == 2.5
-    assert skeleton[0]["y"] == 15.0
-    hair = FaceBench._smooth_records(
-        [{"class": "hair", "polygon": [[0.0, 0.0], [10.0, 10.0]]}],
-        [{"class": "hair", "polygon": [[8.0, 4.0], [14.0, 18.0]]}],
-        0.5,
-        polygons=True,
-    )
-    assert hair[0]["polygon"] == [[4.0, 2.0], [12.0, 14.0]]
 
 
 def test_hair_stays_planted_when_camera_slides() -> None:

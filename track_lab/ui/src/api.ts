@@ -325,6 +325,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(travel),
     }).then(read),
+  fitTravel: () => fetch('/api/travel/fit', { method: 'POST' }).then(read),
   setMirror: (on: boolean) =>
     fetch('/api/mirror', {
       method: 'POST',

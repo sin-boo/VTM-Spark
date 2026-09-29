@@ -165,16 +165,89 @@ def test_each_character_loads_its_own_limiters(tmp_path: Path, monkeypatch) -> N
     assert read_character_pack(tmp_path / "a.vtm").fit["travel_box"]["left"] == 0.2
 
 
-def test_old_pack_adopts_current_limiters(tmp_path: Path, monkeypatch) -> None:
+def _unfitted_runtime(tmp_path: Path, monkeypatch, ident: str = "new"):
     from backend.stream import StreamRuntime
 
     monkeypatch.setattr("backend.character_pack.characters_dir", lambda: tmp_path)
     monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **kwargs: None)
-    write_character_pack(tmp_path / "old.vtm", **_tiny_pack_payload())
-    rt = _limiter_runtime("old")
+    write_character_pack(tmp_path / f"{ident}.vtm", **_tiny_pack_payload())
+    rt = _limiter_runtime(ident)
+    # The last character's limits are still on the desk.
     rt._status["travel_box"] = {**default_travel_box(), "down": 0.4}
+    rt.status = lambda: dict(rt._status)
+    rt.lab_calls = []
     StreamRuntime._apply_character_limiters(rt)
-    assert read_character_pack(tmp_path / "old.vtm").fit["travel_box"]["down"] == 0.4
+    return rt
+
+
+def _lab_fits(rt, box: dict) -> None:
+    def ack(op: str, body: dict | None = None) -> dict:
+        rt.lab_calls.append((op, body))
+        return {"ok": True, "status": {"travel_box": box}}
+
+    rt._lab_ack = ack
+
+
+def test_new_character_gets_limiters_fitted_not_the_last_ones(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _unfitted_runtime(tmp_path, monkeypatch)
+    assert "travel_box" not in read_character_pack(tmp_path / "new.vtm").fit
+    fitted = {**default_travel_box(), "left": 0.33, "turn_left": 18.0, "turn_right": 18.0}
+    _lab_fits(rt, fitted)
+    StreamRuntime._fit_new_character_limiters(rt)
+    assert rt.lab_calls == [("fit_travel", {"from": "default"})]
+    assert rt._status["travel_box"]["left"] == 0.33
+    assert read_character_pack(tmp_path / "new.vtm").fit["travel_box"]["left"] == 0.33
+    # Saved now: the next load installs them and does not fit again.
+    rt.lab_calls.clear()
+    StreamRuntime._apply_character_limiters(rt)
+    StreamRuntime._fit_new_character_limiters(rt)
+    assert rt.lab_calls == []
+    assert rt._status["travel_box"]["turn_left"] == 18.0
+
+
+def test_limiter_fit_waits_while_track_lab_is_offline(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _unfitted_runtime(tmp_path, monkeypatch)
+
+    def offline(op: str, body: dict | None = None) -> dict:
+        raise RuntimeError("Track Lab is not running")
+
+    rt._lab_ack = offline
+    StreamRuntime._fit_new_character_limiters(rt)
+    assert rt._limiters_unfitted == "new"
+    assert "travel_box" not in read_character_pack(tmp_path / "new.vtm").fit
+    # Track Lab comes up (boot sync): the fit runs then.
+    _lab_fits(rt, {**default_travel_box(), "up": 0.7})
+    StreamRuntime._fit_new_character_limiters(rt)
+    assert read_character_pack(tmp_path / "new.vtm").fit["travel_box"]["up"] == 0.7
+
+
+def test_limiter_edit_before_the_fit_is_kept(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _unfitted_runtime(tmp_path, monkeypatch)
+    StreamRuntime._save_character_limiters(rt, {**default_travel_box(), "left": 0.9})
+    _lab_fits(rt, {**default_travel_box(), "left": 0.2})
+    StreamRuntime._fit_new_character_limiters(rt)
+    assert rt.lab_calls == []
+    assert read_character_pack(tmp_path / "new.vtm").fit["travel_box"]["left"] == 0.9
+
+
+def test_fit_button_keeps_look_and_saves_even_an_unchanged_box(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+    from backend.travel_box import normalize_travel_box
+
+    rt = _unfitted_runtime(tmp_path, monkeypatch)
+    same = normalize_travel_box(rt._status["travel_box"])
+    _lab_fits(rt, same)
+    StreamRuntime.fit_character_limiters(rt)
+    # No "from": Track Lab keeps the current look / eyes / size.
+    assert rt.lab_calls == [("fit_travel", {})]
+    assert read_character_pack(tmp_path / "new.vtm").fit["travel_box"] == same
+    assert rt._travel_from_desk is True
 
 
 def test_sidecar_folds_into_pack_once_and_is_deleted(tmp_path: Path) -> None:

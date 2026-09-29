@@ -32,7 +32,6 @@ from .pose_controller import (
     R_EYE,
     R_SHOULDER,
     RIGHT_IRIS,
-    face_center,
     face_height,
     normalized_to_pixels,
 )
@@ -73,7 +72,7 @@ DEFAULT_TRAVEL_BOX: dict[str, Any] = {
     "tilt_left": 22.0,
     "tilt_right": 12.0,
     "pitch_up": 14.0,
-    "pitch_down": 3.0,
+    "pitch_down": 12.0,
     "eye": 0.56,
     "size": 0.0,
 }
@@ -420,27 +419,46 @@ def changed_preview_axis(old: Any, new: Any) -> str | None:
     return hit[0]
 
 
-def _rotate_about(out: np.ndarray, slots: tuple[int, ...], origin: tuple[float, float], rad: float) -> None:
-    if abs(rad) < 1e-9:
-        return
-    cos_a = math.cos(rad)
-    sin_a = math.sin(rad)
-    ox, oy = origin
-    for i in slots:
-        if not _vis(out, i):
-            continue
-        x = float(out[i, 0]) - ox
-        y = float(out[i, 1]) - oy
-        out[i, 0] = ox + cos_a * x - sin_a * y
-        out[i, 1] = oy + sin_a * x + cos_a * y
-
-
 _ROOM_STEP = {
     "left": (-1.0, 0.0),
     "right": (1.0, 0.0),
     "up": (0.0, -1.0),
     "down": (0.0, 1.0),
 }
+
+# Track Lab's nod (rig.FACE_DEPTH, NECK_FORWARD): each face point's depth
+# in front of the eye line in head radii, and how far the eyes swing round
+# the neck in face widths. The preview draws the nod the rig will draw.
+_NOD_DEPTH = (
+    -0.24, -0.14, 0.02, -0.14, -0.24,
+    0.02, 0.02, 0.02, 0.02, 0.02, 0.02,
+    -0.05, 0.0, 0.0,
+    0.06, 0.10, 0.06,
+    0.0, 0.0, -0.05,
+    0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04,
+)
+_NECK_FORWARD = 0.55
+
+
+def _nod(out: np.ndarray, deg: float) -> None:
+    """Nod the face (+ looks down) round the neck; the torso stays."""
+    if abs(deg) < 1e-9 or not (_vis(out, 0) and _vis(out, 4) and _vis(out, 15)):
+        return
+    width = float(np.hypot(*(out[4, :2] - out[0, :2])))
+    if width < 1e-6:
+        return
+    rad = math.radians(float(deg))
+    cos_p = math.cos(rad)
+    sin_p = math.sin(rad)
+    origin_y = float(out[15, 1])
+    radius = 1.05 * width
+    drop = _NECK_FORWARD * sin_p * width
+    for i in FACE_BLEND_SLOTS:
+        if not _vis(out, i):
+            continue
+        depth = _NOD_DEPTH[i] if i < len(_NOD_DEPTH) else 0.0
+        rel = float(out[i, 1]) - origin_y
+        out[i, 1] = origin_y + rel * cos_p + depth * radius * sin_p + drop
 
 
 def preview_travel_pose(rest: np.ndarray, box: Any, axis: str) -> np.ndarray:
@@ -456,14 +474,8 @@ def preview_travel_pose(rest: np.ndarray, box: Any, axis: str) -> np.ndarray:
         amount = float(spec[axis]) * fh
         _shift_slots(out, range(NUM_KEYPOINTS), sx * amount, sy * amount)
     elif axis in ("pitch_up", "pitch_down"):
-        center = face_center(out)
         sign = -1.0 if axis == "pitch_up" else 1.0
-        _rotate_about(
-            out,
-            FACE_BLEND_SLOTS,
-            (float(center[0]), float(center[1])),
-            math.radians(sign * float(spec[axis])),
-        )
+        _nod(out, sign * float(spec[axis]))
     elif axis == "eye":
         for iris, (_x0, y0, x1, _y1) in _eye_ranges(out, float(spec["eye"])):
             if _vis(out, iris):

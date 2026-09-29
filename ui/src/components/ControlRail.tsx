@@ -54,6 +54,7 @@ type Props = {
   onSettings: (patch: Partial<AppStatus>) => void
   onToggleTracking: () => void
   onCalibrate: () => void
+  onFitLimiters: () => void
   onGenerate: () => void
   onToggleStream: () => void
   onTogglePause: () => void
@@ -910,6 +911,7 @@ export function ControlRail(props: Props) {
                 show={s?.show_limiters === true}
                 onShow={(show_limiters) => props.onSettings({ show_limiters })}
                 onChange={(travel_box) => props.onSettings({ travel_box })}
+                onFit={props.onFitLimiters}
               />
             </section>
             <section className="group">

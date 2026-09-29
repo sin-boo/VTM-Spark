@@ -39,6 +39,9 @@ class HarnessClient:
     def set_travel(self, **values: object) -> dict[str, Any]:
         return self.command("set_travel", dict(values))
 
+    def fit_travel(self, **body: object) -> dict[str, Any]:
+        return self.command("fit_travel", dict(body))
+
     def start(self, **opts: object) -> dict[str, Any]:
         return self.command("start", dict(opts))
 

@@ -81,6 +81,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.set_feel(body)
     if op == "set_travel":
         return bench.set_travel(body)
+    if op == "fit_travel":
+        return bench.fit_travel(body)
     if op == "calibrate":
         return bench.start_calibrate(str(body.get("id", "")))
     if op == "reset_calibrate":

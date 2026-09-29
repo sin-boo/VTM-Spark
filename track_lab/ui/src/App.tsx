@@ -1145,6 +1145,13 @@ export default function App() {
       .catch((e) => setError(String(e)))
   }
 
+  const fitTravel = () => {
+    void api
+      .fitTravel()
+      .then((next) => apply(next, false, false))
+      .catch((e) => setError(String(e)))
+  }
+
   const putMirror = (on: boolean) => {
     setStatus((s) => (s ? { ...s, mirror: on } : s))
     void api.setMirror(on).then((next) => apply(next, false, false)).catch((e) => setError(String(e)))
@@ -1604,6 +1611,7 @@ export default function App() {
         onCalibrate={(id) => void runCalibrate(id)}
         onFeel={putFeel}
         onTravel={putTravel}
+        onFitTravel={fitTravel}
         onTravelFocus={setTravelFocus}
         onMirror={putMirror}
         onResetPoints={() => {
