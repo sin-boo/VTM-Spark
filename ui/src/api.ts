@@ -340,6 +340,7 @@ export type LabFeel = {
   max_look_y: number
   gaze_gain: number
   gaze_smooth: number
+  head_sway: number
 }
 
 export type LabCalib = {
@@ -414,6 +415,7 @@ export const ZERO_LAB_FEEL: LabFeel = {
   max_look_y: 1,
   gaze_gain: 1,
   gaze_smooth: 0.28,
+  head_sway: 1,
 }
 
 export const ZERO_WEIGHTS: MixWeights = {

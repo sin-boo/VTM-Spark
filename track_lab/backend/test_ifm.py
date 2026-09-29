@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .ifm import IfmPacket, apply_shapes, parse_packet, rest_landmarks
@@ -92,15 +94,54 @@ def test_apply_shapes_does_not_slide_lids_with_gaze() -> None:
     assert np.allclose(live[36:48], rest_pts[36:48], atol=1e-5)
 
 
-def test_head_of_flips_ifm_look_up_to_osf() -> None:
+def test_head_of_reads_ifm_pitch_as_look_down() -> None:
+    """A real nod down drew as a look up. iFacialMocap +pitch is look-down
+    like the rig's; roll flips with it (the pair is one mirror)."""
+    import pytest
+
     from .ifm import head_of
 
-    packet = parse_packet("jawOpen-0|=head#20.0,8.0,3.0,0,0,0")
-    assert packet is not None
-    head = head_of(packet)
-    assert head["pitch"] == -20.0
-    assert head["yaw"] == 8.0
-    assert head["roll"] == 3.0
+    for raw, want in (("20,0,0", (20.0, 0.0, 0.0)), ("0,8,0", (0.0, 8.0, 0.0)), ("0,0,3", (0.0, 0.0, -3.0))):
+        packet = parse_packet(f"jawOpen-0|=head#{raw},0,0,0")
+        assert packet is not None
+        head = head_of(packet)
+        assert (head["pitch"], head["yaw"], head["roll"]) == pytest.approx(want, abs=1e-3)
+
+
+def _ifm_angles(rot: np.ndarray) -> str:
+    """iFacialMocap's head#pitch,yaw,roll for a rig-frame rotation (yaw outermost)."""
+    a = math.degrees(math.atan2(rot[0, 2], rot[2, 2]))
+    b = math.degrees(math.asin(-rot[1, 2]))
+    c = math.degrees(math.atan2(rot[1, 0], rot[1, 1]))
+    return f"{b:.6f},{-a:.6f},{-c:.6f}"
+
+
+def test_turn_from_an_off_level_rest_is_just_a_turn() -> None:
+    """Phone below the face: rest reads ~15 deg looking up and a little rolled.
+    Taken angle by angle, a plain turn then also nodded (up to ~12 deg on a
+    real phone) and rolled ~0.35 deg per degree of turn."""
+    import pytest
+
+    from .feel import feel
+    from .ifm import head_of, pose_of
+    from .rig import FaceRig, _rot_y, head_matrix_yaw_outer
+
+    rest_rot = head_matrix_yaw_outer(5.0, -15.0, 5.0)
+    rest = parse_packet(f"jawOpen-0|=head#{_ifm_angles(rest_rot)},0,0,0")
+    turned = parse_packet(f"jawOpen-0|=head#{_ifm_angles(rest_rot @ _rot_y(math.radians(-40.0)))},0,0,0")
+    assert rest is not None and turned is not None
+    prev = feel.payload()
+    feel.update({"max_yaw_left": 1.0, "max_yaw_right": 1.0, "max_pitch_up": 1.0, "max_pitch_down": 1.0, "max_roll_left": 1.0, "max_roll_right": 1.0})
+    try:
+        rig = FaceRig()
+        rig.apply(_anime_rest(), _anime_rest(), head_of(rest), pose_of(rest))
+        rig.apply(_anime_rest(), _anime_rest(), head_of(turned), pose_of(turned))
+        turn = rig.turn()
+    finally:
+        feel.update(prev)
+    assert math.degrees(turn["yaw"]) == pytest.approx(40.0, abs=0.5)
+    assert math.degrees(turn["pitch"]) == pytest.approx(0.0, abs=0.05)
+    assert math.degrees(turn["roll"]) == pytest.approx(0.0, abs=0.05)
 
 
 def test_iris_of_slides_inside_the_eye_box() -> None:
@@ -316,14 +357,17 @@ def test_keep_sender_ignores_other_ip_while_live() -> None:
     assert keep_sender("192.168.0.4", "192.168.0.9", live=False)
 
 
-def test_mix_head_holds_subdegree_noise() -> None:
-    from .ifm_cam import _mix_head
+def test_ifm_head_is_not_eased_before_the_bench() -> None:
+    """The bench's Smooth is the one ease. A second one here (plus a dead
+    band) left the iPhone head trailing the webcam path and moving in steps."""
+    from .ifm_cam import _unwrap_head
+
+    import pytest
 
     prev = {"pitch": 1.0, "yaw": 2.0, "roll": 0.0}
-    nxt = {"pitch": 1.2, "yaw": 2.1, "roll": 0.0}
-    mixed = _mix_head(prev, nxt, 1.0)
-    assert mixed["pitch"] == 1.0
-    assert mixed["yaw"] == 2.0
+    nxt = {"pitch": 1.2, "yaw": 12.1, "roll": -0.3}
+    assert _unwrap_head(prev, nxt) == pytest.approx(nxt)
+    assert _unwrap_head(None, nxt) == nxt
 
 
 def test_draw_ifm_numbers_labels_every_rest_point() -> None:
@@ -378,19 +422,21 @@ def _anime_rest() -> np.ndarray:
 def test_pose_of_tilt_equals_head_roll() -> None:
     from .ifm import pose_of
 
+    from .ifm import head_of
+
     packet = parse_packet("jawOpen-0|=head#4.0,-12.0,18.5,0,0,0")
     assert packet is not None
     pose = pose_of(packet)
-    assert pose["tilt"] == 18.5
+    assert pose["tilt"] == head_of(packet)["roll"]
     assert pose["tz"] == 0.0
 
 
 def test_ifm_head_unwraps_yaw_instead_of_flipping() -> None:
-    from .ifm_cam import _mix_head
+    from .ifm_cam import _unwrap_head
 
     prev = {"pitch": 0.0, "yaw": 170.0, "roll": 0.0}
     nxt = {"pitch": 0.0, "yaw": -170.0, "roll": 0.0}
-    mixed = _mix_head(prev, nxt, 1.0)
+    mixed = _unwrap_head(prev, nxt)
     assert mixed["yaw"] == 190.0
 
 
@@ -424,6 +470,59 @@ def test_facerig_rolls_when_ifm_tilt_changes() -> None:
         assert out is not None
         assert abs(float(out[11, 1]) - float(out[19, 1])) > 1.0
         assert abs(float(out[11, 1]) - float(rest[11, 1])) > 0.8
+    finally:
+        feel.update(prev)
+
+
+def test_neck_offset_keeps_each_motion_on_its_axis() -> None:
+    from .rig import NECK_FORWARD, NECK_UP, neck_offset
+
+    r = math.radians
+    assert neck_offset(0.0, 0.0, 0.0) == (0.0, 0.0)
+    # A turn swings the eyes sideways only; which way follows the turn.
+    x, y = neck_offset(r(20.0), 0.0, 0.0)
+    assert abs(x - NECK_FORWARD * math.sin(r(20.0))) < 1e-9 and y == 0.0
+    # A nod down drops them; up raises them.
+    assert neck_offset(0.0, r(15.0), 0.0)[1] > 0.1
+    assert neck_offset(0.0, r(-15.0), 0.0)[1] < -0.1
+    # A tilt swings them sideways round a pivot below, dipping a little.
+    x, y = neck_offset(0.0, 0.0, r(10.0))
+    assert abs(x - NECK_UP * math.sin(r(10.0))) < 1e-9 and 0.0 < y < 0.01
+    # A turn that carries a little tilt (real necks do) never rises.
+    for turn, tilt in ((30.0, -5.0), (-30.0, 5.0), (30.0, 5.0), (-30.0, -5.0)):
+        assert neck_offset(r(turn), 0.0, r(tilt))[1] >= 0.0
+
+
+def test_ifm_turn_slides_the_head_like_the_webcam() -> None:
+    """The webcam's eye midpoint swings round the neck on a turn, so the
+    character slides the way it turns. The iPhone used to only spin in place."""
+    from .feel import feel
+    from .ifm import head_of, pose_of
+    from .rig import FaceRig
+
+    rest = _anime_rest()
+    straight = parse_packet("jawOpen-0|=head#0,0,0,0,0,0")
+    turned = parse_packet("jawOpen-0|=head#0,20,0,0,0,0")
+    assert straight is not None and turned is not None
+    prev = feel.payload()
+    feel.update({"max_yaw_left": 1.0, "max_yaw_right": 1.0})
+    try:
+        for selfie in (False, True):
+            rig = FaceRig()
+            rig.selfie = selfie
+            rig.apply(rest, rest, head_of(straight), pose_of(straight, 1.0))
+            rig.apply(rest, rest, head_of(turned), pose_of(turned, 1.0))
+            dx = rig.place()["dx"]
+            face_w = float(rest[4, 0] - rest[0, 0])
+            assert abs(abs(dx) - 0.188 * face_w) < 0.01 * face_w
+            assert abs(rig.place()["dy"]) < 1e-6
+            # Same way the face turns, mirrored or not.
+            assert dx * rig.turn()["yaw"] > 0.0
+            still = FaceRig()
+            still.selfie = selfie
+            still.apply(rest, rest, head_of(straight), pose_of(straight, 0.0))
+            still.apply(rest, rest, head_of(turned), pose_of(turned, 0.0))
+            assert still.place()["dx"] == 0.0
     finally:
         feel.update(prev)
 
@@ -484,7 +583,8 @@ def test_ifm_look_up_nods_the_head_rig() -> None:
     rest[5] = [50.0, 12.0, 1.0]
     rest[15] = [50.0, 40.0, 1.0]
     rest[2] = [50.0, 78.0, 1.0]
-    packet = parse_packet("jawOpen-0|=head#28.0,0,0,0,0,0")
+    # iFacialMocap +pitch looks down, so a look up comes in negative.
+    packet = parse_packet("jawOpen-0|=head#-28.0,0,0,0,0,0")
     assert packet is not None
     head = head_of(packet)
     origin = {"cx": 200.0, "cy": 200.0, "scale": 100.0, "tilt": 0.0, "ok": 1.0}
@@ -496,9 +596,11 @@ def test_ifm_look_up_nods_the_head_rig() -> None:
         out = rest
         for _ in range(12):
             out = rig.apply(rest, rest, head, origin)
+        pitch = rig.turn()["pitch"]
     finally:
         feel.update(prev)
     assert out is not None
+    assert pitch < 0.0
     rest_chin = abs(float(rest[2, 1] - rest[15, 1]))
     chin = abs(float(out[2, 1] - out[15, 1]))
     # A look-up foreshortens the drawing. The chin stays a chin.

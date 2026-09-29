@@ -47,6 +47,18 @@ def lerp_stream_hair(
     return (1.0 - amount) * old + amount * cur
 
 
+def ema_blend(new: np.ndarray, held: np.ndarray, alpha: float) -> np.ndarray:
+    """``alpha * new + (1 - alpha) * held`` for two uint8 RGB frames.
+
+    cv2 does it in ~1 ms at 768². The float32 numpy version took ~17 ms, and
+    ran between two DiT calls.
+    """
+    cv2 = _cv2()
+
+    a = float(min(max(alpha, 0.0), 1.0))
+    return cv2.addWeighted(new, a, held, 1.0 - a, 0.0)
+
+
 def blend_images(prev: Image.Image, current: Image.Image, t: float) -> Image.Image:
     """Crossfade two RGB frames. ``t=1`` is the new picture."""
     amount = float(min(max(t, 0.0), 1.0))
@@ -74,8 +86,10 @@ def inbetween_slot_s(gen_fps: float, count: int) -> float:
 
 # Shown pictures, not generated ones. 20 fps is a frame every 50 ms.
 SHOW_FPS_MAX = 20.0
-# Let a short burst sit before the first picture so it does not all hit at once.
-PLAYOUT_DELAY_S = 0.25
+# Hold before a stream's first picture. Was 0.25 s to soak up start bursts,
+# but frames then arrive as fast as they are shown, so that head start never
+# drained: every picture sat a quarter second late for the whole stream.
+PLAYOUT_DELAY_S = 0.0
 # Quarter-second of 20 fps pictures. Newer keys replace anything older.
 PLAYOUT_QUEUE_MAX = 5
 
@@ -109,6 +123,11 @@ PACE_MARGIN = 0.95
 SLOT_SLACK = 0.9
 # A mid has to render in this share of its own slot or it would show late.
 RENDER_SHARE = 0.9
+# Longest a lone key may wait behind its mids. Mids sit between the last key
+# and this one, so they hold it back: spread over the whole gap, a 3 keys/s
+# card showed every pose ~0.3 s late on top of the DiT call. Past this the
+# tween runs at display rate and the key holds until the next one lands.
+TWEEN_MAX_S = 0.15
 
 
 def inbetween_pacing(
@@ -117,6 +136,7 @@ def inbetween_pacing(
     *,
     fps_max: float = SHOW_FPS_MAX,
     mid_cost_s: float = 0.0,
+    span_max: float | None = None,
 ) -> tuple[int, float]:
     """``(mids per key gap, seconds between shown pictures)`` at ``gen_fps`` keys/s.
 
@@ -124,6 +144,7 @@ def inbetween_pacing(
     every 50 ms and then waiting: at 6 keys/s one mid gives ~80 ms steps, not
     50 ms then 117 ms. Mids that would not fit under ``fps_max``, or that take
     too long to render, are dropped so the display never backs up and bursts.
+    ``span_max`` caps how long that share may be (see ``TWEEN_MAX_S``).
     Unknown rate (first key): keys only.
     """
     n = max(0, int(count))
@@ -132,6 +153,8 @@ def inbetween_pacing(
     if fps <= 0.0:
         return 0, slot
     span = PACE_MARGIN / fps
+    if span_max is not None:
+        span = min(span, max(float(span_max), slot))
     fit = int(span / (slot * SLOT_SLACK) + 1e-6) - 1
     n = max(0, min(n, fit))
     cost = max(0.0, float(mid_cost_s))

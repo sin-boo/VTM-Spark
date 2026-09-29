@@ -15,6 +15,7 @@ import numpy as np
 
 from .feel import feel
 from .presets import VOWEL_IDS, apply_open_offset, empty_weights, open_amount
+from .rig import head_angles, head_matrix_yaw_outer
 
 HANDSHAKE = "iFacialMocap_sahuasouryya9218sauhuiayeta91555dy3719|sendDataVersion=v2"
 DEFAULT_PORT = 49983
@@ -743,17 +744,33 @@ def iris_of(pts: np.ndarray, look: dict[str, float]) -> np.ndarray:
 
 
 def head_of(packet: IfmPacket) -> dict[str, float]:
-    """OSF-signed head. iFacialMocap +pitch is look-up; FaceRig +pitch is look-down."""
-    return {
-        "pitch": round(-float(packet.head.get("pitch", 0.0)), 3),
-        "yaw": round(float(packet.head.get("yaw", 0.0)), 3),
-        "roll": round(float(packet.head.get("roll", 0.0)), 3),
-    }
+    """Head in the rig's angles (the ones osf_cam._pnp_head reads a solve in).
+
+    iFacialMocap composes ARKit's angles yaw outermost (Ry Rx Rz, the Unity
+    order); the rig composes roll outermost. Read as they came, every turn
+    leaked into pitch and roll: on a real phone a 50 deg turn also looked
+    ~5 deg up and rolled ~17 deg.
+
+    Signs are Unity's: +pitch looks down, as in the rig. Read as look-up, a
+    real nod drew the other way. Pitch and roll only flip as a pair (a
+    mirror of the head frame): flipping pitch alone made a 50 deg turn on
+    the same recording also look ~19 deg down. Yaw carries over as sent.
+    """
+    rot = head_matrix_yaw_outer(
+        float(packet.head.get("yaw", 0.0)),
+        float(packet.head.get("pitch", 0.0)),
+        -float(packet.head.get("roll", 0.0)),
+    )
+    yaw, pitch, roll = head_angles(rot)
+    return {"pitch": round(pitch, 3), "yaw": round(yaw, 3), "roll": round(roll, 3)}
 
 
-def pose_of(packet: IfmPacket) -> dict[str, float]:
-    # Face-local input. Head translation stays off so a look is not a zoom.
-    # Tilt is ARKit roll so FaceRig does not shadow head.roll with 0.
+def pose_of(packet: IfmPacket, sway: float = 0.0) -> dict[str, float]:
+    # Face-local input: no box to measure, so scale is one face width and
+    # the solved distance stays off (a look is not a zoom). Nothing sees the
+    # head move either: ``sway`` asks FaceRig to swing it round the neck by
+    # the drawn turn (0 keeps it in place). cx stays 0: viseme rest reads it.
+    # Tilt is the head's roll so FaceRig does not shadow head.roll with 0.
     return {
         "cx": 0.0,
         "cy": 0.0,
@@ -761,7 +778,8 @@ def pose_of(packet: IfmPacket) -> dict[str, float]:
         "by": 0.0,
         "scale": 1.0,
         "tz": 0.0,
-        "tilt": float(packet.head.get("roll", 0.0)),
+        "tilt": float(head_of(packet)["roll"]),
+        "sway": float(sway),
         "ok": 1.0,
     }
 

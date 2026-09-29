@@ -8,7 +8,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from harness.protocol import LEFT_EYE_SLOTS, LEFT_IRIS, RIGHT_EYE_SLOTS, RIGHT_IRIS
+from harness.protocol import (
+    IRIS_HIDE_BLINK,
+    LEFT_EYE_SLOTS,
+    LEFT_IRIS,
+    RIGHT_EYE_SLOTS,
+    RIGHT_IRIS,
+)
 
 from .paths import REPO, TRACKERS
 from .travel_box import soft_barrier
@@ -33,7 +39,7 @@ CROP_PAD = 0.40
 CROP_PAD_Y = 0.70
 _IN_EYE_X = 0.18
 _IN_EYE_Y = 0.45
-BLINK_HIDE = 0.85
+BLINK_HIDE = IRIS_HIDE_BLINK
 _LOOK_SPAN = 0.38
 _IRIS_HALF_W = 0.40
 
@@ -1187,7 +1193,14 @@ def retarget(
         shut_r = float(blink.get("r") or 0.0)
         if _blink_mix(shut_l) is None and _blink_mix(shut_r) is None:
             return [], "none"
-    rows = from_eye_mid(char_pts, rest_iris=rest_iris, rest_pts=rest_pts)
+    # Closed eyes also lose the pupil detector, which lands here. A pupil on
+    # a shut lid tells the model the eye is open, so drop it like the rest.
+    shut = {slot for slot, _eyes, amount in _look_pairs(blink) if _blink_mix(amount) is None}
+    rows = [
+        row
+        for row in from_eye_mid(char_pts, rest_iris=rest_iris, rest_pts=rest_pts)
+        if int(row.get("id", -1)) not in shut
+    ]
     if rows:
         return rows, "eye_mid"
     return [], "none"

@@ -246,3 +246,37 @@ def test_rig_selfie_negates_yaw_roll_slide_not_pitch() -> None:
         assert abs(rig._pitch_r - pitch) < 1e-4 and abs(pitch) > 0.1
     finally:
         feel.update(prev)
+
+
+def test_one_frame_without_image_landmarks_does_not_relock_rest() -> None:
+    """A hand or mic over the nose drops the image landmarks for a frame.
+    That used to re-lock rest on it and again on the next good frame, so a
+    raised brow at that moment stayed baked in as the new neutral."""
+    from .feel import feel
+    from .retarget import FaceExpr
+
+    rest, osf = _toy_face()
+    camera = _camera_from_osf(osf)
+    live = osf.copy()
+    live[[17, 18, 19, 20, 21], 1] -= 0.25  # image-left brow up
+    live_cam = _camera_from_osf(live)
+    expr = FaceExpr()
+    prev = feel.payload()
+    feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
+    try:
+        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        raised = rest
+        for _ in range(8):
+            raised = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+        rest_rows = None if expr._rest is None else expr._rest.copy()
+        held = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=None)
+        assert held is not None and np.allclose(held, raised)
+        after = rest
+        for _ in range(8):
+            after = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+        assert expr._rest is not None and rest_rows is not None
+        assert np.allclose(expr._rest, rest_rows)
+    finally:
+        feel.update(prev)
+    # Still reads as a raised brow against the original neutral.
+    assert float(after[6, 1]) < float(rest[6, 1]) - 1.0

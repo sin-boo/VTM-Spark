@@ -3,7 +3,9 @@ from PIL import Image
 
 from backend.engine import neutral_keypoints
 from backend.frame_interp import (
+    TWEEN_MAX_S,
     blend_images,
+    ema_blend,
     inbetween_frames,
     inbetween_image,
     inbetween_pacing,
@@ -116,6 +118,30 @@ def test_inbetween_pacing_drops_mids_that_render_too_slow() -> None:
     assert inbetween_pacing(2.0, 3, mid_cost_s=0.06)[0] == 3
 
 
+def test_capped_tween_does_not_hold_a_slow_key_back() -> None:
+    """Mids sit before their key. Spread over a 3 keys/s gap they showed the
+    key ~0.3 s after it was drawn; capped, the tween runs at display rate."""
+    n, gap = inbetween_pacing(3.0, 3)
+    assert (n + 1) * gap > 0.3
+    n, gap = inbetween_pacing(3.0, 3, span_max=TWEEN_MAX_S)
+    assert n >= 1
+    assert (n + 1) * gap <= TWEEN_MAX_S + 1e-9
+    assert gap >= 0.045 - 1e-9
+    # Fast keys are under the cap already: nothing changes.
+    assert inbetween_pacing(10.0, 1, span_max=TWEEN_MAX_S) == inbetween_pacing(10.0, 1)
+    # Never tighter than one display slot.
+    assert inbetween_pacing(1.0, 0, span_max=0.001)[1] == 0.05
+
+
+def test_ema_blend_mixes_uint8_frames() -> None:
+    new = np.full((4, 4, 3), 200, dtype=np.uint8)
+    held = np.zeros((4, 4, 3), dtype=np.uint8)
+    out = ema_blend(new, held, 0.5)
+    assert out.dtype == np.uint8
+    assert int(out.mean()) == 100
+    assert np.array_equal(ema_blend(new, held, 1.0), new)
+
+
 def test_inbetween_maker_matches_frames() -> None:
     a = Image.new("RGB", (16, 16), (10, 10, 10))
     b = Image.new("RGB", (16, 16), (200, 200, 200))
@@ -137,12 +163,13 @@ def test_inbetween_frames_count() -> None:
     assert first < second
 
 
-def test_playout_holds_then_caps_at_20() -> None:
+def test_playout_starts_at_once_then_caps_at_20() -> None:
+    # No start hold: a quarter-second head start never drained (standing lag).
     wait, nxt = playout_gap(10.0, 0.0)
-    assert wait == 0.25
-    assert abs(nxt - 10.30) < 1e-9
+    assert wait == 0.0
+    assert abs(nxt - 10.05) < 1e-9
     # Ready just after the first picture: wait out the rest of the 50 ms slot.
-    wait, nxt = playout_gap(10.26, nxt)
+    wait, nxt = playout_gap(10.01, nxt)
     assert abs(wait - 0.04) < 1e-9
     # Late frame shows now. The one after it is a full slot later, not a burst.
     wait, nxt = playout_gap(11.0, 10.5)

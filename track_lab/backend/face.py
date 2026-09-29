@@ -38,6 +38,7 @@ from .ifm_cam import IfmCam
 from .iris import payload_to_hits, raw_debug, rest_look_from_cam
 from .iris import retarget as retarget_iris
 from .iris import track_still
+from .lids import LidFilter, shape_blink, shut_lids
 from .offsets import apply_points as offset_points
 from .offsets import apply_rows as offset_rows
 from .offsets import clear as clear_offsets
@@ -67,7 +68,7 @@ from .presets import (
 )
 from .record import MovementRecorder
 from .retarget import FaceExpr
-from .rig import FaceRig
+from .rig import FaceRig, _mesh_scale
 from .sides import ifm_canonical, ifm_look_canonical, selfie_of, to_screen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +137,31 @@ def _encode_jpeg(bgr: np.ndarray) -> bytes:
     return bytes(buf)
 
 
+# Smoothing that follows motion (the One-Euro idea): hold still and the Smooth
+# setting applies in full, hiding tracker jitter; move and it lets go, so the
+# head is not dragged ~50 ms behind. Measured as how far the new reading sits
+# from the smoothed face, in face sizes (median over points, so a blink or the
+# mouth alone does not count as moving).
+_MOTION_STILL = 0.006
+_MOTION_FAST = 0.04
+
+
+def motion_alpha(
+    base: float, posed: np.ndarray, smoothed: np.ndarray, face_scale: float
+) -> float:
+    """Blend toward the new reading: ``base`` when still, 1 when moving fast."""
+    gap = np.hypot(posed[:, 0] - smoothed[:, 0], posed[:, 1] - smoothed[:, 1])
+    move = float(np.median(gap)) / max(float(face_scale), 1.0)
+    t = (move - _MOTION_STILL) / (_MOTION_FAST - _MOTION_STILL)
+    t = min(max(t, 0.0), 1.0)
+    return float(base) + (1.0 - float(base)) * t
+
+
+# Iris 28 sits in eye 11-13, iris 29 in eye 17-19 (corners only: a blink
+# moves the lid, not the eye).
+_PUPIL_CORNERS = {28: (11, 13), 29: (17, 19)}
+
+
 @dataclass
 class FaceBench:
     source_bgr: np.ndarray | None = None
@@ -156,6 +182,7 @@ class FaceBench:
         self._mirror = False
         self._rig = FaceRig()
         self._expr = FaceExpr()
+        self._lids = LidFilter()
         self._live_pts: np.ndarray | None = None
         self._smooth_pts: np.ndarray | None = None
         self._snap_smooth = False
@@ -164,7 +191,8 @@ class FaceBench:
         self._smooth_hair: list[dict[str, object]] = []
         self._smooth_skeleton: list[dict[str, object]] = []
         self._iris: list[dict[str, object]] = []
-        self._smooth_iris: list[dict[str, object]] = []
+        # Eased pupil offsets from their eye's corner midpoint, by iris id.
+        self._iris_ease: dict[int, tuple[float, float]] = {}
         self._iris_method = "none"
         self._iris_rest: list[dict[str, object]] = []
         self._iris_rest_method = "none"
@@ -681,6 +709,7 @@ class FaceBench:
                 return self.status(publish=True)
             self._rig.reset()
             self._expr.reset()
+            self._lids.reset()
             try:
                 self._ifm.start(self._on_osf, host=self._ifm.host, port=self._ifm.port)
             except Exception as exc:
@@ -696,6 +725,7 @@ class FaceBench:
             return self.status(publish=True)
         self._rig.reset()
         self._expr.reset()
+        self._lids.reset()
         if camera is not None:
             self.set_camera(int(camera))
             if self.last_error:
@@ -796,7 +826,9 @@ class FaceBench:
 
     def _replay_live_pose(self) -> None:
         snap = self._live_pose
-        if snap is None or self._finishing:
+        # Stopped: the held frame is stale. Replaying it re-locked the reset
+        # rig on it and brought back its preview, meters and blink.
+        if snap is None or self._finishing or not (self._osf.running or self._ifm.running):
             return
         kind, frame, mixed, _stored_rest = snap
         rest = self.rest_pts
@@ -1054,7 +1086,9 @@ class FaceBench:
         self._save_ifm()
         self._rig.reset()
         self._expr.reset()
+        self._lids.reset()
         with self._lock:
+            self._live_pose = None
             self._live_pts = None
             self._smooth_pts = None
             self._smooth_hair = []
@@ -1065,6 +1099,8 @@ class FaceBench:
             self._mouth_box = None
             self._mouth_cage = None
             self._weights = empty_weights()
+            # A blink held at Stop would keep hiding the rest pose's irises.
+            self._blink = {"l": 0.0, "r": 0.0}
             self.camera_bgr = None
         pts = book.current()
         if pts is None:
@@ -1088,16 +1124,18 @@ class FaceBench:
                 self.last_ms = frame.ms
                 self._iris_cam = []
                 self._look = None
-                self._restore_iris_rest()
+                # The face holds its last pose on a lost frame; so do the
+                # pupils. Snapping them to the still's rest pixels put them
+                # outside a moved head's eyes.
                 if frame.error:
                     self.last_error = frame.error
             self._publish(frame=True)
             return
         if ifm:
             frame = self._canonical_ifm(frame)
-            posed = self._pose_ifm(frame)
-        else:
-            posed = self._pose_osf(frame)
+        # Meters, lids and iris all read the reshaped blink (0 open, 1 shut).
+        frame = replace(frame, blink=shape_blink(frame.blink, "ifm" if ifm else "osf"))
+        posed = self._pose_ifm(frame) if ifm else self._pose_osf(frame)
         self._finish_live(frame, posed)
 
     @staticmethod
@@ -1118,10 +1156,11 @@ class FaceBench:
         if feel.use_visemes():
             mixed = book.mix(frame.weights)
         selfie = self.selfie
+        # Lids close after smoothing and the rig (_finish_live_body), not here.
         driven = drive_ifm(
             self.rest_pts,
             frame.weights,
-            to_screen(frame.blink, selfie),
+            None,
             to_screen(getattr(frame, "brow", None), selfie),
             mixed=mixed,
         )
@@ -1134,11 +1173,12 @@ class FaceBench:
         viseme_pts = book.mix(frame.weights if use_visemes else None)
         if viseme_pts is None and self.rest_pts is not None:
             viseme_pts = self.rest_pts.copy()
+        # Lids close after smoothing and the rig (_finish_live_body), not here.
         mixed = self._expr.apply(
             viseme_pts,
             self.rest_pts,
             frame.pts_3d,
-            to_screen(frame.blink, self.selfie),
+            None,
             mouth_pts=frame.mouth_2d,
             keep_mouth=use_visemes,
         )
@@ -1165,8 +1205,16 @@ class FaceBench:
             if self._smooth_pts is None or self._smooth_pts.shape != posed.shape:
                 self._smooth_pts = posed.copy()
             else:
+                if not snap:
+                    alpha = motion_alpha(alpha, posed, self._smooth_pts, self._face_scale())
                 self._smooth_pts += alpha * (posed - self._smooth_pts)
             posed = self._smooth_pts.copy()
+        selfie = self.selfie
+        # Screen-side lid amounts. Laid on after smoothing so a blink is not
+        # dragged by Smooth, and kept out of _smooth_pts so the next frame
+        # eases the face, not the lid.
+        blink_screen = self._lids.update(to_screen(frame.blink, selfie))
+        posed = shut_lids(posed, blink_screen)
         look = getattr(frame, "look", None)
         if isinstance(look, dict) or (frame.lms_xy is not None and frame.iris_cam):
             with self._lock:
@@ -1184,8 +1232,6 @@ class FaceBench:
         rest_iris = [dict(row) for row in self._iris_rest]
         rest_look = dict(self._look_rest)
         rest_pts = None if self.rest_pts is None else self.rest_pts.copy()
-        selfie = self.selfie
-        blink_screen = to_screen(frame.blink, selfie)
         iris_rows, iris_method = retarget_iris(
             posed,
             cam_lms=frame.lms_xy if getattr(frame, "source", "") != "ifm" else None,
@@ -1232,14 +1278,11 @@ class FaceBench:
                     )
                     self._smooth_skeleton = [dict(joint) for joint in self._skeleton]
             if iris_rows:
-                self._iris = self._smooth_records(
-                    self._smooth_iris, iris_rows, feel.gaze_alpha()
-                )
-                self._smooth_iris = [dict(row) for row in self._iris]
+                self._iris = self._ease_pupils(iris_rows, posed, feel.gaze_alpha())
                 self._iris_method = iris_method
             else:
                 self._iris = []
-                self._smooth_iris = []
+                self._iris_ease = {}
                 self._iris_method = "none"
             # Clamp after pose / skeleton / hair / iris are built, before publish.
             posed, self._skeleton, self._iris, self._hair = self._apply_travel_limits(
@@ -1307,6 +1350,54 @@ class FaceBench:
                     h,
                 )
         self._publish(frame=True)
+
+    def _face_scale(self) -> float:
+        """Face size in character pixels (what motion is measured against)."""
+        if self._rig.locked:
+            return max(float(self._rig._rest_ms), 1.0)
+        if self.rest_pts is not None:
+            return max(float(_mesh_scale(self.rest_pts)), 1.0)
+        return 100.0
+
+    def _ease_pupils(
+        self,
+        rows: list[dict[str, object]],
+        posed: np.ndarray | None,
+        alpha: float,
+    ) -> list[dict[str, object]]:
+        """Ease each pupil inside its own eye, matched by iris id.
+
+        Easing absolute pixels left the pupils trailing a moving head (then
+        clamped at the eye edge), and pairing rows by list position blended
+        one eye's pupil into the other whenever only one was seen.
+        """
+        out: list[dict[str, object]] = []
+        ease: dict[int, tuple[float, float]] = {}
+        for row in rows:
+            try:
+                idx = int(row.get("id", -1))
+                x = float(row["x"])
+                y = float(row["y"])
+            except (KeyError, TypeError, ValueError):
+                out.append(dict(row))
+                continue
+            cx = cy = 0.0
+            corners = _PUPIL_CORNERS.get(idx)
+            if corners is not None and posed is not None and len(posed) > max(corners):
+                cx = 0.5 * (float(posed[corners[0], 0]) + float(posed[corners[1], 0]))
+                cy = 0.5 * (float(posed[corners[0], 1]) + float(posed[corners[1], 1]))
+            dx, dy = x - cx, y - cy
+            old = self._iris_ease.get(idx)
+            if old is not None:
+                dx = old[0] + alpha * (dx - old[0])
+                dy = old[1] + alpha * (dy - old[1])
+            ease[idx] = (dx, dy)
+            record = dict(row)
+            record["x"] = cx + dx
+            record["y"] = cy + dy
+            out.append(record)
+        self._iris_ease = ease
+        return out
 
     @staticmethod
     def _smooth_records(
@@ -1411,12 +1502,12 @@ class FaceBench:
             self._iris_rest = packed
             self._iris_rest_method = str(method)
             self._iris = [dict(row) for row in packed]
-            self._smooth_iris = [dict(row) for row in packed]
+            self._iris_ease = {}
             self._iris_method = str(method)
 
     def _restore_iris_rest(self) -> None:
         self._iris = [dict(row) for row in self._iris_rest]
-        self._smooth_iris = [dict(row) for row in self._iris_rest]
+        self._iris_ease = {}
         self._iris_method = str(self._iris_rest_method)
 
     def _apply_still_iris(self, frame: np.ndarray, pts: np.ndarray) -> None:

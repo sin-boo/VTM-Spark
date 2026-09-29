@@ -33,7 +33,9 @@ def test_stop_stream_queues_offload() -> None:
     assert "_maybe_offload_after_stop" in src
     worker = inspect.getsource(StreamRuntime._gen_worker_loop)
     assert "_maybe_offload_after_stop" in worker
-    assert "streaming and not self._streaming" in worker
+    # Skips a stopped stream's jobs, and calls queued before a Stop + Start.
+    assert "not self._streaming" in worker
+    assert "self._current_epoch(job)" in worker
 
 
 def test_maybe_offload_calls_engine() -> None:

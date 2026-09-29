@@ -14,7 +14,7 @@ export function MetricStrip({ fps, genFps = 0, gpuUtil, checkpoint }: Props) {
     <div className="metrics">
       <div className="metric">
         <span className="metric-label" title={t('metric.fpsTitle')}>
-          FPS
+          {t('metric.fps')}
         </span>
         <span className="metric-value mono">{fps > 0 ? fps.toFixed(1) : '—'}</span>
       </div>
@@ -27,7 +27,7 @@ export function MetricStrip({ fps, genFps = 0, gpuUtil, checkpoint }: Props) {
       {gpuUtil != null ? (
         <div className="metric">
           <span className="metric-label" title={t('metric.gpuTitle')}>
-            GPU
+            {t('metric.gpu')}
           </span>
           <span className="metric-value mono">{gpuUtil}%</span>
         </div>

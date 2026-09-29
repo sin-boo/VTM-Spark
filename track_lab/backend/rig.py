@@ -46,6 +46,77 @@ def _clip(value: float, lo: float, hi: float) -> float:
     return lo if value < lo else hi if value > hi else float(value)
 
 
+def _rot_x(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _rot_y(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def _rot_z(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def head_matrix(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """Head rotation for rig angles in degrees.
+
+    Image frame (x right, y down, z away from the camera), identity facing
+    it: H = Rz(roll) Rx(pitch) Ry(-yaw), the order osf_cam._pnp_head reads
+    a solve in. Yaw + faces image-right, pitch + looks down, roll + is
+    clockwise.
+    """
+    return (
+        _rot_z(math.radians(roll))
+        @ _rot_x(math.radians(pitch))
+        @ _rot_y(math.radians(-yaw))
+    )
+
+
+def head_matrix_yaw_outer(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """The same angles composed yaw outermost, Ry(-yaw) Rx(pitch) Rz(roll):
+    the Unity order iFacialMocap sends ARKit's head in."""
+    return (
+        _rot_y(math.radians(-yaw))
+        @ _rot_x(math.radians(pitch))
+        @ _rot_z(math.radians(roll))
+    )
+
+
+def head_angles(rot: np.ndarray) -> tuple[float, float, float]:
+    """(yaw, pitch, roll) in degrees: the inverse of ``head_matrix``."""
+    pitch = math.degrees(math.asin(_clip(float(rot[2, 1]), -1.0, 1.0)))
+    yaw = -math.degrees(math.atan2(-float(rot[2, 0]), float(rot[2, 2])))
+    roll = math.degrees(math.atan2(-float(rot[0, 1]), float(rot[1, 1])))
+    return yaw, pitch, roll
+
+
+# Where the eyes sit from the neck's pivot, in face widths (the jaw span the
+# rig scales by). A webcam watches the eyes swing round that pivot on every
+# turn, nod and tilt, and the head slides with them; the iPhone only sends
+# angles, so its head is swung here (pose["sway"]).
+NECK_FORWARD = 0.55
+NECK_UP = 0.5
+
+
+def neck_offset(yaw_r: float, pitch_r: float, roll_r: float) -> tuple[float, float]:
+    """Screen (x right, y down) move of the eyes, in face widths, for the
+    drawn turn (radians, relative to rest): a turn swings them sideways
+    round a neck behind them, a nod down or up round it, a tilt sideways
+    round a pivot below them.
+
+    Each motion keeps to its own axis. As one rigid rotation, the small
+    tilt a real turn carries rolled the swung-out eyes up or down, and a
+    plain turn read as the head rising (measured on a real phone).
+    """
+    x = NECK_FORWARD * math.sin(yaw_r) + NECK_UP * math.sin(roll_r)
+    y = NECK_FORWARD * math.sin(pitch_r) + NECK_UP * (1.0 - math.cos(roll_r))
+    return x, y
+
+
 def _posed_sphere(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -280,6 +351,9 @@ def _body_xy(pose: dict[str, float]) -> tuple[float, float]:
     return float(pose["cx"]), float(pose["cy"])
 
 
+# Frames of bad head solves before the rig locks on the eye line instead.
+_BAD_SOLVE_LOCK = 15
+
 class FaceRig:
     def __init__(self) -> None:
         # Selfie (Mirror OFF): the camera turn is reflected onto the still.
@@ -302,6 +376,7 @@ class FaceRig:
         self._pitch = 0.0
         self._yaw = 0.0
         self._roll = 0.0
+        self._rest_rot = np.eye(3)
         self._live: dict[str, float] | None = None
         self._dx = 0.0
         self._dy = 0.0
@@ -314,6 +389,11 @@ class FaceRig:
         self._size_ring: list[tuple[float, float]] = []
         self._size_pending: float | None = None
         self._size_confirm = 0
+        self._bad_solves = 0
+        # Locked on the eye line because no clean solve came: a stand-in.
+        self._provisional = False
+        # Solved roll minus the eye-line tilt on the last clean solve.
+        self._eye_roll_gap = 0.0
 
     def _lock(self, rest: np.ndarray, head: dict[str, float], pose: dict[str, float]) -> None:
         self._rest_cx, self._rest_cy = mesh_center(rest)
@@ -326,6 +406,7 @@ class FaceRig:
         self._pitch = float(head.get("pitch", 0.0))
         self._yaw = float(head.get("yaw", 0.0))
         self._roll = float(pose.get("tilt", head.get("roll", 0.0)))
+        self._rest_rot = head_matrix(self._yaw, self._pitch, self._roll)
         self._live = {
             "cx": self._cam_cx,
             "cy": self._cam_cy,
@@ -399,9 +480,27 @@ class FaceRig:
             return False
         stamp = rest_stamp()
         relock = False
+        # A flipped head solve must never become the zero: every later frame
+        # would read as a turn / tilt away from it.
+        head_ok = bool(pose.get("head_ok", 1.0))
         if not self.locked:
+            if not head_ok:
+                # Some cameras / faces never give a clean solve. After ~half a
+                # second, lock on the eye-line tilt with the head straight on
+                # rather than leaving the overlay frozen for good.
+                self._bad_solves += 1
+                if self._bad_solves < _BAD_SOLVE_LOCK:
+                    return False
+                head = {"pitch": 0.0, "yaw": 0.0, "roll": float(pose.get("tilt", 0.0))}
+            self._bad_solves = 0
             self._lock(rest, head, pose)
-        elif stamp != self._token and session_rest_locked():
+            self._provisional = not head_ok
+        elif self._provisional and head_ok:
+            # The first clean solve is the real zero. Kept on the stand-in, an
+            # off-level camera read as a nod pinned at the pitch stop.
+            self._lock(rest, head, pose)
+            self._provisional = False
+        elif stamp != self._token and session_rest_locked() and head_ok:
             snap = stamp[1] if isinstance(stamp, tuple) and len(stamp) > 1 else None
             if snap is not None:
                 self._lock(rest, head, pose)
@@ -410,8 +509,22 @@ class FaceRig:
         # holds still, so the opening solve cannot pin the overlay large.
         self._note_size(pose, force=relock)
         raw_p = float(head.get("pitch", 0.0))
+        raw_y = float(head.get("yaw", 0.0))
+        if not head_ok and self._live is not None:
+            # Bad solve this frame: keep the last good turn / nod.
+            raw_p = float(self._live["pitch"])
+            raw_y = float(self._live["yaw"])
         if abs(raw_p - self._pitch) > 70.0:
             raw_p = float(self._live["pitch"]) if self._live is not None else self._pitch
+        roll = float(pose.get("tilt", head.get("roll", 0.0)))
+        eyes = float(pose.get("tilt_eyes", roll))
+        if head_ok:
+            self._eye_roll_gap = ((roll - eyes) + 180.0) % 360.0 - 180.0
+        elif not self._provisional:
+            # A bad frame's tilt is the bare eye line, which sits off the
+            # solved roll on a turn (~10 deg at a 30 deg turn, camera off
+            # level). Keep the last clean gap so the tilt does not twitch.
+            roll = eyes + self._eye_roll_gap
         body_x, body_y = _body_xy(pose)
         nxt = {
             "cx": float(pose["cx"]),
@@ -421,8 +534,8 @@ class FaceRig:
             "scale": max(float(pose["scale"]), 1.0),
             "tz": max(float(pose.get("tz", 0.0) or 0.0), 0.0),
             "pitch": raw_p,
-            "yaw": float(head.get("yaw", 0.0)),
-            "roll": float(pose.get("tilt", head.get("roll", 0.0))),
+            "yaw": raw_y,
+            "roll": roll,
             "tilt_eyes": float(pose.get("tilt_eyes", 0.0)),
             "pnp_pitch": float(head.get("pitch", 0.0)),
             "pnp_roll": float(head.get("roll", 0.0)),
@@ -432,14 +545,19 @@ class FaceRig:
         self._live = nxt
         live = self._live
         side = -1.0 if self.selfie else 1.0
-        yaw_delta = side * (live["yaw"] - self._yaw)
-        # Tilt is an angle: 179 -> -179 is 2 deg, not a 358 deg flip.
-        roll_delta = side * (((live["roll"] - self._roll) + 180.0) % 360.0 - 180.0)
+        # The turn relative to rest, as one rotation. Subtracting the rest
+        # angle by angle only holds for a head that rests facing the camera:
+        # with the phone or webcam off-level (rest pitch ~15 deg here), a
+        # plain turn read as a turn plus a nod and a tilt.
+        rel_yaw, pitch_delta, rel_roll = head_angles(
+            self._rest_rot.T @ head_matrix(live["yaw"], live["pitch"], live["roll"])
+        )
+        yaw_delta = side * rel_yaw
+        roll_delta = side * rel_roll
         self._yaw_r = math.radians(
             _turn_stop(yaw_delta, feel.max_yaw())
         )
         # Positive pitch is look-down. Up / down has no side, so no flip.
-        pitch_delta = live["pitch"] - self._pitch
         self._pitch_r = math.radians(
             _clip(
                 pitch_delta,
@@ -453,10 +571,16 @@ class FaceRig:
         cam_s = max(self._cam_scale, 1.0)
         img_s = self._rest_ms / cam_s
         dx = side * (live["bx"] - self._cam_bx) * img_s
+        dy = (live["by"] - self._cam_by) * img_s
+        sway = float(pose.get("sway", 0.0) or 0.0)
+        if sway:
+            # No camera watches this head move (iPhone): swing it round the
+            # neck by the turn as drawn, so it slides as far as it turns.
+            nx, ny = neck_offset(self._yaw_r, self._pitch_r, self._roll_r)
+            dx += sway * nx * self._rest_ms
+            dy += sway * ny * self._rest_ms
         self._dx = _clip(dx, -self._rest_ms * 2.2, self._rest_ms * 2.2)
-        self._dy = _clip(
-            (live["by"] - self._cam_by) * img_s, -self._rest_ms * 1.6, self._rest_ms * 1.6
-        )
+        self._dy = _clip(dy, -self._rest_ms * 1.6, self._rest_ms * 1.6)
         # Size from solved distance. It is the same whether you face the
         # camera or turn, so a look never reads as a zoom. Box width is the
         # fallback when PnP is missing. Until the distance holds still, stay

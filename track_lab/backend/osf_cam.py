@@ -276,6 +276,20 @@ def _encode_jpeg(bgr: np.ndarray) -> bytes:
     return bytes(buf)
 
 
+# The solved head roll is only trusted near the eye line. Half-turn flips
+# (roll ~180 on an upright face) are undone in _pnp_head; what is still this
+# far off (roll 123 while the eyes read 3) is a bad solve: locked as rest, it
+# tipped the hair to the roll limit for the whole session.
+# 60, not tighter: a real turn + nod slants the eye line off the true roll by
+# atan(sin(pitch) * tan(turn)) (~41 deg at 60 turn / 30 nod).
+_PNP_TILT_TRUST = 60.0
+
+
+def _wrap_deg(angle: float) -> float:
+    """Angle difference in [-180, 180): 179 -> -179 is 2 deg, not 358."""
+    return (float(angle) + 180.0) % 360.0 - 180.0
+
+
 def _face_pose(face: object | None) -> dict[str, float]:
     out = {"cx": 0.0, "cy": 0.0, "bx": 0.0, "by": 0.0, "scale": 1.0, "tz": 0.0, "tilt": 0.0, "ok": 0.0}
     if face is None:
@@ -312,8 +326,12 @@ def _face_pose(face: object | None) -> dict[str, float]:
     # The eye line still frames the mouth: it slants with the mouth on a turn.
     eyes = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
     turn = _pnp_head(face)
-    out["tilt"] = eyes if turn is None else turn["roll"]
+    head_ok = turn is None or abs(_wrap_deg(turn["roll"] - eyes)) <= _PNP_TILT_TRUST
+    out["tilt"] = turn["roll"] if turn is not None and head_ok else eyes
     out["tilt_eyes"] = eyes
+    # 0 = this frame's solved head is a flipped / bad solve: do not lock rest
+    # on it, and hold the last good yaw / pitch (see FaceRig._sync).
+    out["head_ok"] = 1.0 if head_ok else 0.0
     out["ok"] = 1.0
     return out
 
@@ -322,6 +340,9 @@ def _face_pose(face: object | None) -> dict[str, float]:
 # rotation is -SWAP @ H, where H is the head turn in the image frame (x right,
 # y down, z away) and H = identity when facing the camera.
 _SWAP = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+# Half a turn round the view axis: Rz(180) @ H keeps H's pitch and turn and
+# moves its roll by 180 (Rz(r) Rx(p) Ry(t) -> Rz(r + 180) Rx(p) Ry(t)).
+_HALF_TURN = np.diag([-1.0, -1.0, 1.0])
 
 
 def _pnp_head(face: object | None) -> dict[str, float] | None:
@@ -345,6 +366,12 @@ def _pnp_head(face: object | None) -> dict[str, float] | None:
         return None
     rmat, _ = cv2.Rodrigues(vals)
     h = -_SWAP @ rmat
+    if h[1, 1] < 0.0:
+        # Upside down (|roll| > 90): the solve settled half a turn round the
+        # view axis. On a real webcam this is the usual state, not a rare
+        # glitch (roll ~176 on an upright face), and refusing it froze the
+        # turn for good. Turn and nod are right as they are; only roll is off.
+        h = _HALF_TURN @ h
     pitch = float(np.degrees(np.arcsin(np.clip(h[2, 1], -1.0, 1.0))))
     turn = float(np.degrees(np.arctan2(-h[2, 0], h[2, 2])))
     roll = float(np.degrees(np.arctan2(-h[0, 1], h[1, 1])))

@@ -483,9 +483,10 @@ export function ControlRail(props: Props) {
                     type="button"
                     className={trackSource === 'ifm' ? 'on brand' : 'brand'}
                     aria-pressed={trackSource === 'ifm'}
+                    title={t('track.ifmTitle')}
                     onClick={() => props.onLabSource('ifm')}
                   >
-                    iFacialMocap
+                    {t('track.ifm')}
                   </button>
                 </div>
                 {trackSource === 'ifm' || labOnline ? (

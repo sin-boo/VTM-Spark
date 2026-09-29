@@ -99,8 +99,6 @@ def test_ifm_processes_latest_packet_not_backlog(monkeypatch) -> None:
     from backend.ifm_cam import IfmCam
 
     monkeypatch.setattr(ifm_cam_mod, "_encode_jpeg", lambda img: b"x")
-    monkeypatch.setattr(ifm_cam_mod, "_mix_head", lambda prev, nxt, alpha: dict(nxt))
-    monkeypatch.setattr(ifm_cam_mod, "_smooth", lambda prev, nxt, alpha=0.38: dict(nxt))
 
     listen = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -139,3 +137,23 @@ def test_ifm_processes_latest_packet_not_backlog(monkeypatch) -> None:
             listen.close()
         except OSError:
             pass
+
+
+def test_smoothing_holds_still_and_lets_go_on_a_move() -> None:
+    """A fixed Smooth dragged every head move ~50 ms; still jitter needs it."""
+    import numpy as np
+
+    from backend.face import motion_alpha
+
+    base = 0.4
+    face = np.random.default_rng(0).normal(0, 40, (28, 2))
+    # Jitter well under 1 % of the face: full smoothing.
+    assert motion_alpha(base, face + 0.5, face, 200.0) == base
+    # A real move (5 % of the face this frame): follow at once.
+    assert motion_alpha(base, face + 10.0, face, 200.0) == 1.0
+    mid = motion_alpha(base, face + 3.0, face, 200.0)
+    assert base < mid < 1.0
+    # One point jumping (a blink, the mouth) is not the head moving.
+    blink = face.copy()
+    blink[3] += 30.0
+    assert motion_alpha(base, blink, face, 200.0) == base

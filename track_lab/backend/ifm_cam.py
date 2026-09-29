@@ -39,8 +39,7 @@ from .ifm import (
 )
 from .mouth_bits import bits as mouth_bits
 from .eye_bits import bits as eye_bits
-from .osf_cam import OsfFrame, _draw_lid_mids, _encode_jpeg, _smooth, _stamp_id
-from .presets import empty_weights
+from .osf_cam import OsfFrame, _draw_lid_mids, _encode_jpeg, _stamp_id
 from .retarget import FACE_TRACK
 from .rig import project_head
 from .visemes import apply_calibrated_rest, mouth_features
@@ -146,24 +145,18 @@ def _unwrap_deg(prev: float, now: float) -> float:
     return float(prev) + delta
 
 
-def _mix_head(
-    prev: dict[str, float] | None, nxt: dict[str, float], alpha: float
-) -> dict[str, float]:
-    if prev is None:
-        return {
-            "pitch": float(nxt.get("pitch", 0.0)),
-            "yaw": float(nxt.get("yaw", 0.0)),
-            "roll": float(nxt.get("roll", 0.0)),
-        }
+def _unwrap_head(prev: dict[str, float] | None, nxt: dict[str, float]) -> dict[str, float]:
+    """Keep the angles continuous across ±180 (170 → -170 is +20, not -340).
+
+    No easing here. This used to ease the head (at most 0.22 a packet, plus a
+    0.35° dead band) before the bench eased the drawn points again: an extra
+    ~60 ms of trail at 60 packets/s (twice that at 30) and small steps on a
+    slow turn. Smooth in the bench is the one ease for every source.
+    """
     out = dict(nxt)
     for key in ("pitch", "yaw", "roll"):
-        old = float(prev.get(key, 0.0))
-        target = _unwrap_deg(old, float(nxt.get(key, 0.0)))
-        delta = target - old
-        if abs(delta) < 0.35:
-            out[key] = old
-        else:
-            out[key] = old + alpha * delta
+        now = float(nxt.get(key, 0.0))
+        out[key] = now if prev is None else _unwrap_deg(float(prev.get(key, 0.0)), now)
     return out
 
 
@@ -380,7 +373,6 @@ class IfmCam:
 
     def _loop(self, on_frame: Callable[[OsfFrame], None] | None) -> None:
         sock = self._sock
-        smoothed = empty_weights()
         last_pkt = 0.0
         last_idle = 0.0
         hits = 0
@@ -418,12 +410,12 @@ class IfmCam:
                 self._held_pkt = packet
                 self._lock_ip = ip
                 started = time.perf_counter()
+                # Raw: the bench eases the mouth with the rest of the mesh.
+                # Easing the weights here too put two lags on lip sync.
                 weights = weights_from_arkit(packet)
-                smoothed = _smooth(smoothed, weights, feel.alpha())
-                head_a = min(max(feel.alpha(), 0.12), 0.22)
-                head = _mix_head(self._head_s, head_of(packet), head_a)
+                head = _unwrap_head(self._head_s, head_of(packet))
                 self._head_s = head
-                pose = pose_of(packet)
+                pose = pose_of(packet, feel.head_sway())
                 pose["tilt"] = float(head.get("roll", 0.0))
                 look = look_of(packet)
                 pip_pts = apply_shapes(_PIP_REST, packet)
@@ -439,7 +431,7 @@ class IfmCam:
                 self.peer = ip
                 self.last_peer = ip
                 snap = OsfFrame(
-                    weights=smoothed,
+                    weights=weights,
                     head=dict(head),
                     blink=blink,
                     pose=pose,

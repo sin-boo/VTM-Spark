@@ -28,6 +28,11 @@ SCHEMA = "KEYPOINT_SCHEMA"
 # Slot 28 / IRIS.L sits in EYE.L (11-13). Person-left blink drives that eye.
 # The old packet name right_iris is in Point.legacy only.
 
+# Lid amount (0 open, 1 shut) at which an eye's pupil is dropped from the
+# packet. The model draws a pupil wherever it gets one, so a shut eye must
+# not carry an iris, not even the eye-centre fallback.
+IRIS_HIDE_BLINK = 0.85
+
 COMMANDS: dict[str, str] = {
     "ping": "Heartbeat. Returns ok.",
     "start": "Start live tracking. body: camera?, source? (camera|ifm), host?, port?",
@@ -41,7 +46,7 @@ COMMANDS: dict[str, str] = {
     "set_input": "Choose camera or iFacialMocap. body: source (camera|ifm)",
     "set_ifm": "iFacialMocap bind. body: host?, port?",
     "set_mirror": "Left/right rule. off = reflection (person-left on screen-left), on = anatomical copy. Swaps L/R pairs and negates X for every source; no recenter. body: on (bool)",
-    "set_feel": "Live feel / overlay flags. body: response, smoothing, mouth, hair_pin, hair_width, gaze_gain, gaze_smooth, use_visemes, show_face, show_skeleton, show_hair, show_ids, max_yaw_left, max_yaw_right, max_roll_left, max_roll_right (max_yaw / max_roll set both sides), max_pitch_up, max_pitch_down, max_size, max_look_x, max_look_y",
+    "set_feel": "Live feel / overlay flags. body: response, smoothing, mouth, hair_pin, hair_width, gaze_gain, gaze_smooth, use_visemes, show_face, show_skeleton, show_hair, show_ids, max_yaw_left, max_yaw_right, max_roll_left, max_roll_right (max_yaw / max_roll set both sides), max_pitch_up, max_pitch_down, max_size, max_look_x, max_look_y, head_sway (iFacialMocap: 0 rotates the head in place, 1 swings it round the neck like a webcam sees, 2 double)",
     "set_travel": "Character limiters, fixed to the rest still. body (partial ok): enabled, left, right, up, down (head room), body_left, body_right, body_up, body_down (body room), yaw, roll, pitch_up, pitch_down, eye, size. Room 0..1.2 face heights, eye 0..1, yaw/roll 0..80, pitch_up 0..50, pitch_down 0..32, size 0..0.7 (grow / shrink from rest when you step toward or away from the camera). The whole character moves as one piece and stops at the first wall. Merges onto current; no-op when unchanged. Ack status includes full travel_box; feel caps follow.",
     "calibrate": "Hold and capture a shape. body: id (rest|smile|sad|A|I|U|E|O|...)",
     "reset_calibrate": "Clear captured viseme rest.",
@@ -82,6 +87,7 @@ FEEL_KEYS = (
     "max_look_y",
     "gaze_gain",
     "gaze_smooth",
+    "head_sway",
 )
 
 

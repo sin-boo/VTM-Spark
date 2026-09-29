@@ -68,6 +68,9 @@ def main() -> int:
         host=HOST,
         port=PORT,
         log_level="info",
+        # The desk polls /harness/frame and /status many times a second; a
+        # line per request was most of the app log (tens of MB a session).
+        access_log=False,
         reload=False,
     )
     return 0

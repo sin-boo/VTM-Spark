@@ -496,6 +496,11 @@ class FaceExpr:
         if not self.locked:
             self._lock(arr, mouth_pts)
         elif uses_image != self._uses_image:
+            if self._uses_image:
+                # One frame without image landmarks (a hand or mic over the
+                # nose). Re-locking on it, then again on the next good frame,
+                # baked whatever the face was doing into rest for the session.
+                return self._held if self._held is not None else mixed
             self._lock(arr, mouth_pts)
         elif stamp != self._token and session_rest_locked():
             self._lock(arr, mouth_pts)

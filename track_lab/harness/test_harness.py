@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from harness.dispatch import bind, handle
@@ -520,7 +522,8 @@ def test_host_warming_without_bench() -> None:
     try:
         publish_warming()
         hub.set_handler(bridge.handle_command)
-        packet = status()
+        # Routes return pre-encoded JSON.
+        packet = json.loads(status().body)
         assert packet["protocol"] == PROTOCOL
         assert packet["loaded"] is False
         assert packet["ok"] is True
@@ -530,7 +533,7 @@ def test_host_warming_without_bench() -> None:
         queued = command({"op": "set_feel", "body": {"mouth": 0.2}})
         assert queued["ok"] is True
         assert len(bridge._queued) == 1
-        packed = frame()
+        packed = json.loads(frame().body)
         assert packed["type"] == "frame"
         assert packed["loaded"] is False
         assert len(packed["keypoints"]) == NUM_KEYPOINTS
@@ -555,3 +558,17 @@ def test_host_server_does_not_import_face() -> None:
     assert "from .face import" not in src
     assert "import face" not in src
     assert "backend.worker" in (Path(__file__).resolve().parents[1] / "harness" / "bridge.py").read_text(encoding="utf-8")
+
+
+def test_capture_keeps_moving_rows_only() -> None:
+    from harness.capture import _moved, row_of
+
+    frame = pack_frame({"points": _face_points(), "skeleton": _skeleton(), "head": {"pitch": 1.0, "yaw": 2.0, "roll": 0.0}, "live": True}, image_wh=(800, 800))
+    row = row_of(frame, 10.0)
+    assert row["head"] == {"pitch": 1.0, "yaw": 2.0, "roll": 0.0}
+    assert len(row["keypoints"]) == NUM_KEYPOINTS and len(row["keypoints"][0]) == 3
+    # Same pose polled twice (60 fps phone, faster poll): one row, not two.
+    assert _moved(row, None) is True
+    assert _moved(row_of(frame, 10.01), row) is False
+    moved = dict(frame, head={"pitch": 1.0, "yaw": 3.0, "roll": 0.0})
+    assert _moved(row_of(moved, 10.02), row) is True

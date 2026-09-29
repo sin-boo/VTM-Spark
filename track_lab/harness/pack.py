@@ -14,6 +14,7 @@ from .protocol import (
     COMMANDS,
     FACE_COUNT,
     FEEL_KEYS,
+    IRIS_HIDE_BLINK,
     LEFT_EYE_SLOTS,
     NUM_KEYPOINTS,
     PROTOCOL,
@@ -112,8 +113,26 @@ def _eye_mid(k: np.ndarray, slots: tuple[int, ...]) -> np.ndarray | None:
     return np.array([float(mid[0]), float(mid[1]), score, 1.0], dtype=np.float32)
 
 
-def pack_keypoints(points: object, skeleton: object, iris: object = None) -> np.ndarray:
-    """Label28 + followed skeleton + iris → (37, 4) KEYPOINT_SCHEMA."""
+def _shut_irises(blink: object) -> set[int]:
+    """Iris slots whose eye is shut. ``blink`` is keyed by character screen side:
+    "l" is eye 11-13 / iris 28, "r" is eye 17-19 / iris 29."""
+    if not isinstance(blink, dict):
+        return set()
+    shut: set[int] = set()
+    for key, slot in (("l", RIGHT_IRIS), ("r", LEFT_IRIS)):
+        if _num(blink.get(key)) >= IRIS_HIDE_BLINK:
+            shut.add(slot)
+    return shut
+
+
+def pack_keypoints(
+    points: object, skeleton: object, iris: object = None, blink: object = None
+) -> np.ndarray:
+    """Label28 + followed skeleton + iris → (37, 4) KEYPOINT_SCHEMA.
+
+    A missing iris falls back to its eye centre, except on a shut eye: there
+    the lab dropped it on purpose, and a pupil would draw the eye open.
+    """
     k = np.zeros((NUM_KEYPOINTS, 4), dtype=np.float32)
     face = _rows_from_points(points)
     k[:FACE_COUNT, 0:2] = face[:, 0:2]
@@ -137,11 +156,14 @@ def pack_keypoints(points: object, skeleton: object, iris: object = None) -> np.
             k[idx, 2] = _num(row.get("score"), 1.0)
             k[idx, 3] = 1.0 if k[idx, 2] >= 0.05 else 0.0
             filled[idx] = k[idx, 3] >= 0.5
-    if not filled[RIGHT_IRIS]:
+    shut = _shut_irises(blink)
+    for slot in shut:
+        k[slot] = 0.0
+    if not filled[RIGHT_IRIS] and RIGHT_IRIS not in shut:
         right = _eye_mid(k, LEFT_EYE_SLOTS)
         if right is not None:
             k[RIGHT_IRIS] = right
-    if not filled[LEFT_IRIS]:
+    if not filled[LEFT_IRIS] and LEFT_IRIS not in shut:
         left = _eye_mid(k, RIGHT_EYE_SLOTS)
         if left is not None:
             k[LEFT_IRIS] = left
@@ -203,6 +225,7 @@ _FEEL_FALLBACK = {
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
     "gaze_smooth": 0.28,
+    "head_sway": 1.0,
 }
 
 
@@ -227,7 +250,7 @@ def pack_frame(
     skeleton = live.get("skeleton") or []
     hair = live.get("hair") or []
     iris = live.get("iris") or []
-    k = pack_keypoints(points, skeleton, iris)
+    k = pack_keypoints(points, skeleton, iris, live.get("blink"))
     width, height = int(image_wh[0]), int(image_wh[1])
     tracker = str(live.get("tracker") or "")
     live_on = bool(live.get("live"))

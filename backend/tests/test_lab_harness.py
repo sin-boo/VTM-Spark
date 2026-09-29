@@ -1250,6 +1250,8 @@ def _pack_sync_runtime(monkeypatch, *, ref: str, fit: dict | None = None):
     )
     rt._ref_path = Path(ref)
     rt._last_image = Image.new("RGB", (768, 768))
+    # Just loaded: the desk shows the character still itself.
+    rt._still_image = rt._last_image
     kps = neutral_keypoints().astype("float32")
     kps[:, 3] = 1.0
     rt._last_overlay_kps = kps
@@ -1285,6 +1287,48 @@ def test_loading_a_pack_sends_its_mesh_instead_of_detecting(monkeypatch) -> None
     assert stored == []  # hair came from the pack
 
 
+def test_restarting_tracking_after_a_stream_keeps_the_characters_rest(monkeypatch) -> None:
+    """After a stream the desk shows the last generated frame and the live
+    pose. Start tracking used to hand those to Track Lab as the still and its
+    rest mesh, and the pose became the model's reference: every later frame
+    came out offset until the character was reloaded."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from backend.stream import StreamRuntime
+
+    rt, calls, _, kps = _pack_sync_runtime(monkeypatch, ref="characters/goblin.vtm")
+    rt.engine = SimpleNamespace(_ref_keypoints=kps.copy())
+    live = kps.copy()
+    live[:28, 0] += 0.3
+    rt._last_image = Image.new("RGB", (768, 768), (200, 30, 30))
+    rt._last_overlay_kps = live
+    StreamRuntime._sync_lab_character(rt)
+    assert calls[0][0] == "set_rest"
+    x0 = (float(kps[0, 0]) + 1.0) * 0.5 * 768
+    assert abs(calls[0][1]["points"][0][0] - x0) < 1e-2
+
+
+def test_lab_source_is_the_still_not_the_last_generated_frame(monkeypatch, tmp_path) -> None:
+    from PIL import Image
+
+    from backend import stream as stream_mod
+    from backend.stream import StreamRuntime
+
+    rt = _hair_runtime()
+    rt._ref_path = None
+    rt._still_image = Image.new("RGB", (8, 8), (10, 200, 10))
+    rt._last_image = Image.new("RGB", (8, 8), (200, 10, 10))
+    monkeypatch.setattr(stream_mod, "package_root", lambda: tmp_path)
+    path = StreamRuntime._write_lab_source(rt)
+    assert path is not None
+    with Image.open(path) as saved:
+        assert saved.convert("RGB").getpixel((0, 0)) == (10, 200, 10)
+    # Same still in the lab: tracking restarts keep its authored shapes.
+    assert StreamRuntime._same_lab_still(rt) is True
+
+
 def test_first_load_without_packaged_hair_stores_what_the_lab_found(monkeypatch) -> None:
     from backend.stream import StreamRuntime
 
@@ -1300,3 +1344,91 @@ def test_a_new_still_still_runs_full_detection(monkeypatch) -> None:
     rt, calls, _, _ = _pack_sync_runtime(monkeypatch, ref="models/refs/upload.png")
     StreamRuntime._sync_lab_character(rt, replace=True)
     assert [op for op, _ in calls] == ["track"]
+
+
+def _frame_server(status: int = 200):
+    """A keep-alive HTTP/1.1 server for /harness/frame that counts connections."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen = {"connections": 0, "requests": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def setup(self) -> None:
+            seen["connections"] += 1
+            super().setup()
+
+        def do_GET(self) -> None:  # noqa: N802
+            seen["requests"] += 1
+            body = _json.dumps({"type": "frame", "n": seen["requests"]}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def test_frame_reuses_one_connection() -> None:
+    """A fresh connection per frame was most of the fetch before every DiT call."""
+    server, seen = _frame_server()
+    try:
+        client = LabHarness(base=f"http://127.0.0.1:{server.server_port}/harness", timeout=1.0)
+        frames = [client.frame() for _ in range(5)]
+        assert [f["n"] for f in frames if f] == [1, 2, 3, 4, 5]
+        assert seen["connections"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_frame_connection_is_shared_across_threads() -> None:
+    """With a Max FPS hold every frame is fetched from a new Timer thread."""
+    import threading
+
+    server, seen = _frame_server()
+    try:
+        client = LabHarness(base=f"http://127.0.0.1:{server.server_port}/harness", timeout=1.0)
+        for _ in range(4):
+            worker = threading.Thread(target=client.frame)
+            worker.start()
+            worker.join()
+        assert seen["requests"] == 4
+        assert seen["connections"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_frame_survives_a_dropped_idle_connection() -> None:
+    server, seen = _frame_server()
+    try:
+        client = LabHarness(base=f"http://127.0.0.1:{server.server_port}/harness", timeout=1.0)
+        assert client.frame() is not None
+        # The lab closed the idle socket (restart, keep-alive timeout).
+        client._kept.sock.close()
+        again = client.frame()
+        assert again is not None and again["n"] == 2
+        assert seen["connections"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_frame_http_error_is_reported_not_raised() -> None:
+    server, _seen = _frame_server(status=404)
+    try:
+        client = LabHarness(base=f"http://127.0.0.1:{server.server_port}/harness", timeout=1.0)
+        assert client.frame() is None
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -55,6 +55,14 @@ STREAM_COMPILE_MODEL = os.environ.get("VTM_COMPILE_MODEL", "0").strip().lower() 
     "on",
 }
 STREAM_COMPILE_MODE = os.environ.get("VTM_COMPILE_MODE", "default").strip() or "default"
+# Per-key pose dumps. ~40 lines a key at batch 1 grew the log by tens of MB an
+# hour of streaming (and slow a console run). Opt in with VTM_POSE_DIAG=1.
+STREAM_POSE_DIAG = os.environ.get("VTM_POSE_DIAG", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 STREAM_COMPILE_MODE_LADDER = (STREAM_COMPILE_MODE, "default")
 STREAM_COMPILE_WARMUP_RUNS = 2
 # Fast decode: Hybrid TinyVAE (same SD latents). SD-VAE stays for ref encode.
@@ -2547,7 +2555,7 @@ class StreamEngine:
 
         bsz = int(kps_batch.shape[0])
         # Verbose pose dumps only for single-frame; batch path stays quiet.
-        verbose = bsz == 1
+        verbose = STREAM_POSE_DIAG and bsz == 1
         if verbose:
             print(
                 f"[pose-diag] generate: sanitize={sanitize_mode} "
@@ -2555,7 +2563,7 @@ class StreamEngine:
                 f"ref={self._ref_path.name if self._ref_path else None} "
                 f"sidecar={self._ref_kps_path.name if self._ref_kps_path else None}"
             )
-        else:
+        elif STREAM_POSE_DIAG:
             print(f"[pose-diag] generate: batch={bsz} sanitize={sanitize_mode}")
 
         out = np.empty_like(kps_batch)
@@ -2644,7 +2652,7 @@ class StreamEngine:
 
         steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
 
-        if self.fast_mode:
+        if self.fast_mode and STREAM_POSE_DIAG:
             print(
                 f"[fast] batch={kps_batch.shape[0]} steps={steps} "
                 f"pose_cfg={pose_cfg:.2f} id_cfg={id_cfg:.2f} "

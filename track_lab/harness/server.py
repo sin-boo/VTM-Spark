@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Response, WebSocket, WebSocketDisconnect
 
 from .dispatch import bind
 from .hub import hub
@@ -20,6 +21,29 @@ from .pack import frame_from_bench, status_from_bench, warming_frame, warming_st
 
 router = APIRouter()
 _bench: Any = None
+
+
+def _plain(value: Any) -> Any:
+    """What FastAPI's encoder would have turned into JSON: numpy values,
+    paths, sets."""
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if isinstance(value, (set, frozenset)):
+        return list(value)
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _json(packet: dict[str, Any]) -> Response:
+    """Packets are plain JSON already. Returning the dict ran FastAPI's
+    generic encoder over every keypoint and hair vertex (~3 ms a poll, on
+    the desk's path between two DiT calls)."""
+    body = json.dumps(
+        packet, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=_plain
+    )
+    return Response(content=body, media_type="application/json")
 
 
 def attach(app: Any, bench: Any = None) -> None:
@@ -42,7 +66,7 @@ def attach(app: Any, bench: Any = None) -> None:
 
 
 @router.get("/status")
-def status() -> dict[str, Any]:
+def status() -> Any:
     packet = hub.latest_status()
     if packet is None and _bench is not None:
         packet = status_from_bench(_bench, clients=hub.clients)
@@ -52,7 +76,7 @@ def status() -> dict[str, Any]:
         hub.publish(packet)
     packet = dict(packet)
     packet["clients"] = hub.clients
-    return packet
+    return _json(packet)
 
 
 @router.get("/frame")
@@ -66,7 +90,7 @@ def frame() -> Any:
         hub.publish(packet)
     packet = dict(packet)
     packet["clients"] = hub.clients
-    return packet
+    return _json(packet)
 
 
 @router.post("/command")

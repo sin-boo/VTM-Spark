@@ -17,11 +17,18 @@ from pathlib import Path
 from typing import Any
 
 PROFILE_NAME = "hw_profile.json"
-# Busy share Auto aims to stay under at the target rate. Above it a game, OBS
-# or a hiccup pushes keys below target, and the GPU never idles.
-MAX_DUTY = 0.8
+# Busy share a batch may run at before Auto steps up a size. Batching is not
+# free: a call's keys are spread over the next call interval, so on a 5060 Ti
+# x2 shows a pose ~150 ms later than x1 (333 vs 184 ms). Stay at the smaller
+# size until it truly cannot keep up; live timings (a game, OBS) feed back in.
+MAX_DUTY = 0.95
 # A bigger batch must buy at least this much more keys/s to be worth its lag.
 MIN_GAIN = 1.10
+# Longest DiT call Auto steps up to. A call's keys come out together and are
+# spread over the next call, so a pose is on screen about two calls after it
+# was read: past ~0.2 s a call is felt as lag, whatever it buys in keys/s.
+# A card slower than this at x1 stays at x1; a fixed Batch still goes higher.
+CALL_MAX_S = 0.2
 # Measured is "close enough" to target.
 TARGET_SLACK = 0.95
 # Calls timed per batch size when tuning.
@@ -114,9 +121,17 @@ def save_failed(key: str, batch: int, path: Path | None = None) -> None:
 
 
 def predict_call_s(rates: dict[int, float], batch: int) -> float | None:
-    """Seconds per call at ``batch``: measured, else a line through the rest."""
+    """Seconds per call at ``batch``: measured, else read between the measured
+    sizes around it, else a line through the rest."""
     if batch in rates:
         return rates[batch]
+    lower = [b for b in rates if b < batch]
+    upper = [b for b in rates if b > batch]
+    if lower and upper:
+        # A live stream at a fixed x4 records x4 alone. Flooring x2 at the
+        # x4 time then read x2 as too slow to ever try.
+        lo, hi = max(lower), min(upper)
+        return rates[lo] + (batch - lo) / (hi - lo) * (rates[hi] - rates[lo])
     if len(rates) < 2:
         return None
     xs = sorted(rates)
@@ -127,8 +142,11 @@ def predict_call_s(rates: dict[int, float], batch: int) -> float | None:
     if var <= 0.0:
         return None
     slope = sum((x - mx) * (rates[x] - my) for x in xs) / var
-    # A batch never costs less than the biggest one measured.
-    return max(my + slope * (batch - mx), max(rates.values()))
+    line = my + slope * (batch - mx)
+    if batch < xs[0]:
+        return line if line > 0.0 else None
+    # A bigger batch never costs less than the biggest one measured.
+    return max(line, max(rates.values()))
 
 
 def keys_per_s(rates: dict[int, float], batch: int) -> float | None:
@@ -147,8 +165,9 @@ def plan_batch(
 
     Smallest batch that reaches the target key rate while leaving the GPU
     ``1 - MAX_DUTY`` idle — smaller batches lag less. If none can, the one
-    with the most keys/s, stepping up only while each step gains ``MIN_GAIN``.
-    Sizes that ran out of memory are never picked.
+    with the most keys/s, stepping up only while each step gains ``MIN_GAIN``
+    and a call stays under ``CALL_MAX_S``. Sizes that ran out of memory are
+    never picked.
     """
     # A size that ran out of memory rules out every bigger one too.
     ceiling = min([int(max_batch), *[b - 1 for b in (failed or set())]])
@@ -167,15 +186,19 @@ def plan_batch(
 
     if fits(1):
         return 1, None
+    if rates[1] >= CALL_MAX_S:
+        # Every bigger call is slower still: more keys, each one later.
+        return 1, None
     if len(rates) < 2 and 2 in sizes:
         return 1, 2
     best = 1
     for b in sizes:
         if b == 1:
             continue
-        rate = keys_per_s(rates, b)
-        if rate is None:
+        call = predict_call_s(rates, b)
+        if not call or call > CALL_MAX_S:
             break
+        rate = b / call
         if fits(b):
             return b, (b if b not in rates else None)
         if rate >= (keys_per_s(rates, best) or 0.0) * MIN_GAIN:

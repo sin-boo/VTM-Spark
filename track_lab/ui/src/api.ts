@@ -52,6 +52,7 @@ export type FeelSettings = {
   hair_width: number
   gaze_gain: number
   gaze_smooth: number
+  head_sway: number
   max_yaw_left?: number
   max_yaw_right?: number
   max_roll_left?: number

@@ -149,7 +149,14 @@ def main() -> int:
     import uvicorn
 
     server = uvicorn.Server(
-        uvicorn.Config("backend.server:app", host=HOST, port=PORT, log_level="info")
+        uvicorn.Config(
+            "backend.server:app",
+            host=HOST,
+            port=PORT,
+            log_level="info",
+            # A line per /harness/frame poll buried everything else.
+            access_log=False,
+        )
     )
     holder: dict[str, subprocess.Popen[bytes]] = {}
 

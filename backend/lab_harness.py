@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -91,6 +94,7 @@ DEFAULT_FEEL: dict[str, float] = {
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
     "gaze_smooth": 0.28,
+    "head_sway": 1.0,
 }
 
 
@@ -164,6 +168,9 @@ class LabHarness:
         self.base = str(base).rstrip("/")
         self.timeout = float(timeout)
         self._last_note = ""
+        # One kept-alive connection for /frame, shared (see _get_kept).
+        self._kept: http.client.HTTPConnection | None = None
+        self._kept_lock = threading.Lock()
 
     def _note(self, msg: str) -> None:
         if msg == self._last_note:
@@ -234,6 +241,45 @@ class LabHarness:
         except Exception as exc:
             self._note(f"frame {self.base}/frame failed: {_short_error(exc)}")
             return None
+
+    def _get_kept(self, path: str) -> dict[str, Any] | None:
+        """GET over one kept-alive connection.
+
+        The desk fetches a frame right before every DiT call. A new urllib
+        connection each time was ~5 ms of the ~7 ms that took; a reused one
+        is ~2 ms. Shared, not per thread: with a Max FPS hold each frame is
+        fetched from a fresh Timer thread. A dropped idle socket is retried
+        once on a fresh one; an HTTP error goes through ``_get_once`` so it
+        is reported as before.
+        """
+        url = urllib.parse.urlsplit(self.base + path)
+        target = url.path + (f"?{url.query}" if url.query else "")
+        with self._kept_lock:
+            for attempt in (0, 1):
+                conn = self._kept
+                reused = conn is not None
+                if conn is None:
+                    conn = http.client.HTTPConnection(
+                        url.hostname or "127.0.0.1", url.port or 80, timeout=self.timeout
+                    )
+                    self._kept = conn
+                try:
+                    conn.request("GET", target)
+                    res = conn.getresponse()
+                    raw = res.read()
+                except (OSError, http.client.HTTPException):
+                    conn.close()
+                    self._kept = None
+                    if reused and attempt == 0:
+                        continue
+                    raise
+                if res.status >= 400:
+                    break
+                if not raw:
+                    return None
+                data = json.loads(raw.decode("utf-8"))
+                return data if isinstance(data, dict) else None
+        return self._get_once(path)
 
     def handshake(self, *, attempts: int = 1, delay: float = 0.0) -> dict[str, Any]:
         """GET status + ping. Does not start tracking. Does not wait for torch.
@@ -360,6 +406,12 @@ class LabHarness:
         }
 
     def _get(self, path: str, timeout: float | None = None) -> dict[str, Any] | None:
+        # The per-DiT-call frame rides a kept-alive connection; the rest are rare.
+        if path == "/frame" and timeout is None:
+            return self._get_kept(path)
+        return self._get_once(path, timeout)
+
+    def _get_once(self, path: str, timeout: float | None = None) -> dict[str, Any] | None:
         url = self.base + path
         req = urllib.request.Request(url, method="GET")
         try:

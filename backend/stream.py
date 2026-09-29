@@ -68,6 +68,9 @@ from .load_timing import StageClock, StageMeter
 from .frame_interp import (
     PLAYOUT_QUEUE_MAX,
     SHOW_FPS_MAX,
+    SLOT_SLACK,
+    TWEEN_MAX_S,
+    ema_blend,
     inbetween_maker,
     inbetween_pacing,
     inbetween_ts,
@@ -180,6 +183,10 @@ GPU_MOVE_SHARE = 0.10
 SHOWN_FPS_WINDOW_S = 1.0
 # A gap between DiT calls longer than this is a stall or pause, not the rate.
 KEY_INTERVAL_MAX_S = 3.0
+# Seconds between status pushes from the running stream (timing / FPS).
+STREAM_STATUS_S = 0.25
+# Tries (0.25 s apart) to queue the next frame before the stream stops.
+SCHEDULE_RETRIES = 12
 WARMUP_SHARE_END = 0.95
 
 # Track Lab skeleton joints (keypoint slot -> name), as skeleton.py writes them.
@@ -410,6 +417,9 @@ class StreamRuntime:
         self._status["boot"] = snapshot_boot(self._boot)
         self._ref_path: Path | None = None
         self._last_image: Image.Image | None = None
+        # The character still itself. _last_image turns into the last
+        # generated frame once a stream runs; Track Lab must never get that.
+        self._still_image: Image.Image | None = None
         self._inbetween_prev: Image.Image | None = None
         self._inbetween_prev_kps: np.ndarray | None = None
         self._restore_last_reference()
@@ -484,6 +494,11 @@ class StreamRuntime:
         self._gen_queue: queue.Queue = queue.Queue(maxsize=1)
         self._display_queue: queue.Queue = queue.Queue()
         self._display_busy = False
+        # Bumped on every Start / Stop so the display thread drops the last
+        # stream's picture instead of tweening a new one from it.
+        self._stream_epoch = 0
+        self._shown_epoch: int | None = None
+        self._shown_key: tuple[Image.Image, np.ndarray | None] | None = None
         self._playout_next = 0.0
         self._last_interp_s = 0.0
         self._last_call_done_t = 0.0
@@ -978,8 +993,12 @@ class StreamRuntime:
         commands = probe.get("commands")
         if isinstance(commands, list) and "set_rest" not in commands:
             return None
-        image = self._last_image
-        kps = self._last_overlay_kps
+        image = getattr(self, "_still_image", None)
+        # The pack's rest is the model's reference pose. The overlay is only
+        # the same thing until a stream or live tracking moves it.
+        kps = getattr(self.engine, "_ref_keypoints", None)
+        if kps is None and image is not None and self._last_image is image:
+            kps = self._last_overlay_kps
         if image is None or kps is None:
             return None
         k = np.asarray(kps, dtype=np.float32)
@@ -1161,6 +1180,7 @@ class StreamRuntime:
     def _reset_character_runtime(self, *, emit_blank: bool = False) -> None:
         """Drop the previous still, overlay, and stream mix before a new Create."""
         self._last_image = None
+        self._still_image = None
         self._last_overlay_kps = None
         self._driven_keypoints = None
         self._last_good_keypoints = None
@@ -1185,6 +1205,7 @@ class StreamRuntime:
         self._prev_stream_hair = None
         self._ema_frame = None
         self._ema_kps = None
+        self._shown_key = None
         if emit_blank:
             blank = Image.new("RGB", (16, 16), (8, 8, 8))
             self._emit({"type": "frame", **self._frame_payload(blank, None)})
@@ -1229,6 +1250,7 @@ class StreamRuntime:
         except Exception:
             pass
         self._last_image = preview
+        self._still_image = preview
         self._emit({"type": "frame", **self._frame_payload(preview, None)})
 
     def _warm_overlay_tools(self, kind: str) -> None:
@@ -1651,6 +1673,7 @@ class StreamRuntime:
             except Exception:
                 preview = Image.open(ref).convert("RGB")
                 self._last_image = preview
+            self._still_image = preview
             overlay_lo = 0.72 if silent else 0.90
             overlay_hi = 0.86 if silent else 0.96
             try:
@@ -1758,6 +1781,7 @@ class StreamRuntime:
         still = ensure_character_still(path)
         preview = Image.open(still).convert("RGB")
         self._last_image = preview
+        self._still_image = preview
         frame = self._frame_payload(preview, None)
         self._emit({"type": "frame", **frame})
         self._status["character_id"] = path.stem
@@ -1814,6 +1838,7 @@ class StreamRuntime:
         self._lab_overlay_gen = None
         self._reset_live_origin(reason="load_character")
         self._last_image = preview
+        self._still_image = preview
         frame = self._frame_payload(preview, self._last_overlay_kps)
         self._emit({"type": "frame", **frame})
         return frame
@@ -3150,8 +3175,9 @@ class StreamRuntime:
     def _write_lab_source(self) -> Path | None:
         dest = package_root() / "track_lab" / "input" / "source.png"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if self._last_image is not None:
-            self._last_image.convert("RGB").save(dest, format="PNG")
+        still = getattr(self, "_still_image", None)
+        if still is not None:
+            still.convert("RGB").save(dest, format="PNG")
             return dest
         ref = self._ref_path
         if ref is not None and ref.is_file():
@@ -3329,7 +3355,7 @@ class StreamRuntime:
 
     def _same_lab_still(self) -> bool:
         return stills_match(
-            self._last_image,
+            getattr(self, "_still_image", None),
             package_root() / "track_lab" / "input" / "source.png",
         )
 
@@ -3920,6 +3946,7 @@ class StreamRuntime:
             return
         self.ensure_model(keep_bar=True)
         self._ensure_compile_ready()
+        self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
         self._streaming = True
         self._paused = False
         self._frame_in_flight = False
@@ -3957,6 +3984,7 @@ class StreamRuntime:
     def stop_stream(self) -> None:
         if not self._streaming:
             return
+        self._stream_epoch = getattr(self, "_stream_epoch", 0) + 1
         self._streaming = False
         self._paused = False
         while True:
@@ -4054,27 +4082,53 @@ class StreamRuntime:
             return
         self._frame_in_flight = True
         self._last_gen_start = time.perf_counter()
-        kps = self._current_keypoints()
-        if kps is None:
+        try:
+            kps = self._current_keypoints()
+            if kps is None:
+                self._frame_in_flight = False
+                threading.Timer(0.05, self._schedule_next_frame).start()
+                return
+            current = np.asarray(kps, dtype=np.float32)
+            hair = np.asarray(self._current_hair_maps(current), dtype=np.float32)
+            batch_n = max(1, int(getattr(self.engine, "stream_batch_size", 1) or 1))
+            keypoints, hair_maps = pack_stream_batch(
+                current,
+                hair,
+                self._prev_stream_kps,
+                self._prev_stream_hair,
+                batch_n,
+            )
+            self._prev_stream_kps = current.copy()
+            self._prev_stream_hair = hair.copy()
+            steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
+            self._enqueue_generate(
+                steps=steps, streaming=True, keypoints=keypoints, hair_maps=hair_maps
+            )
+        except Exception as exc:
+            # On a Timer thread this escaped with the flag still set, and the
+            # stream sat frozen with no error. Retry a moment, then say so.
             self._frame_in_flight = False
-            threading.Timer(0.05, self._schedule_next_frame).start()
+            fails = int(getattr(self, "_schedule_fails", 0) or 0) + 1
+            self._schedule_fails = fails
+            print(f"[stream] could not queue the next frame ({fails}): {exc}")
+            if fails < SCHEDULE_RETRIES:
+                threading.Timer(0.25, self._schedule_next_frame).start()
+                return
+            self._schedule_fails = 0
+            self._streaming = False
+            self._paused = False
+            self._offload_pending = True
+            self._end_first_frame_wait()
+            self._set_status(
+                streaming=False, paused=False, busy=False, error=str(exc), message="Stream error"
+            )
             return
-        current = np.asarray(kps, dtype=np.float32)
-        hair = np.asarray(self._current_hair_maps(current), dtype=np.float32)
-        batch_n = max(1, int(getattr(self.engine, "stream_batch_size", 1) or 1))
-        keypoints, hair_maps = pack_stream_batch(
-            current,
-            hair,
-            self._prev_stream_kps,
-            self._prev_stream_hair,
-            batch_n,
-        )
-        self._prev_stream_kps = current.copy()
-        self._prev_stream_hair = hair.copy()
-        steps = int(self.status().get("steps") or STREAM_DEFAULT_STEPS)
-        self._enqueue_generate(
-            steps=steps, streaming=True, keypoints=keypoints, hair_maps=hair_maps
-        )
+        self._schedule_fails = 0
+
+    def _current_epoch(self, job: dict[str, Any]) -> bool:
+        """True when ``job`` was queued by the stream that is running now."""
+        epoch = job.get("epoch")
+        return epoch is None or epoch == getattr(self, "_stream_epoch", 0)
 
     def _gen_cap(self) -> float:
         """Keys/s the stream is held to: Max FPS, or Auto from the in-betweens."""
@@ -4099,6 +4153,9 @@ class StreamRuntime:
         job = {
             "steps": steps,
             "streaming": streaming,
+            # Which stream asked. A call that outlives a Stop (or Stop +
+            # Start) must not land in, or clear the flag of, the next one.
+            "epoch": getattr(self, "_stream_epoch", 0),
             "keypoints": np.asarray(keypoints, dtype=np.float32),
             "sanitize": "none" if self._lab_drive else "constrained",
             "hair_maps": None if hair_maps is None else np.asarray(hair_maps, dtype=np.float32),
@@ -4122,9 +4179,10 @@ class StreamRuntime:
         """Light temporal EMA so Batch×2 A/B samples don't hard-pop each other.
 
         Only while the face holds still: blending through a move left the last
-        head and hair on screen for 3–4 keys (hair trailing the face).
+        head and hair on screen for 3–4 keys (hair trailing the face). Runs on
+        the display thread; the held frame is uint8 for cv2.
         """
-        arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+        arr = np.asarray(image.convert("RGB"))
         try:
             alpha = _clip_blend(float(self._status.get("frame_blend") or STREAM_TEMPORAL_EMA))
         except (TypeError, ValueError):
@@ -4134,11 +4192,17 @@ class StreamRuntime:
             self._ema_kps = np.asarray(keypoints, dtype=np.float32).copy()
             if prev_kps is not None:
                 alpha = snap_alpha(alpha, face_pose_delta(prev_kps, self._ema_kps))
-        if self._ema_frame is None or self._ema_frame.shape != arr.shape:
+        held = getattr(self, "_ema_frame", None)
+        if (
+            held is None
+            or held.shape != arr.shape
+            or held.dtype != np.uint8
+            or alpha >= 0.999
+        ):
             self._ema_frame = arr
             return image
-        self._ema_frame = alpha * arr + (1.0 - alpha) * self._ema_frame
-        out = np.clip(self._ema_frame, 0.0, 255.0).astype(np.uint8)
+        out = ema_blend(arr, held, alpha)
+        self._ema_frame = out
         return Image.fromarray(out, mode="RGB")
 
     def _effective_inbetweens(self) -> int:
@@ -4215,22 +4279,48 @@ class StreamRuntime:
         self._display_busy = True
         try:
             keys = job.get("keys") or [(job["image"], job.get("keypoints"))]
-            prev = job.get("prev")
-            prev_kps = job.get("prev_kps")
+            epoch = job.get("epoch")
+            if epoch is not None and epoch != getattr(self, "_shown_epoch", None):
+                # A new stream: nothing of it is on screen to tween or blend from.
+                self._shown_epoch = epoch
+                self._shown_key = None
+                self._ema_frame = None
+                self._ema_kps = None
+            shown = getattr(self, "_shown_key", None)
+            if shown is not None:
+                # Tween from what is on screen (blended, and still there if a
+                # queued job was dropped), not from the raw last key.
+                prev, prev_kps = shown
+            else:
+                prev = job.get("prev")
+                prev_kps = job.get("prev_kps")
             interval = float(job.get("key_interval") or 0.0)
             rate = (1.0 / interval) if interval > 0.0 else 0.0
             wanted = int(job.get("count") or 0)
+            # A batch spreads its keys over the call; a lone key only waits
+            # for its mids, and that wait is capped (TWEEN_MAX_S).
+            span_max = TWEEN_MAX_S if len(keys) == 1 else None
             count, gap_s = inbetween_pacing(
-                rate, wanted, mid_cost_s=float(self._last_interp_s or 0.0)
+                rate,
+                wanted,
+                mid_cost_s=float(self._last_interp_s or 0.0),
+                span_max=span_max,
             )
             with self._lock:
                 self._status["inbetweens_live"] = count
-            if count < inbetween_pacing(rate, wanted)[0]:
+            # Never start a call's pictures more than one slot out. A schedule
+            # running ahead of arrivals is a standing buffer: pure lag.
+            ahead = time.perf_counter() + gap_s
+            if float(getattr(self, "_playout_next", 0.0) or 0.0) > ahead:
+                self._playout_next = ahead
+            if count < inbetween_pacing(rate, wanted, span_max=span_max)[0]:
                 # Skipped for render cost: nothing re-measures it while mids
                 # are off, so let it decay or one slow first mid (cv2 warm-up)
                 # turns them off for the whole stream.
                 self._last_interp_s = float(self._last_interp_s or 0.0) * 0.8
             for image, keypoints in keys:
+                if job.get("blend"):
+                    image = self._blend_display_frame(image, keypoints)
                 behind = self._display_behind(interval)
                 if behind:
                     # A newer call is waiting: drop mids, catch up at 20 fps.
@@ -4257,6 +4347,7 @@ class StreamRuntime:
                 self._pace_display(gap_s)
                 self._publish_display_frame(image, keypoints, key=True)
                 prev, prev_kps = image, keypoints
+                self._shown_key = (image, keypoints)
         finally:
             self._display_busy = False
 
@@ -4285,13 +4376,16 @@ class StreamRuntime:
 
     def _pace_display(self, gap_s: float = 0.0) -> None:
         """Hold until the next shown picture is due: ``gap_s`` after the last one
-        (at most 20 fps), after a quarter-second hold at the start of a stream."""
+        (20 fps, or a touch over within SLOT_SLACK)."""
         now = time.perf_counter()
         fps_max = (1.0 / gap_s) if gap_s > 0.0 else SHOW_FPS_MAX
         wait, nxt = playout_gap(
             now,
             float(getattr(self, "_playout_next", 0.0) or 0.0),
-            fps_max=min(SHOW_FPS_MAX, fps_max),
+            # Flooring at 50 ms stretched the 45-47.5 ms gaps inbetween_pacing
+            # plans, so a job filled its whole key interval and call jitter
+            # piled up as display lag instead of landing in the 5 % margin.
+            fps_max=min(SHOW_FPS_MAX / SLOT_SLACK, fps_max),
         )
         self._playout_next = nxt
         if wait <= 0:
@@ -4339,6 +4433,18 @@ class StreamRuntime:
         self._last_interp_s = 0.0
         self._playout_next = 0.0
 
+    def _emit_stream_status(self) -> None:
+        """The stream's own status, a few times a second at most.
+
+        It went out twice a key (call done, key shown): ~20 full-desk
+        re-renders a second for FPS digits nobody reads that fast.
+        """
+        now = time.perf_counter()
+        if now - float(getattr(self, "_stream_status_t", 0.0) or 0.0) < STREAM_STATUS_S:
+            return
+        self._stream_status_t = now
+        self._emit({"type": "status", "status": self.status()})
+
     def _publish_display_frame(
         self,
         image: Image.Image,
@@ -4361,7 +4467,7 @@ class StreamRuntime:
         if key and self._first_frame_pending:
             self._end_first_frame_wait(message="Streaming")
         if key:
-            self._emit({"type": "status", "status": self.status()})
+            self._emit_stream_status()
 
     def _gen_worker_loop(self) -> None:
         while not self._worker_stop.is_set():
@@ -4373,7 +4479,7 @@ class StreamRuntime:
             if job is None:
                 break
             streaming = bool(job.get("streaming"))
-            if streaming and not self._streaming:
+            if streaming and (not self._streaming or not self._current_epoch(job)):
                 try:
                     self._gen_queue.task_done()
                 except Exception:
@@ -4406,15 +4512,14 @@ class StreamRuntime:
                     )
                 n = max(1, len(images))
                 per = float(elapsed) / float(n) if elapsed > 0 else 0.0
-                if streaming:
+                if streaming and not self._current_epoch(job):
+                    # Queued before a Stop: no stream is waiting for these.
+                    pass
+                elif streaming:
                     self._note_live_call(len(images), float(elapsed))
-                    shown = [
-                        self._blend_display_frame(
-                            image, kps_list[i] if i < len(kps_list) else None
-                        )
-                        for i, image in enumerate(images)
-                    ]
-                    self._on_stream_keys(shown, kps_list, per, timings)
+                    # Keys go out raw; the display thread blends them. Done
+                    # here, the blend held the next DiT call ~17 ms a key.
+                    self._on_stream_keys(images, kps_list, per, timings, epoch=job.get("epoch"))
                 else:
                     for i, image in enumerate(images):
                         self._on_frame(
@@ -4426,7 +4531,9 @@ class StreamRuntime:
                             schedule_next=False,
                         )
             except Exception as exc:
-                if streaming:
+                if streaming and not self._current_epoch(job):
+                    print(f"[stream] call from a stopped stream failed: {exc}")
+                elif streaming:
                     self._streaming = False
                     self._paused = False
                     self._frame_in_flight = False
@@ -4487,6 +4594,7 @@ class StreamRuntime:
         timings: dict,
         *,
         schedule_next: bool = True,
+        epoch: int | None = None,
     ) -> None:
         """One streaming DiT call is done: start the next, queue these keys."""
         self._note_timing(elapsed, timings, streaming=True)
@@ -4516,9 +4624,12 @@ class StreamRuntime:
                 "prev_kps": prev_kps,
                 "count": self._effective_inbetweens(),
                 "key_interval": key_interval,
+                # Snap-blend on the display thread, not between DiT calls.
+                "blend": True,
+                "epoch": getattr(self, "_stream_epoch", 0) if epoch is None else epoch,
             }
         )
-        self._emit({"type": "status", "status": self.status()})
+        self._emit_stream_status()
 
     def _on_frame(
         self,
@@ -5406,10 +5517,11 @@ class StreamRuntime:
                                     **self._frame_payload(self._last_image, driven),
                                 }
                             )
-                    self._set_status(
-                        track_message="Frozen" if self._pose_frozen else "Tracking on",
-                        body_label="",
-                    )
+                    msg = "Frozen" if self._pose_frozen else "Tracking on"
+                    # Only on a change. Every 50 ms this re-sent the whole
+                    # status, a full desk re-render twenty times a second.
+                    if self._status.get("track_message") != msg or self._status.get("body_label"):
+                        self._set_status(track_message=msg, body_label="")
                     continue
                 snap = self.tracker.latest_snapshot()
                 method = self._body_skel_method

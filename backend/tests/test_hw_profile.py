@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from backend.hw_profile import (
+    CALL_MAX_S,
     keys_per_s,
     load_failed,
     load_rates,
@@ -31,7 +32,7 @@ def test_fast_card_stays_at_batch_1() -> None:
 
 def test_first_run_times_x1_then_x2() -> None:
     assert plan_batch({}, 10.0, 4) == (1, 1)
-    # x1 alone cannot hold 10/s under 80 % busy: time x2 before deciding.
+    # x1 alone cannot hold 10/s under 95 % busy: time x2 before deciding.
     assert plan_batch({1: 0.102}, 10.0, 4) == (1, 2)
 
 
@@ -40,19 +41,41 @@ def test_5060ti_takes_x2_for_ten_keys() -> None:
     assert plan_batch({1: 0.102, 2: 0.142}, 10.0, 4) == (2, None)
 
 
-def test_slow_card_steps_up_while_it_pays() -> None:
-    slow = {1: 0.30, 2: 0.45}
-    # x3 is predicted to add >10 % keys/s: time it next.
-    batch, measure = plan_batch(slow, 10.0, 4)
-    assert (batch, measure) == (3, 3)
-    slow[3] = 0.60
-    # x4 would only add ~7 %: stay at x3.
-    assert plan_batch(slow, 10.0, 4) == (3, None)
+def test_5060ti_stays_x1_when_just_under_max_duty() -> None:
+    # x1 at 0.0906 s is ~91 % busy for 10/s: under MAX_DUTY, so skip x2's lag.
+    assert plan_batch({1: 0.0906, 2: 0.142}, 10.0, 4) == (1, None)
+
+
+def test_slow_card_stays_at_batch_1_for_latency() -> None:
+    """x3 at 0.6 s a call bought ~40 % more keys, and showed every pose over
+    a second late. A card already slow at x1 is not timed any bigger."""
+    assert plan_batch({1: 0.30}, 10.0, 4) == (1, None)
+    assert plan_batch({1: 0.30, 2: 0.45, 3: 0.60}, 10.0, 4) == (1, None)
+
+
+def test_mid_card_steps_up_only_within_the_call_cap() -> None:
+    # x2 reaches 10/s in a 0.17 s call: worth it.
+    assert plan_batch({1: 0.12, 2: 0.17}, 10.0, 4) == (2, None)
+    # x2 would take 0.22 s a call: stay at x1 and live with fewer keys.
+    assert plan_batch({1: 0.16, 2: 0.22}, 10.0, 4) == (1, None)
+    # Stepping up still stops at the first size past the cap.
+    rates = {1: 0.10, 2: 0.14, 3: 0.18}
+    assert CALL_MAX_S < predict_call_s(rates, 4)
+    assert plan_batch(rates, 20.0, 4)[0] == 3
+
+
+def test_sizes_between_measured_ones_are_read_between_them() -> None:
+    """A live stream at a fixed x4 records x4 alone. x2 used to be floored at
+    x4's time, so with the call cap Auto never even tried it."""
+    gap = {1: TI_5060[1], 4: TI_5060[4]}
+    guess = predict_call_s(gap, 2)
+    assert guess is not None and abs(guess - TI_5060[2]) / TI_5060[2] < 0.05
+    assert plan_batch(gap, 10.0, 4) == (2, 2)
 
 
 def test_out_of_memory_sizes_are_skipped() -> None:
-    slow = {1: 0.30, 2: 0.45, 3: 0.60}
-    assert plan_batch(slow, 10.0, 4, failed={3})[0] == 2
+    rates = {1: 0.10, 2: 0.14, 3: 0.18}
+    assert plan_batch(rates, 20.0, 4, failed={3})[0] == 2
 
 
 def test_profile_round_trip_and_blend(tmp_path: Path) -> None:

@@ -31,11 +31,13 @@ DEFAULTS = {
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
     "gaze_smooth": 0.28,
+    "head_sway": 1.0,
 }
 _LIMITS = {key: 1.0 for key in DEFAULTS}
 _LIMITS["mouth"] = 2.0
 _LIMITS["gaze_gain"] = 2.0
 _LIMITS["hair_width"] = 2.0
+_LIMITS["head_sway"] = 2.0
 # One number used to cap both sides of a turn / tilt; it still sets both.
 _BOTH_SIDES = {
     "max_yaw": ("max_yaw_left", "max_yaw_right"),
@@ -171,6 +173,11 @@ class Feel:
 
     def gaze_alpha(self) -> float:
         return 0.72 - 0.56 * self._get("gaze_smooth")
+
+    def head_sway(self) -> float:
+        """iPhone only: how far a turn / nod / tilt carries the head round the
+        neck. 0 = rotate in place, 1 = about what a webcam sees, 2 = double."""
+        return self._get("head_sway")
 
 
 feel = Feel()

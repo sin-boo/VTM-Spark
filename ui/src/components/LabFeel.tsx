@@ -21,6 +21,11 @@ const LIVE_FEEL: FeelSlider[] = [
   { key: 'mouth', label: 'feel.mouth', max: 2 },
 ]
 
+// The iPhone sends angles only; this swings its head round the neck.
+const IFM_FEEL: FeelSlider[] = [
+  { key: 'head_sway', label: 'feel.sway', max: 2, title: 'feel.swayTitle' },
+]
+
 const METERS: (keyof MixWeights)[] = ['smile', 'sad', 'A', 'I', 'U', 'E']
 
 function feelPatch(key: keyof LabFeel, value: number): Partial<LabFeel> {
@@ -206,7 +211,7 @@ function FeelSliders(props: SliderProps) {
   useEffect(() => {
     if (drag.current) return
     setDraft(feel)
-  }, [feel.response, feel.smoothing, feel.mouth, feel.gaze_gain, feel.gaze_smooth])
+  }, [feel.response, feel.smoothing, feel.mouth, feel.gaze_gain, feel.gaze_smooth, feel.head_sway])
 
   useEffect(() => {
     return () => {
@@ -279,7 +284,7 @@ export function LabFeel(props: Props) {
       {props.actions}
       <div className={online ? undefined : 'is-offline'}>
         <FeelSliders
-          rows={LIVE_FEEL}
+          rows={props.lab?.source === 'ifm' ? [...LIVE_FEEL, ...IFM_FEEL] : LIVE_FEEL}
           feel={feel}
           online={online}
           busy={props.busy}

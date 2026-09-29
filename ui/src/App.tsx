@@ -525,7 +525,7 @@ export default function App() {
           })
         }
         onLabIfmPort={(port) =>
-          run('iFacialMocap', async () => {
+          run(t('track.ifm'), async () => {
             await sendLab('set_ifm', { port })
           })
         }

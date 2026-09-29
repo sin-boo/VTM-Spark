@@ -30,6 +30,7 @@ export const FEEL: { key: keyof FeelSettings; label: string; max?: number }[] = 
   { key: 'gaze_smooth', label: 'Gaze smooth' },
   { key: 'hair_pin', label: 'Hair pin' },
   { key: 'hair_width', label: 'Hair width', max: 2 },
+  { key: 'head_sway', label: 'Head sway (iPhone)', max: 2 },
 ]
 
 export const OVERLAY: { key: keyof FeelSettings; label: string; title?: string }[] = [
@@ -53,6 +54,7 @@ export const ZERO_FEEL: FeelSettings = {
   hair_width: 1,
   gaze_gain: 1,
   gaze_smooth: 0.28,
+  head_sway: 1,
 }
 
 export const DEFAULT_PRESETS: MouthPreset[] = [
