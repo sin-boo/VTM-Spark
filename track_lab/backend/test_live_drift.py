@@ -65,7 +65,9 @@ def test_expression_ease_trail_holds_when_the_frame_rate_drops(monkeypatch, tmp_
     long as at 30, while the head's (timed) did not."""
     bench = _bench(monkeypatch, tmp_path)
     clock = {"t": 0.0}
-    monkeypatch.setattr(face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"]))
+    monkeypatch.setattr(
+        face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"], time=lambda: clock["t"])
+    )
     rest = bench.rest_pts.copy()
     opened = rest.copy()
     opened[25, 1] += 12.0
@@ -94,7 +96,9 @@ def test_expression_ease_trail_holds_when_the_frame_rate_drops(monkeypatch, tmp_
 def test_pupil_ease_trail_holds_when_the_frame_rate_drops(monkeypatch, tmp_path) -> None:
     bench = _bench(monkeypatch, tmp_path)
     clock = {"t": 0.0}
-    monkeypatch.setattr(face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"]))
+    monkeypatch.setattr(
+        face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"], time=lambda: clock["t"])
+    )
     rest = bench.rest_pts.copy()
     cx = 0.5 * (float(rest[11, 0]) + float(rest[13, 0]))
     cy = 0.5 * (float(rest[11, 1]) + float(rest[13, 1]))
