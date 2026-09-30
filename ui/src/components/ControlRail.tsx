@@ -681,6 +681,15 @@ export function ControlRail(props: Props) {
                 {t('stream.generateOnce')}
               </button>
             </div>
+            {virtualCam && s?.virtual_cam_width && s?.virtual_cam_height ? (
+              // The camera driver offers 1920x1080 by default and pads our square
+              // frame with black; only the receiving app can ask for our size.
+              <p className="hint">
+                {t('stream.camSizeHint', {
+                  size: `${s.virtual_cam_width}x${s.virtual_cam_height}`,
+                })}
+              </p>
+            ) : null}
             {s?.virtual_cam_error ? (
               <p className="status-error">{tr(s.virtual_cam_error)}</p>
             ) : null}

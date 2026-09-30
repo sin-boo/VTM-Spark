@@ -66,6 +66,19 @@ function hasFiles(ev: ReactDragEvent): boolean {
   return Array.from(ev.dataTransfer.types).includes('Files')
 }
 
+function isPack(file: File): boolean {
+  return /\.vtm$/i.test(file.name)
+}
+
+/** Stills a character can be made from. Keep in step with stage_create_still (backend/character_pack.py). */
+const STILL_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.bmp']
+const STILL_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/bmp']
+
+function isStill(file: File): boolean {
+  const name = file.name.toLowerCase()
+  return STILL_TYPES.includes(file.type) || STILL_EXTS.some((ext) => name.endsWith(ext))
+}
+
 /** Grid thumbnail that drops back to the full preview if /thumb fails. */
 function CardThumb({ card }: { card: CharacterCard }) {
   const [failed, setFailed] = useState(false)
@@ -103,6 +116,7 @@ export function CharacterLibrary(props: Props) {
   const [localStill, setLocalStill] = useState('')
   const [menu, setMenu] = useState<CtxMenu | null>(null)
   const [pickError, setPickError] = useState('')
+  const [createNote, setCreateNote] = useState('')
   const [detailsId, setDetailsId] = useState<string | null>(null)
   const [revealError, setRevealError] = useState('')
   const [importing, setImporting] = useState(false)
@@ -145,6 +159,7 @@ export function CharacterLibrary(props: Props) {
     setNameId(null)
     setNameDraft('')
     setPickError('')
+    setCreateNote('')
     if (localStill) URL.revokeObjectURL(localStill)
     setLocalStill('')
   }
@@ -250,9 +265,10 @@ export function CharacterLibrary(props: Props) {
     props.onRefresh?.()
   }
 
-  async function beginCreate(file: File) {
-    setLibraryOpen(false)
+  async function beginCreate(file: File, note = '') {
+    closeLibrary()
     setPickError('')
+    setCreateNote(note)
     setNameId(null)
     const url = URL.createObjectURL(file)
     setLocalStill((cur) => {
@@ -281,11 +297,14 @@ export function CharacterLibrary(props: Props) {
   /** Picked or dropped files. Each .vtm is copied into the characters folder by the backend. */
   async function beginImport(files: File[]) {
     setLibNotice(null)
-    const packs = files.filter((f) => /\.vtm$/i.test(f.name))
+    const packs = files.filter(isPack)
     if (!packs.length) {
       setLibNotice({ error: true, text: t('lib.pickVtm') })
       return
     }
+    const skipped = files.length - packs.length
+    const skipNote = skipped ? ` ${t('lib.skippedNotVtm', { count: skipped })}` : ''
+
     setImporting(true)
     const added: CharacterCard[] = []
     const failed: string[] = []
@@ -307,12 +326,33 @@ export function CharacterLibrary(props: Props) {
       setRevealId(last.id)
     }
     if (failed.length) {
-      setLibNotice({ error: true, text: t('lib.importFailed', { error: failed.join(' · ') }) })
+      setLibNotice({
+        error: true,
+        text: t('lib.importFailed', { error: failed.join(' · ') }) + skipNote,
+      })
     } else if (added.length > 1) {
-      setLibNotice({ error: false, text: t('lib.importedMany', { count: added.length }) })
+      setLibNotice({ error: false, text: t('lib.importedMany', { count: added.length }) + skipNote })
     } else if (last) {
-      setLibNotice({ error: false, text: t('lib.imported', { name: last.name }) })
+      setLibNotice({ error: false, text: t('lib.imported', { name: last.name }) + skipNote })
     }
+  }
+
+  /** .vtm files are imported; otherwise the first image becomes a new character. */
+  function dropFiles(zone: DropZone, files: File[]) {
+    const hasPack = files.some(isPack)
+    const still = files.find(isStill)
+    if (!hasPack && still) {
+      const skipped = files.length - 1
+      void beginCreate(still, skipped ? t('lib.skippedOneImage', { count: skipped }) : '')
+      return
+    }
+    // Dropped on the rail: open the library so the new card and notice show.
+    if (zone === 'rail') openDock()
+    if (!hasPack) {
+      setLibNotice({ error: true, text: t('lib.dropUnsupported') })
+      return
+    }
+    void beginImport(files)
   }
 
   function dropZone(zone: DropZone) {
@@ -333,10 +373,7 @@ export function CharacterLibrary(props: Props) {
         ev.preventDefault()
         setDropOver(null)
         if (closed) return
-        const files = Array.from(ev.dataTransfer.files)
-        // Dropped on the rail: open the library so the new card and notice show.
-        if (zone === 'rail') openDock()
-        void beginImport(files)
+        dropFiles(zone, Array.from(ev.dataTransfer.files))
       },
     }
   }
@@ -535,7 +572,7 @@ export function CharacterLibrary(props: Props) {
       <input
         ref={createRef}
         type="file"
-        accept="image/*"
+        accept={[...STILL_EXTS, ...STILL_TYPES].join(',')}
         className="file-input-hidden"
         disabled={locked}
         onChange={(e) => {
@@ -712,6 +749,7 @@ export function CharacterLibrary(props: Props) {
                         {t('common.save')}
                       </button>
                     </div>
+                    {createNote ? <p className="hint">{createNote}</p> : null}
                     {notice ? <p className="status-error">{notice}</p> : null}
                   </>
                 ) : (
@@ -733,6 +771,7 @@ export function CharacterLibrary(props: Props) {
                         label={tr(props.createLabel || 'Creating character…')}
                         value={props.createProgress ?? 0}
                       />
+                      {createNote ? <p className="hint">{createNote}</p> : null}
                       {notice ? <p className="status-error">{notice}</p> : null}
                     </div>
                   </>
