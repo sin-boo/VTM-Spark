@@ -57,6 +57,288 @@ def _saved(tmp_path) -> dict:
     return json.loads((tmp_path / "overlay_parts.json").read_text(encoding="utf-8"))
 
 
+# --- A: mouth / brow / pupil eases are timed, and eased once --------------
+
+
+def test_expression_ease_trail_holds_when_the_frame_rate_drops(monkeypatch, tmp_path) -> None:
+    """The mouth / brow ease counted frames: at 15 fps it trailed twice as
+    long as at 30, while the head's (timed) did not."""
+    bench = _bench(monkeypatch, tmp_path)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"]))
+    rest = bench.rest_pts.copy()
+    opened = rest.copy()
+    opened[25, 1] += 12.0
+
+    def gap(fps: float, source: str = "osf", seconds: float = 0.2) -> float:
+        bench._smooth_mesh = None
+        clock["t"] = 0.0
+        bench._ease_mesh(rest, source)
+        out = rest
+        for i in range(1, round(seconds * fps) + 1):
+            clock["t"] = i / fps
+            out = bench._ease_mesh(opened, source)
+        return float(opened[25, 1] - out[25, 1])
+
+    alpha = feel.alpha()
+    # At the webcam's usual 30 fps a frame still eases by Smooth's share...
+    assert abs(gap(30.0, seconds=1.0 / 30.0) - 12.0 * (1.0 - alpha)) < 1e-3
+    # ...and 15 fps lands where 30 does, not twice as far behind.
+    assert gap(30.0) > 0.05
+    assert abs(gap(15.0) - gap(30.0)) < 1e-3
+    # The iPhone keeps its feel at its ~60 packets a second, and holds it at 30.
+    assert abs(gap(60.0, "ifm", seconds=1.0 / 60.0) - 12.0 * (1.0 - alpha)) < 1e-3
+    assert abs(gap(30.0, "ifm") - gap(60.0, "ifm")) < 1e-3
+
+
+def test_pupil_ease_trail_holds_when_the_frame_rate_drops(monkeypatch, tmp_path) -> None:
+    bench = _bench(monkeypatch, tmp_path)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"]))
+    rest = bench.rest_pts.copy()
+    cx = 0.5 * (float(rest[11, 0]) + float(rest[13, 0]))
+    cy = 0.5 * (float(rest[11, 1]) + float(rest[13, 1]))
+    look = {"x": cx}
+    monkeypatch.setattr(
+        face_mod,
+        "retarget_iris",
+        lambda posed, **kw: ([{"id": 28, "x": look["x"], "y": cy, "score": 1.0, "visible": True}], "iris_pose"),
+    )
+    frame = OsfFrame(pose=dict(_POSE), faces=1, source="osf")
+
+    def gap(fps: float) -> float:
+        bench._iris_ease = {}
+        clock["t"] = 0.0
+        look["x"] = cx
+        bench._finish_live(frame, rest.copy())
+        look["x"] = cx + 2.0
+        for i in range(1, round(0.2 * fps) + 1):
+            clock["t"] = i / fps
+            bench._finish_live(frame, rest.copy())
+        return 2.0 - bench._iris_ease[28][0]
+
+    assert gap(30.0) > 0.01
+    assert abs(gap(15.0) - gap(30.0)) < 1e-6
+
+
+def test_webcam_hands_raw_mouth_weights_to_the_bench(monkeypatch) -> None:
+    """osf_cam eased the weights once a frame, then the bench eased the mesh
+    again: two lags on lip sync (the iPhone lost its extra one in 9dcab08)."""
+    from backend import osf_cam as osf_cam_mod
+    from backend.osf_cam import OsfCam
+    from backend.presets import empty_weights
+
+    opened = empty_weights()
+    key = next(iter(opened))
+    opened[key] = 1.0
+    calls = {"n": 0}
+
+    def weights(face, pose=None):
+        calls["n"] += 1
+        return empty_weights() if calls["n"] == 1 else dict(opened)
+
+    class FakeCap:
+        def read(self):
+            time.sleep(0.005)
+            return True, np.zeros((12, 12, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            return None
+
+    class FakeTracker:
+        def predict(self, frame):
+            return [SimpleNamespace()]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(osf_cam_mod, "viseme_weights", weights)
+    monkeypatch.setattr(osf_cam_mod, "_encode_jpeg", lambda img: b"x")
+    cam = OsfCam()
+    cam._cap = FakeCap()
+    cam._tracker = FakeTracker()
+    cam._running = True
+    snaps: list[OsfFrame] = []
+    done = threading.Event()
+
+    def on_frame(snap: OsfFrame) -> None:
+        snaps.append(snap)
+        if len(snaps) >= 2:
+            done.set()
+
+    thread = threading.Thread(target=cam._loop, args=(on_frame,), daemon=True)
+    cam._thread = thread
+    thread.start()
+    done.wait(timeout=3.0)
+    cam.stop()
+    thread.join(timeout=2.0)
+    assert len(snaps) >= 2
+    assert snaps[1].weights[key] == 1.0
+
+
+# --- B: the gaze zero -------------------------------------------------------
+
+
+def _cam_frame() -> OsfFrame:
+    hit = {"x": 10.0, "y": 10.0, "score": 1.0, "visible": True, "method": "osf_gaze"}
+    return OsfFrame(
+        pose=dict(_POSE),
+        faces=1,
+        lms_xy=np.zeros((68, 3), dtype=np.float32),
+        iris_cam=hits_payload(IrisHit(side="r", **hit), IrisHit(side="l", **hit)),
+        source="osf",
+    )
+
+
+def _pupils(monkeypatch, reads: list[tuple[float, float]]) -> None:
+    """Each frame's pupils, as fractions of their eye box, both eyes alike."""
+    queue = list(reads)
+
+    def fake(lms, right, left):
+        nx, ny = queue.pop(0)
+        return {"r": {"nx": nx, "ny": ny}, "l": {"nx": nx, "ny": ny}}
+
+    monkeypatch.setattr(face_mod, "rest_look_from_cam", fake)
+
+
+def _rest_looks(monkeypatch) -> list[dict]:
+    """The gaze zero each frame's iris retarget is handed."""
+    seen: list[dict] = []
+
+    def fake(posed, **kw):
+        seen.append(dict(kw.get("rest_look") or {}))
+        return [], "none"
+
+    monkeypatch.setattr(face_mod, "retarget_iris", fake)
+    return seen
+
+
+def test_webcam_gaze_rest_waits_for_a_steady_centred_look(monkeypatch, tmp_path) -> None:
+    """The first frame with pupils was the gaze zero, saved for good: a
+    glance aside there held both eyes off to one side until Set Rest."""
+    bench = _bench(monkeypatch, tmp_path)
+    seen = _rest_looks(monkeypatch)
+    steady = [(0.02 if i % 2 else 0.03, -0.05) for i in range(10)]
+    _pupils(monkeypatch, [(0.30, 0.0)] + steady)
+    posed = bench.rest_pts.copy()
+    bench._finish_live(_cam_frame(), posed)
+    assert "r" not in seen[-1]
+    for _ in range(9):
+        bench._finish_live(_cam_frame(), posed)
+    assert "r" not in seen[-1]
+    bench._finish_live(_cam_frame(), posed)
+    assert seen[-1]["r"] == {"nx": 0.025, "ny": -0.05}
+    assert seen[-1]["l"] == {"nx": 0.025, "ny": -0.05}
+    # It is this session's: nothing was saved.
+    assert not (tmp_path / "overlay_parts.json").exists()
+
+
+def test_webcam_gaze_rest_skips_a_wandering_look(monkeypatch, tmp_path) -> None:
+    bench = _bench(monkeypatch, tmp_path)
+    seen = _rest_looks(monkeypatch)
+    wander = [(0.0 if i % 2 else 0.12, 0.0) for i in range(12)]
+    _pupils(monkeypatch, wander)
+    for _ in wander:
+        bench._finish_live(_cam_frame(), bench.rest_pts.copy())
+    assert "r" not in seen[-1]
+
+
+def test_iphone_gaze_rest_waits_for_a_steady_quiet_look(monkeypatch, tmp_path) -> None:
+    """The first quiet frame (up to 0.2 off) was the iPhone's zero for good."""
+    bench = _bench(monkeypatch, tmp_path)
+    seen = _rest_looks(monkeypatch)
+
+    def frame(x: float) -> OsfFrame:
+        return OsfFrame(look={"x": x, "y": 0.0}, pose=dict(_POSE, sway=1.0), faces=1, source="ifm")
+
+    bench._finish_live(frame(0.18), bench.rest_pts.copy())
+    assert "x" not in seen[-1]
+    for _ in range(10):
+        bench._finish_live(frame(0.0), bench.rest_pts.copy())
+    assert seen[-1]["x"] == 0.0 and seen[-1]["y"] == 0.0
+    assert not (tmp_path / "overlay_parts.json").exists()
+
+
+def test_learnt_gaze_rest_lasts_one_session(monkeypatch, tmp_path) -> None:
+    bench = _bench(monkeypatch, tmp_path)
+    _rest_looks(monkeypatch)
+    _pupils(monkeypatch, [(0.05, 0.1)] * 10)
+    for _ in range(10):
+        bench._finish_live(_cam_frame(), bench.rest_pts.copy())
+    with bench._lock:
+        assert "r" in bench._rest_look()
+    bench.stop_live()
+    with bench._lock:
+        assert bench._rest_look() == {}
+
+
+def test_set_rest_gaze_is_dropped_on_another_camera(monkeypatch, tmp_path) -> None:
+    bench = _bench(monkeypatch, tmp_path)
+    bench.start_live(camera=0)
+    _pupils(monkeypatch, [(0.08, 0.1)])
+    bench._capture_rest_look(_cam_frame())
+    saved = _saved(tmp_path)["look_rest"]
+    assert saved["camera"] == "Desk Cam"
+    assert saved["r"] == {"nx": 0.08, "ny": 0.1}
+    bench.stop_live()
+    # Back on the same camera: Set Rest's zero stays.
+    bench.start_live(camera=0)
+    assert bench._look_rest["r"] == {"nx": 0.08, "ny": 0.1}
+    bench.stop_live()
+    # Another camera sees the same look elsewhere in the eye: dropped.
+    bench.start_live(camera=1)
+    assert "r" not in bench._look_rest and "l" not in bench._look_rest
+    saved = _saved(tmp_path)["look_rest"]
+    assert "r" not in saved and "camera" not in saved
+
+
+def test_gaze_rest_saved_before_cameras_were_recorded_still_loads(monkeypatch, tmp_path) -> None:
+    old = {
+        "hair": [],
+        "skeleton": [],
+        "iris": [],
+        "iris_method": "none",
+        "look_rest": {"x": 0.05, "y": -0.02, "r": {"nx": 0.04, "ny": 0.12}, "l": {"nx": 0.03, "ny": 0.1}},
+        "point_offsets": [],
+    }
+    bench = _bench(monkeypatch, tmp_path, parts=old)
+    assert bench._look_rest == old["look_rest"]
+    # Taken as the first camera's...
+    bench.start_live(camera=0)
+    with bench._lock:
+        assert bench._rest_look() == old["look_rest"]
+    assert _saved(tmp_path)["look_rest"]["camera"] == "Desk Cam"
+    bench.stop_live()
+    # ...so a switch drops its pupils; the iPhone's look zero is not a camera's.
+    bench.start_live(camera=1)
+    assert bench._look_rest == {"x": 0.05, "y": -0.02}
+
+
+# --- C: hair with no rig ----------------------------------------------------
+
+
+def test_hair_without_a_rig_is_not_re_clamped_every_frame(monkeypatch, tmp_path) -> None:
+    """With no hair rig, last frame's clamped hair was clamped again each
+    frame the head sat at a wall, so it slid away, and could be saved so."""
+    # A class this build does not rig: build_hair_rig gives None.
+    hat = [{"class": "hat", "polygon": [[20.0, 0.0], [80.0, 0.0], [50.0, 15.0]]}]
+    bench = _bench(monkeypatch, tmp_path, parts={"hair": hat})
+    assert bench._hair_rig is None and bench._hair == hat
+    posed = bench.rest_pts.copy()
+    posed[:, 0] += 300.0  # far past the head's wall
+    frame = OsfFrame(pose=dict(_POSE), faces=1, source="osf")
+    bench._finish_live(frame, posed.copy())
+    first = [dict(seg) for seg in bench._hair]
+    assert first[0]["polygon"] != hat[0]["polygon"]  # the limiter did move it
+    for _ in range(5):
+        bench._finish_live(frame, posed.copy())
+    assert bench._hair == first
+    bench._save_parts()
+    assert _saved(tmp_path)["hair"] == hat
+    bench.stop_live()
+    assert bench._hair == hat
+
+
 # --- D: OpenSeeFace's blink scale -------------------------------------------
 
 

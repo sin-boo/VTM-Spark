@@ -258,17 +258,15 @@ class Webcam:
         return _SimOsfFace(lms, rvec.astype(np.float32), tvec.astype(np.float32), self._pts_3d(lms, rvec, tvec))
 
     def frame(self, move: dict[str, float]) -> Any:
-        from backend.feel import feel
         from backend.iris import IrisHit, hits_payload, merge_hits, osf_gaze_hits
-        from backend.osf_cam import OsfFrame, _blink, _face_local_2d, _face_pose, _head, _lms_xy, _smooth
-        from backend.presets import empty_weights
+        from backend.osf_cam import OsfFrame, _blink, _face_local_2d, _face_pose, _head, _lms_xy
         from backend.visemes import viseme_weights
 
         face = self.face(move)
         pose = _face_pose(face)
         head = _head(face)
-        # osf_cam._loop eases the mouth weights across frames.
-        self.weights = _smooth(getattr(self, "weights", None) or empty_weights(), viseme_weights(face, pose), feel.alpha())
+        # Raw, as osf_cam._loop hands them: the bench eases the mouth.
+        self.weights = viseme_weights(face, pose)
         lms_xy = _lms_xy(np.asarray(face.lms, dtype=np.float32))
         gaze = osf_gaze_hits(lms_xy)
         right, left, _method = merge_hits((IrisHit(side="r"), IrisHit(side="l")), gaze)
