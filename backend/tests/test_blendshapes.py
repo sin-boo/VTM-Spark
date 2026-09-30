@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from backend.blendshapes import (
     apply_current_to_character,
@@ -18,6 +19,14 @@ from backend.blendshapes import (
     save_current,
 )
 from backend.stream import StreamRuntime
+
+
+@pytest.fixture(autouse=True)
+def _no_real_characters(tmp_path: Path, monkeypatch) -> None:
+    """save_character writes into a real .vtm of the same name: keep tests off the library."""
+    library = tmp_path / "characters"
+    monkeypatch.setattr("backend.paths.characters_dir", lambda: library)
+    monkeypatch.setattr("backend.character_pack.characters_dir", lambda: library)
 
 
 def _pts(y: float) -> list[list[float]]:
@@ -146,6 +155,21 @@ def test_eye_shapes_are_part_of_the_plan(tmp_path: Path, monkeypatch) -> None:
     moved["eye_closed"][12][1] += 2.0
     save_current(moved)
     assert compatibility("Goblin")["compatible"] is False
+
+def test_lab_resave_drift_stays_compatible(tmp_path: Path, monkeypatch) -> None:
+    """A re-saved plan drifts a few 0.001 px steps in the lips; not a new plan."""
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    plan = _shapes(("rest", 0.0), ("smile", 1.0), ("A", 2.5))
+    save_character("Drift", plan)
+    drifted = _shapes(("rest", 0.0), ("smile", 1.0), ("A", 2.5))
+    drifted["A"][23][0] -= 0.003
+    drifted["smile"][26][0] += 0.003
+    save_current(drifted)
+    assert compatibility("Drift")["compatible"] is True
+    drifted["A"][23][0] -= 0.5
+    save_current(drifted)
+    assert compatibility("Drift")["compatible"] is False
+
 
 def test_repair_copies_current_plan(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)

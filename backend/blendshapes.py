@@ -85,6 +85,9 @@ def fingerprint(shapes: object) -> str:
 # One stored step after normalize (xy to 0.001, score to 0.0001). Wider than that is a new plan.
 SHAPE_MATCH_XY = 0.001
 SHAPE_MATCH_SCORE = 0.0001
+# Rest-relative plans: Track Lab re-saving a rebased plan drifts a few 0.001 px
+# steps (seen: 0.003 px), while dragging a point moves it whole pixels.
+PLAN_MATCH_PX = 0.05
 
 
 def shapes_match(a: object, b: object) -> bool:
@@ -168,7 +171,7 @@ def plans_match(a: object, b: object) -> bool:
         return shapes_match(left, right)
     for name, rows in offs_a.items():
         for p, q in zip(rows, offs_b[name]):
-            tol = 2.5 * SHAPE_MATCH_XY / min(p[2], q[2])
+            tol = PLAN_MATCH_PX / min(p[2], q[2])
             if abs(p[0] - q[0]) > tol or abs(p[1] - q[1]) > tol:
                 return False
     return True
