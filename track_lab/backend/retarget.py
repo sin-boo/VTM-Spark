@@ -518,7 +518,14 @@ class FaceExpr:
                 return self._held if self._held is not None else mixed
             self._lock(arr, mouth_pts)
         elif stamp != self._token and session_rest_locked():
-            self._lock(arr, mouth_pts)
+            # Re-lock on Set Rest (a new snapshot) or on this session's first
+            # closed-mouth rest, like the head rig. A rest re-seeded after the
+            # face was lost is neither: re-locking there baked whatever the
+            # brows were doing (a drink, a hand) in for the session.
+            snap = stamp[1] if isinstance(stamp, tuple) and len(stamp) > 1 else None
+            first = not (isinstance(self._token, tuple) and self._token and self._token[0])
+            if snap is not None or first:
+                self._lock(arr, mouth_pts)
         if self._rest is None or self._live is None:
             return mixed
         xy, _uses_image = _source_xy(arr, mouth_pts)

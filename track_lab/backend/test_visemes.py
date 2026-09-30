@@ -1051,20 +1051,175 @@ def test_head_rig_look_down_keeps_hair_above_nose() -> None:
 def test_back_at_center_rezeros_drifted_open() -> None:
     _rest.reset()
     home = dict(opened=0.18, width=0.40, corner=0.0)
+    t = 0.0
     for _ in range(14):
-        _rest.observe(home["opened"], home["width"], home["corner"], True, yaw=0.0, cx=200.0, scale=100.0)
+        t += 1.0 / 30.0
+        _rest.observe(home["opened"], home["width"], home["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
     assert _rest.locked
     rest_o = float(_rest.open_rest or 0.0)
     for _ in range(10):
-        _rest.observe(0.30, 0.40, 0.0, True, yaw=40.0, cx=80.0, scale=100.0)
+        t += 1.0 / 30.0
+        _rest.observe(0.30, 0.40, 0.0, True, yaw=40.0, cx=80.0, scale=100.0, now=t)
     assert abs(float(_rest.open_rest or 0.0) - rest_o) < 0.02
     drifted = {**home, "opened": 0.26}
-    for _ in range(10):
-        _rest.observe(drifted["opened"], drifted["width"], drifted["corner"], True, yaw=0.0, cx=200.0, scale=100.0)
+    # Still and level at the start pose: re-zeroed after a few seconds.
+    for _ in range(30 * 8):
+        t += 1.0 / 30.0
+        _rest.observe(drifted["opened"], drifted["width"], drifted["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
     weights = _heuristic(
         {"open": drifted["opened"], "width": drifted["width"], "corner": drifted["corner"]}
     )
     assert weights["A"] < 0.15
+
+
+def _hold(feat: dict[str, float], seconds: float, t: float) -> float:
+    """Feed a still mouth at the start pose at 30 fps. Returns the clock."""
+    for _ in range(int(round(seconds * 30.0))):
+        t += 1.0 / 30.0
+        _rest.observe(feat["open"], feat["width"], feat["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
+    return t
+
+
+def test_set_rest_holds_through_held_expressions() -> None:
+    rest = _set_rest()
+    zero = _rest.snapshot()
+    held = {
+        "smile": {**rest, "corner": rest["corner"] + 0.14, "width": rest["width"] * 1.10},
+        "I": {**rest, "open": rest["open"] + 0.07, "width": rest["width"] * 1.14},
+        "A": {**rest, "open": rest["open"] + 0.10},
+    }
+    try:
+        t = 0.0
+        for name, feat in held.items():
+            first = _heuristic(feat)[name]
+            assert first > 0.2
+            t = _hold(feat, 6.0, t)
+            assert _rest.snapshot() == zero
+            assert abs(_heuristic(feat)[name] - first) < 1e-9
+            # Relaxing is neutral, not the opposite shape.
+            relaxed = _heuristic(rest)
+            assert all(abs(value) < 1e-6 for value in relaxed.values())
+    finally:
+        _rest.reset()
+
+
+def test_session_rest_does_not_chase_held_expressions() -> None:
+    _rest.reset()
+    home = {"open": 0.18, "width": 0.40, "corner": 0.0}
+    try:
+        t = _hold(home, 0.5, 0.0)
+        assert _rest.locked
+        zero = _rest.snapshot()
+        smile = {**home, "corner": 0.14, "width": 0.44}
+        ee = {**home, "open": 0.25, "width": 0.456}
+        for feat in (smile, ee):
+            t = _hold(feat, 6.0, t)
+            assert _rest.snapshot() == zero
+        assert _heuristic(smile)["smile"] > 0.2
+        assert all(abs(value) < 1e-6 for value in _heuristic(home).values())
+        # A still half-open "ah" is not re-zeroed for seconds.
+        ah = {**home, "open": 0.28}
+        t = _hold(ah, 2.5, t)
+        assert _rest.snapshot() == zero
+        assert _heuristic(ah)["A"] > 0.3
+    finally:
+        _rest.reset()
+
+
+def test_calibrated_smile_holds_against_set_rest(tmp_path, monkeypatch) -> None:
+    from . import calibrate as calibrate_mod
+
+    monkeypatch.setattr(calibrate_mod, "CALIB_PATH", tmp_path / "webcam_calibration.json")
+    cal = calibrate_mod.Calibrator()
+    rest = {"open": 0.15, "width": 0.40, "corner": 0.50, "lift": -0.50}
+    smile = {"open": 0.16, "width": 0.46, "corner": 0.64, "lift": -0.64}
+    sad = {"open": 0.16, "width": 0.37, "corner": 0.38, "lift": -0.38}
+    cal.samples = {"rest": dict(rest), "smile": dict(smile), "sad": dict(sad)}
+    _rest.reset()
+    _rest.use_snapshot(rest)
+    try:
+        t = 0.0
+        seen = []
+        for _ in range(60):
+            t = _hold(smile, 1.0 / 30.0, t)
+            seen.append(cal.weights(smile, _heuristic, origin=_rest.snapshot())["smile"])
+        assert min(seen) > 0.5
+        relaxed = cal.weights(rest, _heuristic, origin=_rest.snapshot())
+        assert relaxed["smile"] < 0.05
+        assert relaxed["sad"] < 0.05
+    finally:
+        _rest.reset()
+    assert not (tmp_path / "webcam_calibration.json").exists()
+
+
+def test_face_loss_keeps_set_rest() -> None:
+    from .visemes import mouth_features, rest_stamp
+
+    _set_rest()
+    zero = _rest.snapshot()
+    stamp = rest_stamp()
+    try:
+        # A cup or hand over the mouth for ~3 s.
+        for _ in range(90):
+            mouth_features(None)
+        assert rest_stamp() == stamp
+        assert _rest.snapshot() == zero
+    finally:
+        _rest.reset()
+
+
+def test_face_expr_relocks_only_on_set_rest_or_first_rest() -> None:
+    from .eye_bits import bits as eyes
+    from .feel import feel
+    from .retarget import FaceExpr
+    from .visemes import mouth_features, rest_stamp
+
+    rest, osf = _toy_face()
+    raised = osf.copy()
+    raised[17:27, 1] -= 0.35
+    closed = {"open": 0.15, "width": 0.40, "corner": 0.50}
+    expr = FaceExpr()
+    prev = feel.payload()
+    eye_snap = eyes.snapshot()
+    feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
+    _rest.reset()
+    try:
+        eyes.restore(frozenset(), {})
+        expr.apply(rest, rest, osf)
+        # This session's first closed-mouth rest still re-locks the face.
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert _rest.locked
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        _rest.use_snapshot(closed)
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        # Face lost past the miss limit, back with the brows up (a drink).
+        for _ in range(60):
+            mouth_features(None)
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        out = rest
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+        # A rest re-seeded without Set Rest is not a new neutral either.
+        _rest.reset()
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert rest_stamp() == (True, None)
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+    finally:
+        feel.update(prev)
+        eyes.restore(*eye_snap)
+        _rest.reset()
 
 
 def _toy_face() -> tuple[np.ndarray, np.ndarray]:
