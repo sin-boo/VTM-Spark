@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,11 @@ CMD_WAIT = 180.0
 GEN_WAIT = 300.0
 JPEG_WAIT = 4.0
 LIVE_OPS = frozenset({"start", "stop", "calibrate", "track", "set_rest"})
+# Measured on a live pose the loading tracker never had: never queued for later.
+POSE_OPS = frozenset({"set_point"})
+# A worker that ran this long before dropping is respawned again; one that
+# dies sooner is not (a crash loop).
+RESPAWN_HEALTHY = 30.0
 
 
 def _log(msg: str) -> None:
@@ -124,6 +130,7 @@ class WorkerBridge:
         self._jpeg_inflight: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self._proc: subprocess.Popen[Any] | None = None
         self._respawned = False
+        self._hello_at = 0.0
         self._closed = False
         self.op_wait = {"start": 120.0, "track": 120.0, "set_rest": 120.0, "stop": 8.0, "calibrate": 8.0}
 
@@ -187,6 +194,14 @@ class WorkerBridge:
                         status=hub.latest_status() or warming_status(),
                     )
                 return self._rpc(msg)
+            if op in POSE_OPS:
+                _log(f"op={op} refused while the tracker loads")
+                return ack(
+                    ident=ident,
+                    ok=False,
+                    error="Track Lab tracker is still loading — wait a moment",
+                    status=hub.latest_status() or warming_status(),
+                )
             with self._lock:
                 if not self._ready.is_set():
                     self._queued.append(dict(msg))
@@ -303,6 +318,7 @@ class WorkerBridge:
             with self._lock:
                 old = self._conn
                 self._conn = conn
+                self._hello_at = 0.0
             if old is not None and old is not conn:
                 try:
                     old.close()
@@ -316,6 +332,15 @@ class WorkerBridge:
                     if self._conn is conn:
                         self._conn = None
                     self._ready.clear()
+                    # Sent to the worker that is gone: no reply is coming. Left
+                    # waiting, the first held the command lock for CMD_WAIT.
+                    dropped = list(self._pending.items())
+                    self._pending.clear()
+                    self._jpeg_inflight.clear()
+                    up = time.monotonic() - self._hello_at if self._hello_at else 0.0
+                for ident, (ev, slot) in dropped:
+                    slot.setdefault("ack", ack(ident=ident, ok=False, error="tracker disconnected"))
+                    ev.set()
                 try:
                     conn.close()
                 except OSError:
@@ -323,6 +348,8 @@ class WorkerBridge:
                 if not self._closed:
                     _log("worker dropped — dummy packets")
                     publish_warming()
+                    if up >= RESPAWN_HEALTHY:
+                        self._respawned = False
                     self._maybe_respawn()
 
     def _read_loop(self, conn: socket.socket) -> None:
@@ -354,26 +381,35 @@ class WorkerBridge:
                 self._resolve(str(msg.get("id") or ""), {"data": data})
 
     def _on_hello(self, conn: socket.socket) -> None:
-        with self._lock:
-            queued = list(self._queued)
-            self._queued.clear()
-            self._ready.set()
-        _log(f"tracker ready queued={len(queued)}")
-        for item in queued:
-            try:
-                send(
-                    conn,
-                    {
-                        "type": "command",
-                        "id": item.get("id") or uuid.uuid4().hex,
-                        "op": item.get("op"),
-                        "body": item.get("body") or {},
-                    },
-                    self._send_lock,
-                )
-            except OSError as exc:
-                _log(f"drain failed: {exc}")
-                break
+        # Replay the queue before going ready. A live op waiting on ready used
+        # to reach the worker first: set_rest, then the queued set_source,
+        # which clears the rest again.
+        drained = 0
+        while True:
+            with self._lock:
+                queued = list(self._queued)
+                self._queued.clear()
+                if not queued:
+                    self._hello_at = time.monotonic()
+                    self._ready.set()
+                    break
+            drained += len(queued)
+            for item in queued:
+                try:
+                    send(
+                        conn,
+                        {
+                            "type": "command",
+                            "id": item.get("id") or uuid.uuid4().hex,
+                            "op": item.get("op"),
+                            "body": item.get("body") or {},
+                        },
+                        self._send_lock,
+                    )
+                except OSError as exc:
+                    _log(f"drain failed: {exc}")
+                    break
+        _log(f"tracker ready queued={drained}")
 
     def _resolve(self, ident: str, payload: dict[str, Any]) -> None:
         with self._lock:
