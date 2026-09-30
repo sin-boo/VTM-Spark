@@ -25,12 +25,12 @@
     <th>VTM Spark animates it</th>
   </tr>
   <tr>
-    <td align="center"><img src="character-blueprint/character-blueprint.png" alt="Input still: chest-up anime character on a green background" width="320"></td>
-    <td align="center"><img src="docs/media/demo-talk.gif" alt="The same character talking and glancing, drawn by VTM Spark" width="320"></td>
+    <td align="center"><img src="character-blueprint/character-blueprint.png" alt="Input still: chest-up anime character on a green background" width="360"></td>
+    <td align="center"><img src="docs/media/demo-live.gif" alt="The same character turning, nodding, blinking and talking, drawn by VTM Spark" width="360"></td>
   </tr>
 </table>
 
-<sub>Every frame on the right was drawn by the VTM Spark model from the picture on the left, driven by Track Lab's mouth shapes (A, I, U, E, smile) and eye direction. No camera was used. With live tracking, your own face, head, blinks and mouth drive it the same way.</sub>
+<sub>Every frame on the right was drawn by the VTM Spark model from the one picture on the left. It was driven through the same tracking pipeline a live session uses (head turn, nod and tilt, blinks, eye direction, mouth shapes), fed with scripted iPhone-style motion instead of a real face. Blinks use an Eye closed shape made for this character in Track Lab.</sub>
 
 <!-- Live demo slot: drag an .mp4 of a real session into GitHub's README editor and paste the link it gives you here. -->
 
