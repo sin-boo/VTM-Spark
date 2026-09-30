@@ -3026,8 +3026,19 @@ class StreamRuntime:
             self.engine._last_driven_body = None
         except Exception:
             pass
+        # The pose jumps here; the next key must not continue the last one.
+        self._drop_hold()
         if reason:
             print(f"[pose-diag] live origin reset ({reason})")
+
+    def _drop_hold(self) -> None:
+        """Start the next DiT call from noise, not from the last generated frame."""
+        clear = getattr(getattr(self, "engine", None), "clear_last_gen_latent", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
 
     @staticmethod
     def _snapshot_coord_key(snap: Any) -> tuple[Any, ...] | None:
@@ -3693,6 +3704,8 @@ class StreamRuntime:
         with self._lock:
             self._pose_frozen = False
             self._mesh_edited = False
+        # Recenter moves the whole pose; do not carry the last frame across it.
+        self._drop_hold()
         nested = ack.get("status") if isinstance(ack, dict) and isinstance(ack.get("status"), dict) else {}
         packet = nested if nested.get("keypoints") else None
         self.adopt_lab_overlay(packet, emit=True)
@@ -4088,6 +4101,8 @@ class StreamRuntime:
         self._frame_in_flight = False
         self._last_gen_start = 0.0
         self._gen_hold_pending = False
+        # A new stream opens on a fresh key, not on the last stream's frame.
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4140,6 +4155,7 @@ class StreamRuntime:
                         pass
                     break
         self._frame_in_flight = False
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4196,6 +4212,11 @@ class StreamRuntime:
         self._paused = False
         # The paused gap is not a key interval.
         self._last_call_done_t = 0.0
+        # Nor a step of motion: the first key after it neither continues the
+        # pre-pause frame nor tweens its batch from the pre-pause pose.
+        self._drop_hold()
+        self._prev_stream_kps = None
+        self._prev_stream_hair = None
         self._set_status(paused=False, message="Streaming")
         if not self._frame_in_flight:
             self._schedule_next_frame()
