@@ -25,6 +25,10 @@ from .points import (
 PROTOCOL = "track_lab.harness.v1"
 SCHEMA = "KEYPOINT_SCHEMA"
 
+# Frames and status carry ``session`` (one id per tracker process; generation
+# restarts with it) and ``seq`` (bumped each time the live pose changes). In
+# one session a lower seq is an older pose. Packets without them are unordered.
+
 # Slot 28 / IRIS.L sits in EYE.L (11-13). Person-left blink drives that eye.
 # The old packet name right_iris is in Point.legacy only.
 
@@ -60,7 +64,7 @@ COMMANDS: dict[str, str] = {
     "set_skeleton_point": "Nudge a rest skeleton joint. body: id, x, y",
     "set_rest_point": "Move one rest face point (0-27) or iris (28-29) on the still and drop its overlay nudge. body: id, x, y (character pixels).",
     "set_hair": "Replace rest hair polygons. body: hair: [{class, polygon}] in character pixels.",
-    "set_point": "Nudge any overlay point. body: id, x, y (character pixels). Offset rides on live tracking.",
+    "set_point": "Nudge any overlay point. body: id, x, y (character pixels), seq? + session? (the frame the point was lined up on: the offset is measured on that frame's pose, else on the current one; another session's nudge is refused). Offset rides on live tracking.",
     "reset_points": "Clear overlay nudges. body: id? (omit = all).",
     "set_offsets": "Replace every overlay nudge, e.g. the ones a character saved. body: point_offsets: [{id, dx, dy}] (character pixels).",
     "generate": "Run the DiT once on the current overlay (still + points + hair). body: points?, hair?, skeleton?, iris?",

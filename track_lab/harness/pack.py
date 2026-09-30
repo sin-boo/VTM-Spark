@@ -37,6 +37,9 @@ _STATUS_KEEP = (
     "faces",
     "ms",
     "generation",
+    "session",
+    "seq",
+    "pose_t",
     "error",
     "message",
     "source",
@@ -269,6 +272,11 @@ def pack_frame(
         "schema": SCHEMA,
         "t": float(time.time() if t is None else t),
         "generation": int(generation),
+        # Tracker process id, and the live pose's number in it: within one
+        # session a lower seq is an older pose. Empty session = not ordered.
+        "session": str(live.get("session") or ""),
+        "seq": int(live.get("seq") or 0),
+        "pose_t": round(_num(live.get("pose_t")), 4),
         "live": live_on,
         "tracker": tracker,
         "faces": int(live.get("faces") or 0),

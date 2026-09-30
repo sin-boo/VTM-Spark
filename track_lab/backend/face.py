@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -62,6 +64,7 @@ from .travel_box import (
 from .travel_fit import fit_travel_box
 from harness.hub import hub
 from harness.pack import frame_from_bench, status_from_bench
+from harness.protocol import NUM_KEYPOINTS
 
 from .presets import (
     EYE_SLOTS,
@@ -82,6 +85,9 @@ SOURCE_NAME = "source.png"
 PREVIEW_MAX = 960
 PARTS_PATH = OUTPUT_DIR / "overlay_parts.json"
 IFM_PATH = OUTPUT_DIR / "ifm.json"
+# Live poses kept by seq, so a nudge is measured on the frame the user saw
+# (~10 s at 60 fps). An older seq falls back to the current pose.
+POSE_HISTORY = 600
 
 
 def source_path() -> Path:
@@ -213,6 +219,13 @@ class FaceBench:
         self._expr = FaceExpr()
         self._lids = LidFilter()
         self._live_pts: np.ndarray | None = None
+        # One id per tracker process: generation and seq restart with it.
+        self.session = uuid.uuid4().hex[:12]
+        # Bumped (under _lock) every time _live_pts changes. Frames carry it,
+        # so one built before a newer pose can be told apart and dropped.
+        self._seq = 0
+        self._pose_t = 0.0
+        self._pose_history: OrderedDict[int, np.ndarray] = OrderedDict()
         # The eased expression (mouth, brows) in the still's frame, before
         # the rig. The head's own ease lives in the rig (FaceRig / ease.py).
         self._smooth_mesh: np.ndarray | None = None
@@ -307,6 +320,8 @@ class FaceBench:
         tracker = "ifm" if self._ifm.running else "osf" if self._osf.running else self.last_tracker
         with self._lock:
             pts = self._live_pts if live else None
+            seq = self._seq
+            pose_t = self._pose_t
             box = list(self._mouth_box) if live and self._mouth_box else []
             cage = list(self._mouth_cage) if live and self._mouth_cage else []
             hair = list(self._hair)
@@ -326,6 +341,9 @@ class FaceBench:
         return {
             "live": live,
             "tracker": tracker,
+            "session": self.session,
+            "seq": seq,
+            "pose_t": pose_t,
             "weights": weights,
             "head": head,
             "blink": blink,
@@ -441,6 +459,9 @@ class FaceBench:
             "ok": True,
             "live": live["live"],
             "tracker": live["tracker"],
+            "session": live["session"],
+            "seq": live["seq"],
+            "pose_t": live["pose_t"],
             "faces": self.last_faces,
             "ms": round(self.last_ms, 2),
             "error": self.last_error,
@@ -1076,8 +1097,22 @@ class FaceBench:
         except (TypeError, ValueError):
             self.last_error = "Invalid overlay point"
             return self.status(publish=True)
+        # The user lined the point up on a picture of frame ``seq``, not on
+        # the newest pose: measure the nudge there, or the preview latency is
+        # saved into the offset. Without a seq (the lab's own page, an older
+        # desk) the current pose is all there is.
+        session = str(body.get("session") or "")
+        if session and session != self.session:
+            # Made on the tracker before a restart (a replayed command): that
+            # pose is gone, and measuring on this one would save the wrong offset.
+            self.last_error = "Track Lab restarted — drag the point again"
+            return self.status(publish=True)
+        try:
+            seq = int(body["seq"]) if body.get("seq") is not None else None
+        except (TypeError, ValueError):
+            seq = None
         with self._lock:
-            cur = self._unoffset_xy(idx)
+            cur = self._unoffset_xy(idx, seq)
             if cur is None:
                 self.last_error = "No overlay point to nudge"
                 return self.status(publish=True)
@@ -1182,6 +1217,8 @@ class FaceBench:
             # A blink held at Stop would keep hiding the rest pose's irises.
             self._blink = {"l": 0.0, "r": 0.0}
             self.camera_bgr = None
+            # A live frame packed before Stop must not come back after it.
+            self._bump_live()
         pts = book.current()
         if pts is None:
             pts = self.rest_pts
@@ -1405,6 +1442,7 @@ class FaceBench:
                 measure=opened,
             )
             self._live_pts = posed
+            self._bump_live()
             debug = raw_debug(frame.iris_cam, look)
             self._iris_cam = list(debug["iris_cam"])
             packed_look = debug["look"]
@@ -1504,7 +1542,48 @@ class FaceBench:
         self._iris_ease = ease
         return out
 
-    def _unoffset_xy(self, idx: int) -> tuple[float, float] | None:
+    def _bump_live(self) -> None:
+        """Next seq for a changed ``_live_pts``. Call under ``_lock``.
+
+        Frames read seq with the pose they pack, so two built on different
+        threads are ordered by it. The live pose is kept by seq for set_point.
+        """
+        self._seq += 1
+        self._pose_t = time.time()
+        if self._live_pts is None:
+            return
+        self._pose_history[self._seq] = self._pose_rows()
+        while len(self._pose_history) > POSE_HISTORY:
+            self._pose_history.popitem(last=False)
+
+    def _pose_rows(self) -> np.ndarray:
+        """Every overlay point before its nudge, on the live pose (NaN = none).
+
+        The same points ``_unoffset_xy`` reads: face from the live mesh, the
+        pupils (or their rest), the followed skeleton.
+        """
+        rows = np.full((NUM_KEYPOINTS, 2), np.nan, dtype=np.float64)
+        pts = self._live_pts
+        if pts is not None:
+            n = min(28, len(pts))
+            rows[:n] = np.asarray(pts[:n, :2], dtype=np.float64)
+        for kind, source in (("iris", self._iris or self._iris_rest), ("body", self._skeleton)):
+            for row in source:
+                try:
+                    idx = int(row.get("id", -1))
+                    x, y = float(row.get("x") or 0.0), float(row.get("y") or 0.0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                wanted = idx in (28, 29) if kind == "iris" else 29 < idx < NUM_KEYPOINTS
+                if wanted and np.isnan(rows[idx, 0]):
+                    rows[idx] = (x, y)
+        return rows
+
+    def _unoffset_xy(self, idx: int, seq: int | None = None) -> tuple[float, float] | None:
+        if seq is not None:
+            rows = self._pose_history.get(int(seq))
+            if rows is not None and 0 <= idx < len(rows) and not np.isnan(rows[idx, 0]):
+                return float(rows[idx, 0]), float(rows[idx, 1])
         if 0 <= idx < 28:
             live = self._osf.running or self._ifm.running
             pts = self._live_pts if live and self._live_pts is not None else None
