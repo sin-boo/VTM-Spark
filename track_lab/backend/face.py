@@ -77,10 +77,11 @@ from .record import MovementRecorder
 from .retarget import FaceExpr
 from .rig import FaceRig
 from .sides import ifm_canonical, ifm_look_canonical, selfie_of, to_screen
+from .paths import OUTPUT
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_DIR = ROOT / "input"
-OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR = OUTPUT
 SOURCE_NAME = "source.png"
 PREVIEW_MAX = 960
 PARTS_PATH = OUTPUT_DIR / "overlay_parts.json"

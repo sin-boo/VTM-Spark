@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-PRESET_PATH = ROOT / "output" / "mouth_presets.json"
+from .paths import OUTPUT
+
+PRESET_PATH = OUTPUT / "mouth_presets.json"
 
 MOUTH_SLOTS = tuple(range(20, 28))
 # Character eyes by screen side: (corner, lid mid, corner). Blink "l" drives

@@ -16,6 +16,7 @@ from pathlib import Path
 import cv2
 
 from . import debug_log
+from .paths import OUTPUT
 
 
 def _no_mic_params() -> list[int]:
@@ -50,7 +51,7 @@ def open_video(index: int, backend: int) -> cv2.VideoCapture:
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR_OSF = ROOT.parent / "vendor" / "tools" / "openseeface"
-CAM_SAVE = ROOT / "output" / "camera.json"
+CAM_SAVE = OUTPUT / "camera.json"
 _PREFER = ("droidcam", "obs", "webcam", "usb", "hd ", "integrated", "nizima", "camera")
 _AUDIO_DEVICE = ("microphone", "stereo mix", "wave in", "what u hear", "speaks")
 _com = threading.local()

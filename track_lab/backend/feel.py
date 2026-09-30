@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-FEEL_PATH = ROOT / "output" / "tracking_feel.json"
+from .paths import OUTPUT
+
+FEEL_PATH = OUTPUT / "tracking_feel.json"
 
 DEFAULTS = {
     "response": 0.65,
