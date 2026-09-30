@@ -1152,6 +1152,76 @@ def test_calibrated_smile_holds_against_set_rest(tmp_path, monkeypatch) -> None:
     assert not (tmp_path / "webcam_calibration.json").exists()
 
 
+def test_face_loss_keeps_set_rest() -> None:
+    from .visemes import mouth_features, rest_stamp
+
+    _set_rest()
+    zero = _rest.snapshot()
+    stamp = rest_stamp()
+    try:
+        # A cup or hand over the mouth for ~3 s.
+        for _ in range(90):
+            mouth_features(None)
+        assert rest_stamp() == stamp
+        assert _rest.snapshot() == zero
+    finally:
+        _rest.reset()
+
+
+def test_face_expr_relocks_only_on_set_rest_or_first_rest() -> None:
+    from .eye_bits import bits as eyes
+    from .feel import feel
+    from .retarget import FaceExpr
+    from .visemes import mouth_features, rest_stamp
+
+    rest, osf = _toy_face()
+    raised = osf.copy()
+    raised[17:27, 1] -= 0.35
+    closed = {"open": 0.15, "width": 0.40, "corner": 0.50}
+    expr = FaceExpr()
+    prev = feel.payload()
+    eye_snap = eyes.snapshot()
+    feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
+    _rest.reset()
+    try:
+        eyes.restore(frozenset(), {})
+        expr.apply(rest, rest, osf)
+        # This session's first closed-mouth rest still re-locks the face.
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert _rest.locked
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        _rest.use_snapshot(closed)
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        # Face lost past the miss limit, back with the brows up (a drink).
+        for _ in range(60):
+            mouth_features(None)
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        out = rest
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+        # A rest re-seeded without Set Rest is not a new neutral either.
+        _rest.reset()
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert rest_stamp() == (True, None)
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+    finally:
+        feel.update(prev)
+        eyes.restore(*eye_snap)
+        _rest.reset()
+
+
 def _toy_face() -> tuple[np.ndarray, np.ndarray]:
     rest = np.zeros((28, 3), dtype=np.float32)
     rest[:, 2] = 1.0
