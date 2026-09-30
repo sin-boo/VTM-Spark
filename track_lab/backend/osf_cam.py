@@ -74,6 +74,16 @@ def _open_camera(index: int) -> cv2.VideoCapture | None:
     return open_capture(int(index), CAM_W, CAM_H)
 
 
+# Seconds OpenSeeFace learns each face's feature scale (the blink's open /
+# shut range: a running median, plus a min and max that creep toward it)
+# after it first sees the face; then the scale holds, through face losses
+# too. Left at the Tracker's default 0 it never stopped (and began again on
+# every face loss), so the same lid read more or less shut as the session
+# wore on. 30, not less: at a screen people can go ~10 s without a blink,
+# and a window with none leaves the lid an on / off switch for the session.
+_FEATURE_LEARN_S = 30
+
+
 def _make_tracker(width: int, height: int) -> object:
     if not (MODELS_DIR / "lm_model3_opt.onnx").is_file():
         raise FileNotFoundError(
@@ -95,6 +105,7 @@ def _make_tracker(width: int, height: int) -> object:
         try_hard=False,
         feature_level=2,
         static_model=True,
+        max_feature_updates=_FEATURE_LEARN_S,
     )
 
 
@@ -447,14 +458,6 @@ def _blink(face: object | None) -> dict[str, float]:
     return out
 
 
-def _smooth(prev: dict[str, float], nxt: dict[str, float], alpha: float = 0.38) -> dict[str, float]:
-    out = dict(nxt)
-    for key, value in nxt.items():
-        old = float(prev.get(key, value))
-        out[key] = old + alpha * (float(value) - old)
-    return out
-
-
 class _LatestFrame:
     """Overwrite mailbox so a slow tracker never replays buffered camera frames."""
 
@@ -717,7 +720,6 @@ class OsfCam:
         me = threading.current_thread()
         _ensure_com()
         cap = self._cap
-        smoothed = empty_weights()
         pending = _LatestFrame()
         try:
             if cap is None:
@@ -784,8 +786,10 @@ class OsfCam:
                 face = faces[0] if faces else None
                 pose = _face_pose(face)
                 head = _head(face)
+                # Raw: the bench eases the mouth with the rest of the mesh.
+                # Easing the weights here too put two lags on lip sync, and
+                # counted frames, so it dragged twice as long at 15 fps.
                 weights = viseme_weights(face, pose=pose)
-                smoothed = _smooth(smoothed, weights, feel.alpha())
                 pts_3d = None
                 if face is not None:
                     raw3 = getattr(face, "pts_3d", None)
@@ -806,7 +810,7 @@ class OsfCam:
                     )
                     iris_cam = hits_payload(cam_right, cam_left)
                 snap = OsfFrame(
-                    weights=smoothed,
+                    weights=weights,
                     head=head,
                     blink=_blink(face),
                     pose=pose,

@@ -51,6 +51,26 @@ def ease_weight(dt: float, cutoff_hz: float) -> float:
     return 1.0 / (1.0 + tau / max(float(dt), 1e-6))
 
 
+def frame_dt(last: float | None, now: float) -> float:
+    """Seconds since the last reading, clamped the way the head's are."""
+    dt = _FIRST_DT if last is None else float(now) - float(last)
+    return min(max(dt, _DT_MIN), _DT_MAX)
+
+
+def timed_alpha(alpha: float, dt: float, frame_s: float) -> float:
+    """A per-frame blend, tuned at ``frame_s`` seconds a frame, for a frame
+    ``dt`` seconds after the last.
+
+    The share ``alpha`` a frame would have reached in ``dt``: one frame at
+    15 fps lands where two at 30 would, so a frame rate drop no longer
+    stretches the trail.
+    """
+    a = min(max(float(alpha), 0.0), 1.0)
+    if a <= 0.0 or a >= 1.0:
+        return a
+    return 1.0 - (1.0 - a) ** (max(float(dt), 0.0) / max(float(frame_s), 1e-6))
+
+
 class HeadEase:
     """Eases a vector of head values with one shared weight.
 
