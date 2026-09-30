@@ -57,6 +57,53 @@ def _saved(tmp_path) -> dict:
     return json.loads((tmp_path / "overlay_parts.json").read_text(encoding="utf-8"))
 
 
+# --- D: OpenSeeFace's blink scale -------------------------------------------
+
+
+def test_osf_tracker_is_built_to_stop_learning_the_blink_scale(monkeypatch, tmp_path) -> None:
+    from backend import osf_cam as osf_cam_mod
+
+    seen: dict = {}
+    fake = ModuleType("tracker")
+
+    class Tracker:
+        def __init__(self, **kwargs) -> None:
+            seen.update(kwargs)
+
+    fake.Tracker = Tracker
+    monkeypatch.setitem(sys.modules, "tracker", fake)
+    (tmp_path / "lm_model3_opt.onnx").write_bytes(b"")
+    monkeypatch.setattr(osf_cam_mod, "MODELS_DIR", tmp_path)
+    osf_cam_mod._make_tracker(640, 480)
+    assert seen["max_feature_updates"] == osf_cam_mod._FEATURE_LEARN_S > 0
+
+
+def test_osf_feature_scale_holds_after_its_learning_window() -> None:
+    """What max_feature_updates is in OpenSeeFace: seconds after the face is
+    first seen, past which its median / min / max stop moving. 0 never stops."""
+    from backend import osf_cam as osf_cam_mod
+
+    tracker = pytest.importorskip("tracker")
+    learn = osf_cam_mod._FEATURE_LEARN_S
+    held = tracker.Feature(max_feature_updates=learn)
+    forever = tracker.Feature()
+    t = 0.0
+    # Open eyes (0.3) and a blink (0.1) every 3 s, through the window.
+    for i in range(int(learn * 30)):
+        x = 0.1 if i % 90 == 45 else 0.3
+        held.update(x, now=t)
+        forever.update(x, now=t)
+        t += 1.0 / 30.0
+    scale = (held.current_median, held.min, held.max)
+    # Then a long stretch of narrower eyes (a squint, the light changing).
+    for _ in range(3000):
+        held.update(0.22, now=t)
+        forever.update(0.22, now=t)
+        t += 1.0 / 30.0
+    assert (held.current_median, held.min, held.max) == scale
+    assert abs(forever.current_median - 0.22) < 1e-6
+
+
 # --- E: the head's size and Set Rest zero -----------------------------------
 
 

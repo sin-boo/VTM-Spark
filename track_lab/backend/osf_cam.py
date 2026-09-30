@@ -74,6 +74,16 @@ def _open_camera(index: int) -> cv2.VideoCapture | None:
     return open_capture(int(index), CAM_W, CAM_H)
 
 
+# Seconds OpenSeeFace learns each face's feature scale (the blink's open /
+# shut range: a running median, plus a min and max that creep toward it)
+# after it first sees the face; then the scale holds, through face losses
+# too. Left at the Tracker's default 0 it never stopped (and began again on
+# every face loss), so the same lid read more or less shut as the session
+# wore on. 30, not less: at a screen people can go ~10 s without a blink,
+# and a window with none leaves the lid an on / off switch for the session.
+_FEATURE_LEARN_S = 30
+
+
 def _make_tracker(width: int, height: int) -> object:
     if not (MODELS_DIR / "lm_model3_opt.onnx").is_file():
         raise FileNotFoundError(
@@ -95,6 +105,7 @@ def _make_tracker(width: int, height: int) -> object:
         try_hard=False,
         feature_level=2,
         static_model=True,
+        max_feature_updates=_FEATURE_LEARN_S,
     )
 
 
