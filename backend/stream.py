@@ -340,6 +340,10 @@ def fit_edit(method: Callable[..., Any]) -> Callable[..., Any]:
 class StreamRuntime:
     """Owns model, tracker, and background generate/stream loops for the API."""
 
+    # Orders Track Lab packets applied onto the overlay / hair (track poll,
+    # DiT feed, command acks all apply them) and guards the session / seq.
+    _lab_order_lock = threading.RLock()
+
     def __init__(self) -> None:
         default_ckpt = default_stream_checkpoint()
         self.engine = StreamEngine(
@@ -475,6 +479,13 @@ class StreamRuntime:
         # None = this still is not in Track Lab yet; ignore leftover overlay/hair.
         self._lab_overlay_gen: int | None = 0
         self._lab_seen_generation: int = 0
+        # Track Lab tracker process (see _note_lab_session), sessions it
+        # replaced, the newest seq applied, and the frame now on the overlay.
+        self._lab_session = ""
+        self._lab_old_sessions: tuple[str, ...] = ()
+        self._lab_seq = -1
+        self._lab_overlay_frame: tuple[str, int] = ("", -1)
+        self._lab_session_restore = False
         # Live retarget state (webcam → character). Missing this made the mesh
         # draw raw webcam-scale keypoints and look tiny / "broken".
         self._live_origin_keypoints: np.ndarray | None = None
@@ -3472,10 +3483,64 @@ class StreamRuntime:
         return lab_packet_from_ack(ack)
 
     def _note_lab_generation(self, packet: dict[str, Any] | None) -> None:
+        self._note_lab_session(packet)
         gen = self._lab_generation(packet)
         if gen:
             seen = int(getattr(self, "_lab_seen_generation", 0) or 0)
             self._lab_seen_generation = max(seen, gen)
+
+    def _note_lab_session(self, packet: dict[str, Any] | None) -> None:
+        """A restarted Track Lab tracker starts ``generation`` and ``seq`` at 0.
+
+        Held against the old counters, every packet it sent looked stale: the
+        overlay froze under "Tracking on" and a character sync failed. Forget
+        them, and let the track poll give the new tracker the character still
+        and start it again (``_restore_lab_session``).
+        """
+        from .lab_harness import lab_packet_session
+
+        session = lab_packet_session(packet)
+        if not session:
+            return
+        with self._lab_order_lock:
+            current = str(getattr(self, "_lab_session", "") or "")
+            retired = tuple(getattr(self, "_lab_old_sessions", ()) or ())
+            if session == current or session in retired:
+                return
+            self._lab_session = session
+            self._lab_seq = -1
+            if not current:
+                return  # first packet this desk has seen: nothing to restore
+            self._lab_old_sessions = (retired + (current,))[-4:]
+            self._lab_seen_generation = 0
+            if getattr(self, "_lab_overlay_gen", None) is not None:
+                self._lab_overlay_gen = 0
+            self._lab_session_restore = True
+        print(f"[lab-harness] Track Lab restarted (session {current} -> {session})", flush=True)
+
+    def _lab_packet_fresh(self, packet: dict[str, Any] | None) -> bool:
+        """False for a packet older than one already applied. Hold ``_lab_order_lock``."""
+        from .lab_harness import lab_packet_order
+
+        order = lab_packet_order(packet)
+        if order is None:
+            return True
+        session, seq = order
+        if session != str(getattr(self, "_lab_session", "") or ""):
+            # A tracker that has since restarted.
+            return session not in tuple(getattr(self, "_lab_old_sessions", ()) or ())
+        return seq >= int(getattr(self, "_lab_seq", -1))
+
+    def _lab_mark_applied(self, packet: dict[str, Any] | None, *, overlay: bool) -> None:
+        """Remember the newest seq applied. Hold ``_lab_order_lock``."""
+        from .lab_harness import lab_packet_order
+
+        order = lab_packet_order(packet)
+        if order is None or order[0] != str(getattr(self, "_lab_session", "") or ""):
+            return
+        self._lab_seq = max(int(getattr(self, "_lab_seq", -1)), order[1])
+        if overlay:
+            self._lab_overlay_frame = order
 
     def _accept_lab_overlay(self, packet: dict[str, Any] | None) -> None:
         if not isinstance(packet, dict):
@@ -3485,6 +3550,8 @@ class StreamRuntime:
         # while blink / look meters kept updating.
         if "generation" not in packet and "keypoints" not in packet:
             return
+        # A restart resets the generation: note it before taking this one.
+        self._note_lab_session(packet)
         gen = self._lab_generation(packet)
         self._lab_overlay_gen = gen
         self._note_lab_generation(packet)
@@ -3493,6 +3560,10 @@ class StreamRuntime:
         want = getattr(self, "_lab_overlay_gen", 0)
         if want is None:
             return False
+        from .lab_harness import lab_packet_session
+
+        if lab_packet_session(packet) in tuple(getattr(self, "_lab_old_sessions", ()) or ()):
+            return False  # from a tracker that has since restarted
         gen = self._lab_generation(packet)
         if not gen:
             return int(want) <= 0
@@ -3518,6 +3589,8 @@ class StreamRuntime:
         fit_gen: int | None = None,
     ) -> bool:
         """Copy Track Lab overlay onto the desk cel. Authoring is not live-only."""
+        # Held or not, see a Track Lab restart (the idle status poll lands here).
+        self._note_lab_session(packet)
         with self._lock:
             frozen = bool(self._pose_frozen or self._mesh_edited)
         if frozen or self.fit_poll_stale(fit_gen):
@@ -3555,25 +3628,27 @@ class StreamRuntime:
         w, h = (image.size if image is not None else (0, 0))
         hair = hair_from_frame(frame, width=w, height=h)
         driven = overlay_from_frame(frame, width=w, height=h)
-        if driven is None:
+        if driven is not None:
+            driven = self._apply_drag_to_overlay(driven)
+        # The track poll, the DiT feed and command acks all land here. A frame
+        # fetched before a newer one was applied must not put the older pose
+        # (or hair) back: that was the twitch when a slider moved.
+        with self._lab_order_lock:
+            if not self._lab_packet_fresh(frame):
+                return None
+            self._lab_mark_applied(frame, overlay=driven is not None)
             if hair is not None:
                 self._last_lab_hair = hair
                 if self._lab_rest_hair is None and hair:
                     self._lab_rest_hair = [dict(seg) for seg in hair]
-            self.adopt_lab_travel_box(frame)
-            return None
+            if driven is not None:
+                self._last_overlay_kps = driven.copy()
+                self._driven_keypoints = driven.copy()
+                self._last_good_keypoints = driven.copy()
+                self._body_lost = False
         # Lab already limited walk / look / rotate. Do not re-clamp here —
         # a second apply_walk_box squashes the look the lab authored.
         self.adopt_lab_travel_box(frame)
-        driven = self._apply_drag_to_overlay(driven)
-        if hair is not None:
-            self._last_lab_hair = hair
-            if self._lab_rest_hair is None and hair:
-                self._lab_rest_hair = [dict(seg) for seg in hair]
-        self._last_overlay_kps = driven.copy()
-        self._driven_keypoints = driven.copy()
-        self._last_good_keypoints = driven.copy()
-        self._body_lost = False
         return driven
 
     def _apply_drag_to_overlay(self, driven: np.ndarray) -> np.ndarray:
@@ -3610,7 +3685,16 @@ class StreamRuntime:
     def _nudge_lab_point(self, idx: int, x: float, y: float) -> None:
         try:
             px, py = self._desk_px_to_lab(x, y)
-            ack = self._lab_ack("set_point", {"id": int(idx), "x": float(px), "y": float(py)})
+            body: dict[str, Any] = {"id": int(idx), "x": float(px), "y": float(py)}
+            # The point was lined up on the overlay on screen, not on Track
+            # Lab's newest pose: name that frame so the lab measures the nudge
+            # there and the preview latency is not saved into the offset.
+            with self._lab_order_lock:
+                session, seq = getattr(self, "_lab_overlay_frame", ("", -1))
+            if session and int(seq) >= 0:
+                body["session"] = str(session)
+                body["seq"] = int(seq)
+            ack = self._lab_ack("set_point", body)
         except Exception as exc:
             print(f"lab set_point failed: {exc}")
             return
@@ -4860,11 +4944,13 @@ class StreamRuntime:
         from .lab_harness import hair_from_frame, lab as lab_harness
 
         packet = frame if isinstance(frame, dict) else lab_harness.frame()
+        self._note_lab_session(packet)
         if not self._lab_overlay_current(packet):
             return False
         self._note_lab_generation(packet)
         w, h = self._lab_hair_wh(packet)
         hair = hair_from_frame(packet, width=w, height=h)
+        source = packet
         if hair is None and frame is None:
             status = lab_harness.status(merge_frame=True)
             if isinstance(status, dict) and self._lab_overlay_current(status):
@@ -4876,9 +4962,15 @@ class StreamRuntime:
                     pass
                 hair = hair_from_frame(status, width=w, height=h)
                 self._note_lab_generation(status)
+                source = status
         if not hair:
             return False
-        self._last_lab_hair = hair
+        with self._lab_order_lock:
+            # Older than the hair the live overlay already put up.
+            if not self._lab_packet_fresh(source):
+                return False
+            self._lab_mark_applied(source, overlay=False)
+            self._last_lab_hair = hair
         if not self._lab_drive or getattr(self, "_lab_rest_hair", None) is None:
             self._lab_rest_hair = [dict(seg) for seg in hair]
         self._hair_capture_done = True
@@ -5706,9 +5798,42 @@ class StreamRuntime:
         )
         return self.status()
 
+    def _restore_lab_session(self) -> None:
+        """Track Lab restarted: give the new tracker the character still again
+        and, when the desk was tracking through it, start it again.
+
+        Run on the track poll thread; the commands can take a while. The new
+        tracker reloads its saved rest, parts, nudges and limiters itself.
+        """
+        self._lab_session_restore = False
+        tracking = bool(self._tracking and self._lab_drive)
+        if tracking:
+            # Not "Tracking on" while nothing drives the pose.
+            self._set_track_status(track_message="Track Lab restarted — resuming…")
+        try:
+            self._sync_lab_character()
+        except Exception as exc:
+            print(f"[lab-harness] restarted Track Lab did not take the character: {exc}", flush=True)
+        if not (tracking and self._tracking and self._lab_drive):
+            return
+        from .lab_harness import lab as lab_harness
+
+        probe = lab_harness.status(merge_frame=False)
+        source = "ifm" if str(probe.get("source") or "") == "ifm" else "camera"
+        try:
+            # Fails into Tracking off, never "Tracking on" over a frozen pose.
+            self.restart_tracking_on_input(source)
+        except Exception as exc:
+            print(f"[lab-harness] tracking did not resume after the restart: {exc}", flush=True)
+
     def _track_poll_loop(self) -> None:
         while not self._track_stop.is_set():
             time.sleep(0.05)
+            if getattr(self, "_lab_session_restore", False):
+                try:
+                    self._restore_lab_session()
+                except Exception as exc:
+                    print(f"[lab-harness] restore after restart failed: {exc}", flush=True)
             if not self._tracking:
                 continue
             try:
