@@ -110,6 +110,11 @@ NECK_UP = 0.5
 # widths), so a neck that swings a little unlike NECK_FORWARD does not drag
 # the shoulders on a nod.
 _WALK_DEADBAND = 0.08
+# Past this nod (degrees from rest) the torso's vertical walk holds. A real
+# neck swings the eyes by up to ~1.5x (or 0.5x) what NECK_UP models; on a
+# 20-30 deg nod that miss read as a walk of 20+ px and dragged the shoulders.
+# The head still follows the eyes the camera sees. Blends in from rest.
+_NOD_WALK_HOLD_DEG = 6.0
 # How far each face point sits in front of the eye line (+) or behind it,
 # in head radii. A flat card only squashed: a nod read as the face sliding
 # down and a turn as it slimming, with the nose and mouth still centred
@@ -489,6 +494,7 @@ class FaceRig:
         self._dx = 0.0
         self._dy = 0.0
         self._walk = (0.0, 0.0)
+        self._torso_walk_y = 0.0
         self._bdx = 0.0
         self._bdy = 0.0
         self._s = 1.0
@@ -531,6 +537,7 @@ class FaceRig:
             "roll": self._roll,
         }
         self._walk = (0.0, 0.0)
+        self._torso_walk_y = 0.0
         # A new zero lands at once, not eased in from the old one.
         self._ease.reset()
         self.locked = True
@@ -694,6 +701,7 @@ class FaceRig:
             sway = float(pose.get("sway") or 0.0)
             swing = (sway * nx * ms, sway * ny * ms)
             walk = (0.0, 0.0)
+            torso_walk = walk
         else:
             # Webcam: the eyes move by the head's real swing plus any walk or
             # lean. Take the real turn's swing out and what is left walks.
@@ -705,13 +713,16 @@ class FaceRig:
             )
             if head_ok or self._provisional:
                 self._walk = (seen_x - real_x * ms, seen_y - real_y * ms)
+                hold = min(1.0, abs(pitch_delta) / _NOD_WALK_HOLD_DEG)
+                self._torso_walk_y += (self._walk[1] - self._torso_walk_y) * (1.0 - hold)
             # A bad solve holds the last turn, so its swing cannot be taken
             # out of the eyes: the last walk holds with it.
             swing = (nx * ms, ny * ms)
             walk = self._walk
+            torso_walk = (walk[0], self._torso_walk_y)
         self._dx = _clip(walk[0] + swing[0], -ms * 2.2, ms * 2.2)
         self._dy = _clip(walk[1] + swing[1], -ms * 1.6, ms * 1.6)
-        torso_x, torso_y = _dead(walk[0], walk[1], _WALK_DEADBAND * ms)
+        torso_x, torso_y = _dead(torso_walk[0], torso_walk[1], _WALK_DEADBAND * ms)
         self._bdx = _clip(torso_x, -ms * 2.2, ms * 2.2)
         self._bdy = _clip(torso_y, -ms * 1.6, ms * 1.6)
         # Size from solved distance. It is the same whether you face the
@@ -867,7 +878,12 @@ class FaceRig:
             return mixed
         if not self._sync(rest, head, pose, snap=snap) and not self.locked:
             return mixed
-        src = mixed
+        return self.project_face(mixed)
+
+    def project_face(self, src: np.ndarray) -> np.ndarray:
+        """The 28 face points through the current head, without easing it."""
+        if not self.locked:
+            return src.copy()
         out = src.copy()
         xs = src[:, 0] - self._rest_cx
         ys = src[:, 1] - self._rest_cy

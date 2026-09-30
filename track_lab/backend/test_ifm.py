@@ -612,116 +612,6 @@ def test_ifm_look_up_nods_the_head_rig() -> None:
     assert float(out[5, 1]) < float(out[15, 1]) < float(out[2, 1])
 
 
-def test_mapped_blink_is_not_applied_twice() -> None:
-    from .eye_bits import DEFAULT_ON, DEFAULT_TO, bits as eyes
-    from .feel import feel
-    from .retarget import FaceExpr
-
-    rest = _anime_rest()
-    template = rest_landmarks()
-    closed_pkt = parse_packet("eyeBlink_L-0|eyeBlink_R-0|=head#0,0,0,0,0,0")
-    blink_pkt = parse_packet("eyeBlink_L-80|eyeBlink_R-80|=head#0,0,0,0,0,0")
-    assert closed_pkt is not None and blink_pkt is not None
-    closed = apply_shapes(template, closed_pkt)
-    blinked = apply_shapes(template, blink_pkt)
-    assert abs(float(blinked[37, 1] - blinked[40, 1])) < abs(
-        float(closed[37, 1] - closed[40, 1])
-    ) - 0.02
-    expr = FaceExpr()
-    prev = feel.payload()
-    snap = eyes.snapshot()
-    feel.update({"smoothing": 0.0, "response": 1.0})
-    try:
-        eyes.restore(frozenset(DEFAULT_ON), dict(DEFAULT_TO))
-        expr.apply(rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed)
-        opened = rest
-        slammed = rest
-        for _ in range(8):
-            opened = expr.apply(
-                rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed
-            )
-        expr_s = FaceExpr()
-        expr_s.apply(rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed)
-        for _ in range(8):
-            slammed = expr_s.apply(
-                rest, rest, closed, {"l": 0.8, "r": 0.8}, mouth_pts=closed
-            )
-        assert opened is not None and slammed is not None
-        assert np.allclose(opened[[11, 13], :2], slammed[[11, 13], :2], atol=0.15)
-        assert np.allclose(opened[[17, 19], :2], slammed[[17, 19], :2], atol=0.15)
-        assert float(slammed[12, 1]) > float(opened[12, 1]) + 0.15
-        assert float(slammed[18, 1]) > float(opened[18, 1]) + 0.15
-        without = rest
-        with_blink = rest
-        expr_w = FaceExpr()
-        expr_w.apply(rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed)
-        expr2 = FaceExpr()
-        expr2.apply(rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed)
-        for _ in range(8):
-            without = expr_w.apply(
-                rest, rest, blinked, {"l": 0.0, "r": 0.0}, mouth_pts=blinked
-            )
-        for _ in range(8):
-            with_blink = expr2.apply(
-                rest, rest, blinked, {"l": 0.8, "r": 0.8}, mouth_pts=blinked
-            )
-        assert without is not None and with_blink is not None
-        assert np.allclose(without[[11, 13], :2], with_blink[[11, 13], :2], atol=0.15)
-        assert np.allclose(without[[17, 19], :2], with_blink[[17, 19], :2], atol=0.15)
-        assert float(with_blink[12, 1]) >= float(without[12, 1]) - 0.05
-        assert float(with_blink[18, 1]) >= float(without[18, 1]) - 0.05
-    finally:
-        feel.update(prev)
-        eyes.restore(*snap)
-
-
-def test_left_wink_closes_image_left_lid_only() -> None:
-    from .eye_bits import DEFAULT_ON, DEFAULT_TO, bits as eyes
-    from .feel import feel
-    from .retarget import FaceExpr
-
-    rest = _anime_rest()
-    template = rest_landmarks()
-    closed_pkt = parse_packet("eyeBlink_L-0|eyeBlink_R-0|=head#0,0,0,0,0,0")
-    left_pkt = parse_packet("eyeBlink_L-80|eyeBlink_R-0|=head#0,0,0,0,0,0")
-    right_pkt = parse_packet("eyeBlink_L-0|eyeBlink_R-80|=head#0,0,0,0,0,0")
-    assert closed_pkt is not None and left_pkt is not None and right_pkt is not None
-    closed = apply_shapes(template, closed_pkt)
-    left_src = apply_shapes(template, left_pkt)
-    right_src = apply_shapes(template, right_pkt)
-    prev = feel.payload()
-    snap = eyes.snapshot()
-    feel.update({"smoothing": 0.0, "response": 1.0})
-    try:
-        eyes.restore(frozenset(DEFAULT_ON), dict(DEFAULT_TO))
-        open_expr = FaceExpr()
-        opened = rest
-        for _ in range(8):
-            opened = open_expr.apply(
-                rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed
-            )
-        left_expr = FaceExpr()
-        left = rest
-        for _ in range(8):
-            left = left_expr.apply(
-                rest, rest, left_src, {"l": 0.8, "r": 0.0}, mouth_pts=left_src
-            )
-        right_expr = FaceExpr()
-        right = rest
-        for _ in range(8):
-            right = right_expr.apply(
-                rest, rest, right_src, {"l": 0.0, "r": 0.8}, mouth_pts=right_src
-            )
-        assert opened is not None and left is not None and right is not None
-        assert float(left[12, 1]) > float(opened[12, 1]) + 0.15
-        assert abs(float(left[18, 1]) - float(opened[18, 1])) < 0.2
-        assert float(right[18, 1]) > float(opened[18, 1]) + 0.15
-        assert abs(float(right[12, 1]) - float(opened[12, 1])) < 0.2
-    finally:
-        feel.update(prev)
-        eyes.restore(*snap)
-
-
 def test_jaw_open_keeps_lip_gap_after_retarget() -> None:
     from .feel import feel
     from .mouth_bits import DEFAULT_ON, DEFAULT_TO, bits as mouths
@@ -742,11 +632,11 @@ def test_jaw_open_keeps_lip_gap_after_retarget() -> None:
     )
     try:
         mouths.restore(frozenset(DEFAULT_ON), dict(DEFAULT_TO))
-        expr.apply(rest, rest, closed, {"l": 0.0, "r": 0.0}, mouth_pts=closed)
+        expr.apply(rest, rest, closed, mouth_pts=closed)
         out = rest
         for _ in range(8):
             out = expr.apply(
-                rest, rest, opened, {"l": 0.0, "r": 0.0}, mouth_pts=opened
+                rest, rest, opened, mouth_pts=opened
             )
         assert out is not None
         rest_gap = abs(float(rest[25, 1] - rest[21, 1]))
@@ -757,7 +647,7 @@ def test_jaw_open_keeps_lip_gap_after_retarget() -> None:
         mouths.restore(*snap)
 
 
-def test_drive_ifm_opens_mouth_and_closes_lids() -> None:
+def test_drive_ifm_opens_mouth() -> None:
     from .feel import feel
     from .ifm import drive_ifm, weights_from_arkit
 
@@ -768,13 +658,11 @@ def test_drive_ifm_opens_mouth_and_closes_lids() -> None:
     try:
         feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
         weights = weights_from_arkit(opened)
-        out = drive_ifm(rest, weights, {"l": 0.8, "r": 0.8})
+        out = drive_ifm(rest, weights)
     finally:
         feel.update(prev)
     assert out is not None
     assert float(out[25, 1]) > float(rest[25, 1]) + 1.0
-    assert float(out[12, 1]) > float(rest[12, 1]) + 0.15
-    assert float(out[18, 1]) > float(rest[18, 1]) + 0.15
 
 
 def test_drive_ifm_smile_spreads_corners() -> None:
@@ -787,7 +675,7 @@ def test_drive_ifm_smile_spreads_corners() -> None:
     prev = feel.payload()
     try:
         feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
-        out = drive_ifm(rest, weights_from_arkit(packet), {"l": 0.0, "r": 0.0})
+        out = drive_ifm(rest, weights_from_arkit(packet))
     finally:
         feel.update(prev)
     assert out is not None
@@ -818,7 +706,7 @@ def test_ifm_mixer_frame_has_no_pts3d() -> None:
     try:
         feel.update({"smoothing": 0.0, "mouth": 0.5})
         rest = _anime_rest()
-        out = drive_ifm(rest, snap.weights, snap.blink, snap.brow)
+        out = drive_ifm(rest, snap.weights, snap.brow)
     finally:
         feel.update(prev)
     assert out is not None

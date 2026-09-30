@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import io
 import queue
 import sys
@@ -294,7 +295,7 @@ def _image_to_jpeg_b64(image: Image.Image, quality: int = 85) -> str:
 
 
 def lab_keeps_authored(probe: dict[str, Any] | None) -> bool:
-    """True when Track Lab already has rest or mouth end-shapes. Do not wipe."""
+    """True when Track Lab already has rest, mouth or eye end-shapes. Do not wipe."""
     from .blendshapes import SHAPE_IDS
 
     if not isinstance(probe, dict):
@@ -315,6 +316,25 @@ def stills_match(incoming: Image.Image | None, path: Path) -> bool:
     except Exception:
         return False
     return a.shape == b.shape and bool(np.array_equal(a, b))
+
+
+def fit_edit(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark a fit-screen edit. A Track Lab status poll fetched before or during
+    it carries the old rest and must not overwrite the edit (see fit_poll_stale)."""
+
+    @functools.wraps(method)
+    def wrapper(self: StreamRuntime, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            self._fit_busy = getattr(self, "_fit_busy", 0) + 1
+            self._fit_gen = getattr(self, "_fit_gen", 0) + 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._lock:
+                self._fit_busy -= 1
+                self._fit_gen += 1
+
+    return wrapper
 
 
 class StreamRuntime:
@@ -1039,6 +1059,12 @@ class StreamRuntime:
             hair = None
         if isinstance(hair, list) and hair:
             body["hair"] = norm_hair_to_pixels(hair, w, h)
+        try:
+            offsets = read_character_fit(ref.stem).get("point_offsets")
+        except Exception:
+            offsets = None
+        if isinstance(offsets, list):
+            body["point_offsets"] = offsets
         return body
 
     def _store_pack_hair(self) -> None:
@@ -1050,6 +1076,10 @@ class StreamRuntime:
         if ref is None or ref.suffix.lower() != ".vtm" or not hair:
             return
         try:
+            from .character_fit import read_character_fit
+
+            if read_character_fit(ref.stem).get("hair"):
+                return  # painted or saved already; detected hair must not replace it
             update_character_fit(ref.stem, {"hair": [dict(seg) for seg in hair]})
         except Exception as exc:
             print(f"Could not store hair in {ref.name}: {exc}")
@@ -1879,7 +1909,10 @@ class StreamRuntime:
                     image_size=int(exported["image_size"]),
                     skip_crop=bool(exported["skip_crop"]),
                     source_name=f"{label}{src.suffix.lower()}",
-                    fit={"travel_box": normalize_travel_box(self._status.get("travel_box"))},
+                    # No limiters yet: they are fitted to this still below. The
+                    # desk's box is the last character's (a 3 deg look-down cap
+                    # came in that way).
+                    fit={},
                     source_bytes=source_bytes,
                     source_suffix=src.suffix or ".png",
                     pose_keys=[],
@@ -1890,6 +1923,10 @@ class StreamRuntime:
                     self._snapshot_character_shapes(dest.stem)
             self.engine._ref_path = dest
             self._mark_current_character(dest, label)
+            # Track Lab holds the new still (apply_reference): fit its limiters
+            # from the defaults. Offline, the fit waits for the lab's boot sync.
+            self._apply_character_limiters()
+            self._fit_new_character_limiters()
             self._clear_progress(
                 busy=False,
                 ref_ready=True,
@@ -2834,6 +2871,9 @@ class StreamRuntime:
         if "travel_box" in updates:
             from .ui_session import save_ui_session
 
+            # The user's edit wins even if Track Lab misses the push below;
+            # otherwise a status poll can put Lab's old box back on screen.
+            self._travel_from_desk = True
             save_ui_session(travel_box=updates["travel_box"])
             self._save_character_limiters(updates["travel_box"])
             # Clear the stopped-tracking preview first so a live emit shows the
@@ -3458,16 +3498,29 @@ class StreamRuntime:
             return int(want) <= 0
         return gen >= int(want)
 
+    def fit_generation(self) -> int:
+        """Read before fetching a Track Lab packet; pass to adopt_lab_overlay(fit_gen=)."""
+        with self._lock:
+            return int(getattr(self, "_fit_gen", 0))
+
+    def fit_poll_stale(self, fit_gen: int | None) -> bool:
+        """True while a fit edit runs, or when one landed after ``fit_gen`` was read."""
+        if fit_gen is None:
+            return False
+        with self._lock:
+            return bool(getattr(self, "_fit_busy", 0)) or int(getattr(self, "_fit_gen", 0)) != fit_gen
+
     def adopt_lab_overlay(
         self,
         packet: dict[str, Any] | None = None,
         *,
         emit: bool = False,
+        fit_gen: int | None = None,
     ) -> bool:
         """Copy Track Lab overlay onto the desk cel. Authoring is not live-only."""
         with self._lock:
             frozen = bool(self._pose_frozen or self._mesh_edited)
-        if frozen:
+        if frozen or self.fit_poll_stale(fit_gen):
             return False
         driven = self._lab_overlay_keypoints(packet)
         if driven is None:
@@ -3557,9 +3610,30 @@ class StreamRuntime:
     def _nudge_lab_point(self, idx: int, x: float, y: float) -> None:
         try:
             px, py = self._desk_px_to_lab(x, y)
-            self._lab_ack("set_point", {"id": int(idx), "x": float(px), "y": float(py)})
+            ack = self._lab_ack("set_point", {"id": int(idx), "x": float(px), "y": float(py)})
         except Exception as exc:
             print(f"lab set_point failed: {exc}")
+            return
+        # A nudge is the user's edit too; it comes back with the character.
+        self._save_lab_offsets(ack)
+
+    def restart_tracking_on_input(self, source: str) -> dict[str, Any] | None:
+        """Track Lab stops its session when the input changes. Start it on the new one.
+
+        Returns the start ack, or None when the desk is not tracking through Track Lab.
+        """
+        if not (self._tracking and self._lab_drive):
+            return None
+        body: dict[str, Any] = {"source": "ifm" if source == "ifm" else "camera"}
+        if body["source"] == "camera":
+            body["camera"] = int(self.preferred_camera())
+            body["mirror"] = bool(self._status.get("mirror"))
+        try:
+            return self._lab_ack("start", body)
+        except Exception:
+            # Nothing runs now: show Start, not a Stop button with no session behind it.
+            self.stop_tracking()
+            raise
 
     def stop_tracking(self) -> None:
         from .lab_harness import lab as lab_harness
@@ -4868,6 +4942,7 @@ class StreamRuntime:
             box=self._status.get("travel_box"),
         )
 
+    @fit_edit
     def paint_character_hair(
         self,
         points: list,
@@ -4935,6 +5010,7 @@ class StreamRuntime:
             )
         return self.character_fit()
 
+    @fit_edit
     def move_character_skeleton(self, idx: int, x: float, y: float) -> dict[str, Any]:
         """Place one rest skeleton joint. Face points stay where the fit left them."""
         from .character_fit import SKELETON_LABELS, update_character_fit
@@ -4992,6 +5068,7 @@ class StreamRuntime:
             )
         return self.character_fit()
 
+    @fit_edit
     def move_character_point(self, idx: int, x: float, y: float) -> dict[str, Any]:
         """Place one rest tracking point: a face point, an iris, or a skeleton joint.
 
@@ -5012,17 +5089,26 @@ class StreamRuntime:
             raise ValueError(f"Point {slot} cannot be moved here")
         width, height = image.size
         nx, ny = pixels_to_normalized(float(x), float(y), width, height)
-        edited = np.asarray(kps, dtype=np.float32).copy()
+        rest = np.asarray(kps, dtype=np.float32)
+        try:
+            px, py = self._desk_px_to_lab(float(x), float(y))
+            ack = self._lab_ack("set_rest_point", {"id": slot, "x": float(px), "y": float(py)})
+            # Save Track Lab's whole rest as it stands after this move, like the
+            # skeleton path, so the pack never misses an earlier edit.
+            self.adopt_lab_overlay(self._lab_packet_from_ack(ack), emit=False)
+            # The move dropped any nudge on this point.
+            self._save_lab_offsets(ack)
+            if self._last_overlay_kps is not None:
+                rest = np.asarray(self._last_overlay_kps, dtype=np.float32)
+        except Exception as exc:
+            print(f"Point move kept on the desk; Track Lab did not store it: {exc}")
+        edited = rest.copy()
         edited[slot, 0] = nx
         edited[slot, 1] = ny
         edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
         edited[slot, 3] = 1.0
         self._install_fit_keypoints(edited)
-        try:
-            px, py = self._desk_px_to_lab(float(x), float(y))
-            self._lab_ack("set_rest_point", {"id": slot, "x": float(px), "y": float(py)})
-        except Exception as exc:
-            print(f"Point move kept on the desk; Track Lab did not store it: {exc}")
+        self._save_user_points([slot], edited)
         if self._last_image is not None:
             self._emit(
                 {
@@ -5031,6 +5117,46 @@ class StreamRuntime:
                 }
             )
         return self.character_fit()
+
+    def _save_user_points(self, slots: Any, keypoints: np.ndarray | None) -> None:
+        """Remember face / iris points the user placed, so a re-detect puts them back.
+
+        The pack's rest mesh holds them too, but Track Lab re-detecting the
+        still (and the restore saving that rest) would otherwise lose them.
+        """
+        from .character_fit import read_character_fit, update_character_fit
+
+        ident = str((getattr(self, "_status", None) or {}).get("character_id") or "")
+        if not ident or keypoints is None:
+            return
+        kps = np.asarray(keypoints, dtype=np.float32)
+        picked = [int(i) for i in slots if 0 <= int(i) < 30 and int(i) < len(kps)]
+        if not picked:
+            return
+        try:
+            saved = read_character_fit(ident).get("points")
+            points = dict(saved) if isinstance(saved, dict) else {}
+            for i in picked:
+                points[str(i)] = [round(float(kps[i, 0]), 5), round(float(kps[i, 1]), 5)]
+            update_character_fit(ident, {"points": points})
+        except Exception as exc:
+            print(f"Point edit not remembered in the character: {exc}")
+
+    def _save_lab_offsets(self, ack: Any) -> None:
+        """Keep Track Lab's overlay nudges in the character after one changes."""
+        from .character_fit import update_character_fit
+
+        ident = str((getattr(self, "_status", None) or {}).get("character_id") or "")
+        if not ident or not isinstance(ack, dict):
+            return
+        nested = ack.get("status") if isinstance(ack.get("status"), dict) else ack
+        rows = nested.get("point_offsets") if isinstance(nested, dict) else None
+        if not isinstance(rows, list):
+            return
+        try:
+            update_character_fit(ident, {"point_offsets": [dict(r) for r in rows if isinstance(r, dict)]})
+        except Exception as exc:
+            print(f"Nudge not remembered in the character: {exc}")
 
     def _install_fit_keypoints(self, keypoints: np.ndarray) -> None:
         from .character_fit import replace_pack_keypoints
@@ -5041,6 +5167,8 @@ class StreamRuntime:
         self._last_good_keypoints = kps.copy()
         try:
             self.engine.adopt_ref_keypoints(kps, persist=False, pose_source="fit")
+            # The fitted rest is the new base: a mesh reset must not put the pre-fit pose back.
+            self.engine._ref_keypoints_session_base = kps.copy()
         except Exception as exc:
             print(f"Fit pose did not install: {exc}")
         path = self._ref_path
@@ -5051,7 +5179,11 @@ class StreamRuntime:
                 print(f"Fit pose did not save into the character: {exc}")
 
     def _apply_character_fit(self) -> bool:
-        """Put a saved hair paint and skeleton back after Track Lab re-detects."""
+        """Put the user's saved edits back after Track Lab re-detects.
+
+        Hair paint, skeleton joints, face / iris points and overlay nudges
+        are the user's; a re-detect or repair never replaces them.
+        """
         from .character_fit import norm_hair_to_pixels, read_character_fit
 
         ident = str(self._status.get("character_id") or "")
@@ -5061,39 +5193,61 @@ class StreamRuntime:
         if not saved:
             return False
         changed = False
+        edits: list[tuple[int, float, float, str]] = []
+        points = saved.get("points")
+        if isinstance(points, dict):
+            for key, xy in points.items():
+                try:
+                    slot = int(key)
+                    edits.append((slot, float(xy[0]), float(xy[1]), "set_rest_point"))
+                except (TypeError, ValueError, IndexError):
+                    continue
         skeleton = saved.get("skeleton")
-        if isinstance(skeleton, list) and self._last_overlay_kps is not None:
-            kps = np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
-            moved = False
+        if isinstance(skeleton, list):
             for row in skeleton:
                 if not isinstance(row, dict):
                     continue
                 try:
-                    slot = int(row.get("id", -1))
-                    nx = float(row.get("x"))
-                    ny = float(row.get("y"))
+                    edits.append(
+                        (int(row.get("id", -1)), float(row.get("x")), float(row.get("y")), "set_skeleton_point")
+                    )
                 except (TypeError, ValueError):
                     continue
-                if not (31 <= slot <= 36):
-                    continue
+        edits = [
+            e
+            for e in edits
+            if (0 <= e[0] < 30 and e[3] == "set_rest_point") or (31 <= e[0] <= 36 and e[3] == "set_skeleton_point")
+        ]
+        if edits and self._last_overlay_kps is not None:
+            kps = np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
+            moved = False
+            for slot, nx, ny, op in edits:
                 if (
-                    abs(float(kps[slot, 0]) - nx) > 1e-5
-                    or abs(float(kps[slot, 1]) - ny) > 1e-5
-                    or float(kps[slot, 3]) < 0.5
+                    abs(float(kps[slot, 0]) - nx) <= 1e-5
+                    and abs(float(kps[slot, 1]) - ny) <= 1e-5
+                    and float(kps[slot, 3]) >= 0.5
                 ):
-                    moved = True
+                    continue  # already where the user put it
+                moved = True
                 kps[slot, 0] = nx
                 kps[slot, 1] = ny
                 kps[slot, 2] = max(float(kps[slot, 2]), 0.85)
                 kps[slot, 3] = 1.0
                 try:
                     px, py = self._norm_to_lab_px(nx, ny)
-                    self._lab_ack("set_skeleton_point", {"id": slot, "x": px, "y": py})
+                    self._lab_ack(op, {"id": slot, "x": px, "y": py})
                 except Exception:
                     pass
             if moved:
                 self._install_fit_keypoints(kps)
                 changed = True
+        offsets = saved.get("point_offsets")
+        if isinstance(offsets, list):
+            # After the points: moving a rest point drops its nudge in the lab.
+            try:
+                self._lab_ack("set_offsets", {"point_offsets": offsets})
+            except Exception:
+                pass
         hair = saved.get("hair")
         if isinstance(hair, list) and hair:
             self._last_lab_hair = hair
@@ -5185,6 +5339,10 @@ class StreamRuntime:
                         show_mouth=bool(st.get("show_mouth", True)),
                         show_iris=bool(st.get("show_iris_overlay", True)),
                         show_skeleton=bool(st.get("show_skeleton", True)),
+                        # Labels cost ~35 ms a picture (3 ms without): while
+                        # streaming that backs up the display thread and adds
+                        # a third of a second of lag.
+                        show_ids=not bool(getattr(self, "_streaming", False)),
                     )
             except Exception:
                 display = image
@@ -5375,6 +5533,7 @@ class StreamRuntime:
                 return
             new_rest = apply_overlay_drag_to_rest(rest, base, edited, slots)
             saved = self.engine.adopt_ref_keypoints(new_rest, persist=True)
+            self._save_user_points(slots, new_rest)
             driven = None
             if self._tracking:
                 try:
@@ -5419,7 +5578,8 @@ class StreamRuntime:
                 self._drag_xy = None
             if lab:
                 try:
-                    self._lab_ack("reset_points", {})
+                    # The user cleared the nudges; the character forgets them too.
+                    self._save_lab_offsets(self._lab_ack("reset_points", {}))
                 except Exception as exc:
                     print(f"lab reset_points failed: {exc}")
             if frozen and auto is not None:
@@ -5448,6 +5608,16 @@ class StreamRuntime:
             with self._lock:
                 self._mesh_edited = True
             rest = self.engine.restore_session_ref_keypoints()
+            # Remembered points follow the reset, or a restore would redo the drags.
+            try:
+                from .character_fit import read_character_fit
+
+                ident = str(self._status.get("character_id") or "")
+                kept = read_character_fit(ident).get("points") if ident else None
+                if isinstance(kept, dict) and kept:
+                    self._save_user_points([int(k) for k in kept], rest)
+            except Exception as exc:
+                print(f"Remembered points not reset: {exc}")
             with self._lock:
                 self._mesh_edited = False
                 self._last_overlay_kps = np.asarray(rest, dtype=np.float32).copy()

@@ -38,7 +38,7 @@ from .ifm_cam import IfmCam
 from .iris import payload_to_hits, raw_debug, rest_look_from_cam
 from .iris import retarget as retarget_iris
 from .iris import track_still
-from .lids import LidFilter, shape_blink, shut_lids
+from .lids import LidFilter, shape_blink
 from .offsets import apply_points as offset_points
 from .offsets import apply_rows as offset_rows
 from .offsets import clear as clear_offsets
@@ -63,10 +63,11 @@ from harness.hub import hub
 from harness.pack import frame_from_bench, status_from_bench
 
 from .presets import (
-    MOUTH_SLOTS,
+    EYE_SLOTS,
     book,
     empty_weights,
     pts_to_json,
+    shape_slots,
 )
 from .record import MovementRecorder
 from .retarget import FaceExpr
@@ -302,6 +303,7 @@ class FaceBench:
         skeleton: list[dict[str, object]],
         iris: list[dict[str, object]],
         hair: list[dict[str, object]],
+        measure: np.ndarray | None = None,
     ) -> tuple[
         np.ndarray | None,
         list[dict[str, object]],
@@ -314,7 +316,8 @@ class FaceBench:
         if rest is None:
             return posed, skeleton, iris, hair
         live = pack_overlay(posed, skeleton, iris)
-        limited, hair_out = apply_limits(live, rest, travel.payload(), hair=hair)
+        head = None if measure is None else pack_overlay(measure, skeleton, iris)
+        limited, hair_out = apply_limits(live, rest, travel.payload(), hair=hair, measure=head)
         return (
             unpack_face(limited, posed),
             unpack_skeleton(limited, skeleton),
@@ -561,8 +564,9 @@ class FaceBench:
         self.last_error = ""
         book.rebase(pts)
         self.rest_pts = pts
-        # The pack's mesh already holds every edit; a nudge on top doubles it.
-        self._point_offsets = {}
+        # Point moves are in the pack's mesh; nudges ride on top of it and
+        # come with the character, so it gets back exactly what it saved.
+        self._point_offsets = parse_offsets(body.get("point_offsets"))
         self.last_faces = 1
         self.last_tracker = "anime"
         iris = [dict(row) for row in body.get("iris") or [] if isinstance(row, dict)]
@@ -593,7 +597,7 @@ class FaceBench:
 
     def apply_preset(self, name: str) -> dict[str, object]:
         if self._osf.running:
-            self.last_error = "Stop OSF before editing mouth shapes"
+            self.last_error = "Stop tracking before editing shapes"
             return self.status(publish=True)
         try:
             pts = book.apply(name, self.rest_pts)
@@ -606,7 +610,7 @@ class FaceBench:
 
     def set_mouth(self, name: str, mouth: object) -> dict[str, object]:
         if self._osf.running:
-            self.last_error = "Stop OSF before editing mouth shapes"
+            self.last_error = "Stop tracking before editing shapes"
             return self.status(publish=True)
         try:
             pts = book.set_mouth(name, mouth, self.rest_pts)
@@ -616,7 +620,7 @@ class FaceBench:
         if name == "rest":
             self.rest_pts = pts
         with self._lock:
-            for slot in MOUTH_SLOTS:
+            for slot in shape_slots(name):
                 self._point_offsets = clear_offsets(self._point_offsets, slot)
         self._save_parts()
         self.last_error = ""
@@ -625,7 +629,7 @@ class FaceBench:
 
     def move_key(self, name: str, t: object) -> dict[str, object]:
         if self._osf.running:
-            self.last_error = "Stop OSF before editing mouth shapes"
+            self.last_error = "Stop tracking before editing shapes"
             return self.status(publish=True)
         try:
             book.move_key(name, t)
@@ -637,7 +641,7 @@ class FaceBench:
 
     def drop_key(self, name: str) -> dict[str, object]:
         if self._osf.running:
-            self.last_error = "Stop OSF before editing mouth shapes"
+            self.last_error = "Stop tracking before editing shapes"
             return self.status(publish=True)
         try:
             book.drop_key(name)
@@ -1013,6 +1017,15 @@ class FaceBench:
         self._save_parts()
         return self.status(publish=True)
 
+    def set_offsets(self, body: object) -> dict[str, object]:
+        """Replace every overlay nudge with a saved set (a character's own)."""
+        raw = body.get("point_offsets") if isinstance(body, dict) else None
+        with self._lock:
+            self._point_offsets = parse_offsets(raw)
+            self.last_error = ""
+        self._save_parts()
+        return self.status(publish=True)
+
     def reset_points(self, body: object) -> dict[str, object]:
         idx = None
         if isinstance(body, dict) and body.get("id") not in (None, ""):
@@ -1108,6 +1121,8 @@ class FaceBench:
                 self._skeleton = [dict(j) for j in self._skeleton_rest]
         if self.last_tracker in ("osf", "ifm"):
             self.last_tracker = "anime"
+        # Stop always works; a leftover calibrate error must not make it look failed.
+        self.last_error = ""
         return self.status(publish=True)
 
     def _on_osf(self, frame: OsfFrame) -> None:
@@ -1151,12 +1166,11 @@ class FaceBench:
         if feel.use_visemes():
             mixed = book.mix(frame.weights)
         selfie = self.selfie
-        # Lids close after smoothing and the rig (_finish_live_body), not here.
+        # Eyes blink after smoothing and the rig (_finish_live_body), not here.
         driven = self._ease_mesh(
             drive_ifm(
                 self.rest_pts,
                 frame.weights,
-                None,
                 to_screen(getattr(frame, "brow", None), selfie),
                 mixed=mixed,
             )
@@ -1170,13 +1184,12 @@ class FaceBench:
         viseme_pts = book.mix(frame.weights if use_visemes else None)
         if viseme_pts is None and self.rest_pts is not None:
             viseme_pts = self.rest_pts.copy()
-        # Lids close after smoothing and the rig (_finish_live_body), not here.
+        # Eyes blink after smoothing and the rig (_finish_live_body), not here.
         mixed = self._ease_mesh(
             self._expr.apply(
                 viseme_pts,
                 self.rest_pts,
                 frame.pts_3d,
-                None,
                 mouth_pts=frame.mouth_2d,
                 keep_mouth=use_visemes,
             )
@@ -1185,6 +1198,25 @@ class FaceBench:
         posed = self._rig.apply(mixed, self.rest_pts, frame.head, frame.pose)
         posed = self._expr.place_brows(posed, self.rest_pts, self._rig)
         return posed
+
+    def _blink_eyes(self, posed: np.ndarray | None, blink: dict[str, float]) -> np.ndarray | None:
+        """Eye open -> Eye closed by ``blink`` on the posed face.
+
+        The shapes blend on this frame's eased mesh, then go through the same
+        head as the face, so Smooth never drags a blink.
+        """
+        snap = self._live_pose
+        mesh = None if snap is None else snap[2]
+        if posed is None or mesh is None:
+            return posed
+        shut = book.blink(mesh, self.rest_pts, blink)
+        if shut is None:
+            return posed
+        slots = list(EYE_SLOTS)
+        out = posed.copy()
+        moved = self._rig.project_face(shut)[slots, :2] - self._rig.project_face(mesh)[slots, :2]
+        out[slots, :2] += moved
+        return out
 
     def _ease_mesh(self, mesh: np.ndarray | None) -> np.ndarray | None:
         """Ease the expression (mouth, brows) in the still's frame, per frame.
@@ -1217,7 +1249,10 @@ class FaceBench:
         # blink is not dragged by Smooth, and kept out of the eased mesh so
         # the next frame eases the face, not the lid.
         blink_screen = self._lids.update(to_screen(frame.blink, selfie))
-        posed = shut_lids(posed, blink_screen)
+        # Limiter, hair and skeleton place the head from the open eyes: a
+        # blink is not a move.
+        opened = posed
+        posed = self._blink_eyes(posed, blink_screen)
         look = getattr(frame, "look", None)
         if isinstance(look, dict) or (frame.lms_xy is not None and frame.iris_cam):
             with self._lock:
@@ -1260,13 +1295,13 @@ class FaceBench:
             if posed is not None:
                 # Hair and the skeleton follow the rig's eased turn and place,
                 # so they ease with the head and need no ease of their own.
-                followed = follow_hair(self._hair_rig, posed, self._rig)
+                followed = follow_hair(self._hair_rig, opened, self._rig)
                 if followed:
                     self._hair = followed
                 if self._skeleton_rest:
                     self._skeleton = follow_skeleton(
                         self._skeleton_rest,
-                        posed,
+                        opened,
                         head={
                             "yaw": float(np.degrees(self._rig._yaw_r)),
                             "pitch": float(np.degrees(self._rig._pitch_r)),
@@ -1288,6 +1323,7 @@ class FaceBench:
                 list(self._skeleton),
                 list(self._iris),
                 list(self._hair),
+                measure=opened,
             )
             self._live_pts = posed
             debug = raw_debug(frame.iris_cam, look)

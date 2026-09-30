@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from backend.iris import retarget
-from backend.lids import LidFilter, shape_blink, shut_lids
+from backend.lids import LidFilter, shape_blink
 from harness.pack import pack_keypoints
 from harness.protocol import LEFT_IRIS, RIGHT_IRIS
 
@@ -60,43 +60,6 @@ def test_lid_filter_closes_at_once_and_reopens_softly() -> None:
     assert lids.update({"l": 1.0, "r": 1.0}, now=5.0) == {"l": 1.0, "r": 1.0}
 
 
-def test_shut_lids_lays_the_lid_on_its_chord() -> None:
-    pts = _eyes()
-    out = shut_lids(pts, {"l": 1.0, "r": 0.5})
-    assert out is not None
-    assert abs(_chord_gap(out, 11, 12, 13)) < 1e-4
-    # Half a blink is half way.
-    assert abs(_chord_gap(out, 17, 18, 19) - 0.5 * _chord_gap(pts, 17, 18, 19)) < 1e-3
-    # Corners never move, and the input is not touched.
-    assert np.array_equal(out[[11, 13, 17, 19]], pts[[11, 13, 17, 19]])
-    assert float(pts[12, 1]) == 70.0
-
-
-def test_shut_lids_follows_a_tilted_head() -> None:
-    """After the rig the eye line is tilted. Closing straight down (or
-    levelling the corners) would untilt the eye; close onto the tilted chord."""
-    pts = _eyes()
-    angle = math.radians(20.0)
-    c, s = math.cos(angle), math.sin(angle)
-    center = pts[:, :2].mean(axis=0)
-    xy = pts[:, :2] - center
-    pts[:, 0] = center[0] + xy[:, 0] * c - xy[:, 1] * s
-    pts[:, 1] = center[1] + xy[:, 0] * s + xy[:, 1] * c
-    out = shut_lids(pts, {"l": 1.0, "r": 1.0})
-    assert out is not None
-    assert abs(_chord_gap(out, 11, 12, 13)) < 1e-3
-    assert abs(_chord_gap(out, 17, 18, 19)) < 1e-3
-    assert np.array_equal(out[[11, 13, 17, 19]], pts[[11, 13, 17, 19]])
-
-
-def test_shut_lids_leaves_a_lid_below_its_chord() -> None:
-    pts = _eyes()
-    pts[12, 1] = 104.0  # authored squint: lid already under the corners
-    out = shut_lids(pts, {"l": 1.0, "r": 0.0})
-    assert out is not None
-    assert float(out[12, 1]) == 104.0
-
-
 def test_fallback_pupil_is_dropped_on_a_shut_eye() -> None:
     """With the eyes closed the pupil detector finds nothing and retarget
     falls back to the eye centre. That pupil drew the eye open."""
@@ -129,6 +92,7 @@ def test_iphone_blink_shuts_the_character_eye_through_heavy_smooth(monkeypatch) 
     from backend.feel import feel
     from backend.ifm import blink_of, brow_of, look_of, parse_packet, weights_from_arkit
     from backend.osf_cam import OsfFrame
+    from backend.presets import book
     from backend.test_ifm import _anime_rest
     from harness.pack import frame_from_bench
 
@@ -140,6 +104,9 @@ def test_iphone_blink_shuts_the_character_eye_through_heavy_smooth(monkeypatch) 
 
     monkeypatch.setattr(lids_mod, "time", SimpleNamespace(perf_counter=tick))
     rest = _anime_rest()
+    # No authored eye shapes: Eye closed is the drafted lid on its corner line.
+    monkeypatch.setattr(book, "shapes", {"rest": rest.copy()})
+    monkeypatch.setattr(book, "save", lambda: None)
     bench = FaceBench(rest_pts=rest.copy())
 
     def frame(raw: str) -> OsfFrame:
@@ -178,3 +145,55 @@ def test_iphone_blink_shuts_the_character_eye_through_heavy_smooth(monkeypatch) 
         assert rows[LEFT_IRIS]["visible"] is True
     finally:
         feel.update(prev)
+
+
+def test_a_shut_eye_lands_on_the_authored_eye_closed(monkeypatch) -> None:
+    """Blink blends to the Eye closed shape, placed by the same head as the face."""
+    from types import SimpleNamespace
+
+    from backend import lids as lids_mod
+    from backend.face import FaceBench
+    from backend.ifm import blink_of, brow_of, look_of, parse_packet, weights_from_arkit
+    from backend.osf_cam import OsfFrame
+    from backend.presets import EYE_SLOTS, book
+    from backend.test_ifm import _anime_rest
+
+    clock = {"t": 100.0}
+
+    def tick() -> float:
+        clock["t"] += 1.0 / 60.0
+        return clock["t"]
+
+    monkeypatch.setattr(lids_mod, "time", SimpleNamespace(perf_counter=tick))
+    rest = _anime_rest()
+    closed = rest.copy()
+    closed[[12, 18], 1] += 6.0
+    closed[[11, 13, 17, 19], 1] += 1.5
+    monkeypatch.setattr(book, "shapes", {"rest": rest.copy(), "eye_closed": closed})
+    monkeypatch.setattr(book, "save", lambda: None)
+    bench = FaceBench(rest_pts=rest.copy())
+
+    def frame(raw: str) -> OsfFrame:
+        packet = parse_packet(raw)
+        assert packet is not None
+        return OsfFrame(
+            weights=weights_from_arkit(packet),
+            blink=blink_of(packet),
+            look=look_of(packet),
+            brow=brow_of(packet),
+            head={"pitch": 0.0, "yaw": 0.0, "roll": 12.0},
+            pose={"cx": 0.0, "cy": 0.0, "bx": 0.0, "by": 0.0, "scale": 1.0, "tz": 0.0, "tilt": 0.0, "ok": 1.0},
+            faces=1,
+            source="ifm",
+        )
+
+    bench._on_osf(frame("eyeBlink_L-0|eyeBlink_R-0|=head#0,0,0,0,0,0"))
+    for _ in range(4):
+        bench._on_osf(frame("eyeBlink_L-90|eyeBlink_R-90|=head#0,0,0,0,0,0"))
+    posed = bench._live_pts
+    mesh = bench._live_pose[2]
+    assert posed is not None and mesh is not None
+    want = mesh.copy()
+    slots = list(EYE_SLOTS)
+    want[slots, :2] += closed[slots, :2] - rest[slots, :2]
+    assert np.allclose(posed[slots, :2], bench._rig.project_face(want)[slots, :2], atol=1e-2)

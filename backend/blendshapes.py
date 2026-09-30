@@ -31,7 +31,7 @@ FORMAT_VERSION = 1
 CURRENT_ID = "current"
 ORIGIN_DESK = "desk"
 ORIGIN_IMPORTED = "imported"
-SHAPE_IDS = ("rest", "smile", "sad", "A", "I", "U", "E")  # same list as Track Lab's authored shapes (track_lab/backend/presets.py PRESET_IDS)
+SHAPE_IDS = ("rest", "smile", "sad", "A", "I", "U", "E", "eye_open", "eye_closed")  # same list as Track Lab's authored shapes (track_lab/backend/presets.py PRESET_IDS)
 INCOMPATIBLE_MESSAGE = (
     "Incompatible. This character's blend shapes do not match the current plan. "
     "Would you like us to repair this character?"
@@ -106,60 +106,69 @@ def shapes_match(a: object, b: object) -> bool:
 
 
 MOUTH_SLOTS = tuple(range(20, 28))
-_MOUTH_RIGHT = 23
-_MOUTH_LEFT = 26
+# Authored points and the two corners their frame is measured from: the lips,
+# then each eye (Eye open / Eye closed).
+_GROUPS = (
+    (MOUTH_SLOTS, 23, 26),
+    ((11, 12, 13), 11, 13),
+    ((17, 18, 19), 17, 19),
+)
 
 
-def _mouth_offsets(
+def _shape_offsets(
     shapes: dict[str, list[list[float]]],
-) -> tuple[dict[str, list[tuple[float, float]]], float] | None:
-    """Each shape's lips relative to rest, in rest's mouth frame, per mouth width."""
+) -> dict[str, list[tuple[float, float, float]]] | None:
+    """Each shape's lips and eyes relative to rest, in rest's own corner frame
+    per group, per that group's width: (along, down, width)."""
     rest = shapes.get("rest")
     if not rest:
         return None
-    rx, ry = rest[_MOUTH_RIGHT][0], rest[_MOUTH_RIGHT][1]
-    ax, ay = rest[_MOUTH_LEFT][0] - rx, rest[_MOUTH_LEFT][1] - ry
-    width = (ax * ax + ay * ay) ** 0.5
-    if width < 1e-3:
-        return None
-    ax, ay = ax / width, ay / width
-    dx, dy = -ay, ax
-    if dy < 0.0:
-        dx, dy = -dx, -dy
-    out: dict[str, list[tuple[float, float]]] = {}
+    frames: list[tuple[tuple[int, ...], float, float, float, float, float]] = []
+    for slots, a, b in _GROUPS:
+        rx, ry = rest[a][0], rest[a][1]
+        ax, ay = rest[b][0] - rx, rest[b][1] - ry
+        width = (ax * ax + ay * ay) ** 0.5
+        if width < 1e-3:
+            return None
+        ax, ay = ax / width, ay / width
+        dx, dy = -ay, ax
+        if dy < 0.0:
+            dx, dy = -dx, -dy
+        frames.append((slots, ax, ay, dx, dy, width))
+    out: dict[str, list[tuple[float, float, float]]] = {}
     for name, rows in shapes.items():
         if name == "rest":
             continue
-        offs: list[tuple[float, float]] = []
-        for slot in MOUTH_SLOTS:
-            ox = rows[slot][0] - rest[slot][0]
-            oy = rows[slot][1] - rest[slot][1]
-            offs.append(((ox * ax + oy * ay) / width, (ox * dx + oy * dy) / width))
+        offs: list[tuple[float, float, float]] = []
+        for slots, ax, ay, dx, dy, width in frames:
+            for slot in slots:
+                ox = rows[slot][0] - rest[slot][0]
+                oy = rows[slot][1] - rest[slot][1]
+                offs.append(((ox * ax + oy * ay) / width, (ox * dx + oy * dy) / width, width))
         out[name] = offs
-    return out, width
+    return out
 
 
 def plans_match(a: object, b: object) -> bool:
-    """Same authored visemes, wherever the lab's rest face currently sits.
+    """Same authored shapes, wherever the lab's rest face currently sits.
 
     Track Lab rebases every shape onto the rest of the still it has loaded, so
-    raw pixels move whenever a different character is tracked. The lip offsets
-    from rest, in the mouth's own frame and per mouth width, are what that
-    rebase keeps — compare those. Without a rest, fall back to raw pixels.
+    raw pixels move whenever a different character is tracked. The lip and
+    eye offsets from rest, each in its own corner frame and per its width,
+    are what that rebase keeps — compare those. Without a rest, fall back to
+    raw pixels.
     """
     left = normalize_shapes(a)
     right = normalize_shapes(b)
     if set(left) != set(right):
         return False
-    fa = _mouth_offsets(left)
-    fb = _mouth_offsets(right)
-    if fa is None or fb is None:
+    offs_a = _shape_offsets(left)
+    offs_b = _shape_offsets(right)
+    if offs_a is None or offs_b is None:
         return shapes_match(left, right)
-    offs_a, width_a = fa
-    offs_b, width_b = fb
-    tol = 2.5 * SHAPE_MATCH_XY / min(width_a, width_b)
     for name, rows in offs_a.items():
         for p, q in zip(rows, offs_b[name]):
+            tol = 2.5 * SHAPE_MATCH_XY / min(p[2], q[2])
             if abs(p[0] - q[0]) > tol or abs(p[1] - q[1]) > tol:
                 return False
     return True

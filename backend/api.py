@@ -798,6 +798,11 @@ def fit_limiters() -> dict[str, Any]:
 
 @app.get("/api/lab/status")
 def lab_status() -> dict[str, Any]:
+    # Read before the harness GET: a fit edit landing meanwhile makes this packet stale.
+    try:
+        fit_gen: int | None = get_runtime().fit_generation()
+    except Exception:
+        fit_gen = None
     packet = lab_harness.status()
     try:
         if packet.get("online"):
@@ -806,7 +811,7 @@ def lab_status() -> dict[str, Any]:
             # Live overlay is copied on the track thread. Doing it here too
             # stacks harness GETs on the desk API and makes the face lag.
             if not bool(getattr(rt, "_tracking", False)):
-                rt.adopt_lab_overlay(packet, emit=True)
+                rt.adopt_lab_overlay(packet, emit=True, fit_gen=fit_gen)
     except Exception:
         pass
     return packet
@@ -836,6 +841,13 @@ def lab_command(body: LabCommandBody) -> dict[str, Any]:
             get_runtime().apply_lab_calibrate(result)
         except Exception:
             pass
+    if body.op == "set_input":
+        try:
+            restarted = get_runtime().restart_tracking_on_input(str(body.body.get("source") or ""))
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if restarted is not None:
+            result = restarted
     return result
 
 

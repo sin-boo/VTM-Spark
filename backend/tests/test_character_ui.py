@@ -17,7 +17,7 @@ def test_toon_preview_opens_library() -> None:
     assert "t('lib.noCharacter')" in lib
     assert "t('lib.clickToAdd')" in lib
     assert "'lib.noCharacter': 'No character'" in words
-    assert "'lib.clickToAdd': 'Click to add'" in words
+    assert "'lib.clickToAdd': 'Click or drop to add'" in words
     assert "libraryOpen" in lib
     assert "setLibraryOpen(true)" in lib
     assert "pickFile()" not in lib.split("function openDock")[1].split("async function beginCreate")[0]

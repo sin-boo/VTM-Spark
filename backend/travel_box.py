@@ -52,8 +52,13 @@ PITCH_DOWN_MAX_DEG = 32.0
 # Grow / shrink from rest when the performer steps toward or away from the camera.
 SIZE_MAX = 0.7
 
-# Boxes saved before this version used other walls; their room values do not carry over.
-TRAVEL_VERSION = 2
+# Boxes before version 2 used other walls; their room values do not carry over.
+# Version 3 only moved look-down on (see _OLD_PITCH_DOWN).
+TRAVEL_VERSION = 3
+_ROOM_VERSIONS = (2, 3)
+# The look-down default before version 3. Every character created then got it
+# copied in, which capped a nod at 3 degrees; read it as the current default.
+_OLD_PITCH_DOWN = 3.0
 ROOM_KEYS = ("left", "right", "up", "down", "body_left", "body_right", "body_up", "body_down")
 
 DEFAULT_TRAVEL_BOX: dict[str, Any] = {
@@ -122,7 +127,7 @@ def normalize_travel_box(raw: Any) -> dict[str, Any]:
     base = default_travel_box()
     if not isinstance(raw, dict):
         return base
-    legacy = raw.get("version") != TRAVEL_VERSION
+    legacy = raw.get("version") not in _ROOM_VERSIONS
     out: dict[str, Any] = {
         "version": TRAVEL_VERSION,
         "enabled": _bool(raw.get("enabled", base["enabled"]), base["enabled"]),
@@ -134,6 +139,8 @@ def normalize_travel_box(raw: Any) -> dict[str, Any]:
     for key, (dlo, dhi) in _DEG.items():
         fallback = raw.get(_ONE_SIDED.get(key, key), base[key])
         out[key] = _clip(raw.get(key, fallback), dlo, dhi, base[key])
+    if raw.get("version") != TRAVEL_VERSION and out["pitch_down"] == _OLD_PITCH_DOWN:
+        out["pitch_down"] = base["pitch_down"]
     eye = raw.get("eye", raw.get("eye_x", base["eye"]))
     out["eye"] = _clip(eye, _EYE[0], _EYE[1], base["eye"])
     out["size"] = _clip(raw.get("size", base["size"]), _SIZE[0], _SIZE[1], base["size"])
@@ -277,6 +284,57 @@ def _anchor_moved(live: np.ndarray, rest: np.ndarray, slots: tuple[int, ...]) ->
     return np.mean(live[idx, :2], axis=0) - np.mean(rest[idx, :2], axis=0)
 
 
+def oval_stop(moved: np.ndarray | None, room: tuple[float, float, float, float]) -> tuple[float, float]:
+    """Where a head that moved by ``moved`` stops on the oval head wall.
+
+    The oval reaches each side's room, so a straight move stops where the
+    old box did; a diagonal no longer runs out into the box's corners.
+    Inside the oval the move is kept as it is. Same as Track Lab's.
+    """
+    if moved is None:
+        return 0.0, 0.0
+    dx, dy = (float(v) for v in np.asarray(moved, dtype=np.float64).reshape(-1)[:2])
+    reach_x = room[1] if dx > 0.0 else -room[0]
+    reach_y = room[3] if dy > 0.0 else -room[2]
+    nx = dx / reach_x if reach_x > 1e-9 else 0.0
+    ny = dy / reach_y if reach_y > 1e-9 else 0.0
+    if reach_x <= 1e-9:
+        dx = 0.0
+    if reach_y <= 1e-9:
+        dy = 0.0
+    r = math.hypot(nx, ny)
+    if r <= 1.0:
+        return dx, dy
+    return dx / r, dy / r
+
+
+def oval_outline(
+    tight: tuple[float, float, float, float] | None,
+    wall: tuple[float, float, float, float] | None,
+    steps: int = 10,
+) -> list[tuple[float, float]]:
+    """The oval head wall drawn round the rest head box.
+
+    Straight sides at the old walls, each corner a quarter ellipse whose
+    radii are the rooms on that side. Clockwise from the top-left.
+    """
+    if tight is None or wall is None:
+        return []
+    x0, y0, x1, y1 = tight
+    corners = (
+        (x0, y0, x0 - wall[0], y0 - wall[1], math.pi, 1.5 * math.pi),
+        (x1, y0, wall[2] - x1, y0 - wall[1], 1.5 * math.pi, 2.0 * math.pi),
+        (x1, y1, wall[2] - x1, wall[3] - y1, 0.0, 0.5 * math.pi),
+        (x0, y1, x0 - wall[0], wall[3] - y1, 0.5 * math.pi, math.pi),
+    )
+    out: list[tuple[float, float]] = []
+    for cx, cy, rx, ry, a0, a1 in corners:
+        for i in range(steps + 1):
+            a = a0 + (a1 - a0) * i / steps
+            out.append((cx + max(rx, 0.0) * math.cos(a), cy + max(ry, 0.0) * math.sin(a)))
+    return out
+
+
 def limit_shift(live: np.ndarray, rest: np.ndarray, box: Any) -> tuple[float, float]:
     """One rigid shift that brings both the head and the body inside their walls.
 
@@ -292,7 +350,14 @@ def limit_shift(live: np.ndarray, rest: np.ndarray, box: Any) -> tuple[float, fl
     walls: list[tuple[np.ndarray, tuple[float, float, float, float]]] = []
     head = _anchor_moved(k_live, k_rest, HEAD_ANCHOR)
     if head is not None:
-        walls.append((head, _room(spec, fh, "")))
+        # The head wall is an oval: past it, the room on each side the head
+        # went is where the oval stops it along its own direction.
+        room = list(_room(spec, fh, ""))
+        tx, ty = oval_stop(head, tuple(room))
+        for axis, stop in ((0, tx), (1, ty)):
+            if abs(stop - float(head[axis])) > 1e-9:
+                room[axis * 2 + (1 if stop > 0.0 else 0)] = stop
+        walls.append((head, (room[0], room[1], room[2], room[3])))
     body = _anchor_moved(k_live, k_rest, BODY_ANCHOR)
     if body is not None:
         walls.append((body, _room(spec, fh, "body_")))
@@ -562,6 +627,29 @@ def _draw_rect(
             draw.line([a, b], fill=color, width=2)
 
 
+def _draw_outline(
+    draw: ImageDraw.ImageDraw,
+    image_size: tuple[int, int],
+    outline: list[tuple[float, float]],
+    color: tuple[int, int, int],
+) -> None:
+    """Dashed closed outline; points in the same space as the rects."""
+    if len(outline) < 3:
+        return
+    w, h = image_size
+    dummy = np.zeros((NUM_KEYPOINTS, KEYPOINT_DIM), dtype=np.float32)
+    pix: list[tuple[float, float]] = []
+    for x, y in outline:
+        dummy[0, 0], dummy[0, 1], dummy[0, 3] = x, y, 1.0
+        p = normalized_to_pixels(dummy, w, h)
+        pix.append((
+            min(max(1.0, float(p[0, 0])), max(2.0, w - 2.0)),
+            min(max(1.0, float(p[0, 1])), max(2.0, h - 2.0)),
+        ))
+    for a, b in zip(pix, pix[1:] + pix[:1]):
+        _draw_dashed_line(draw, a, b, color, width=2)
+
+
 def draw_travel_box(
     image: Image.Image,
     rest: np.ndarray | None,
@@ -569,7 +657,8 @@ def draw_travel_box(
 ) -> Image.Image:
     """Draw the head and body walls on the still.
 
-    Solid boxes are the rest pose; dashed boxes are the walls. Both come from
+    Solid boxes are the rest pose; dashed lines are the walls (the head's
+    is an oval). Both come from
     ``rest`` only, so they stay put while the character moves.
     """
     spec = normalize_travel_box(box)
@@ -578,13 +667,15 @@ def draw_travel_box(
     k = _as37(rest)
     base = image.convert("RGB")
     draw = ImageDraw.Draw(base)
-    for tight, wall, color in (
-        (head_mesh_rect_norm(k), head_rect_norm(k, spec), BOX_COLOR),
-        (body_mesh_rect_norm(k), body_rect_norm(k, spec), BODY_BOX_COLOR),
+    for tight, wall, color, oval in (
+        (head_mesh_rect_norm(k), head_rect_norm(k, spec), BOX_COLOR, True),
+        (body_mesh_rect_norm(k), body_rect_norm(k, spec), BODY_BOX_COLOR, False),
     ):
         if tight is not None:
             _draw_rect(draw, base.size, tight, color)
-        if wall is not None:
+        if wall is not None and oval:
+            _draw_outline(draw, base.size, oval_outline(tight, wall), color)
+        elif wall is not None:
             _draw_rect(draw, base.size, wall, color, dashed=True)
     for _iris, rect in _eye_ranges(k, float(spec["eye"])):
         _draw_rect(draw, base.size, rect, BOX_COLOR, dashed=True)

@@ -51,7 +51,8 @@ type Props = {
   onRevealCharacter: (id: string) => Promise<unknown>
   onCharacterInfo: (id: string) => Promise<CharacterInfo>
   onCharacterMeta: (meta: CharacterMeta) => Promise<CharacterCard>
-  onSettings: (patch: Partial<AppStatus>) => void
+  /** Resolves true once saved; undefined if it failed (the error is already shown). */
+  onSettings: (patch: Partial<AppStatus>) => Promise<boolean | undefined>
   onToggleTracking: () => void
   onCalibrate: () => void
   onFitLimiters: () => void

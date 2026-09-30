@@ -496,7 +496,6 @@ class FaceExpr:
         mixed: np.ndarray | None,
         rest: np.ndarray | None,
         pts3: np.ndarray | None,
-        blink: dict[str, float] | None = None,
         mouth_pts: np.ndarray | None = None,
         keep_mouth: bool = False,
     ) -> np.ndarray | None:
@@ -735,7 +734,7 @@ class FaceExpr:
         if selfie:
             eye_maps = mirror_map(eye_maps)
             eye_on = {mirror_osf(i) for i in eye_on}
-        mapped_eyes = _apply_eye_maps(
+        _apply_eye_maps(
             out,
             rest,
             self._erest,
@@ -748,8 +747,6 @@ class FaceExpr:
             y_sign=p_ysign,
             x_sign=x_p3,
         )
-        if blink:
-            _close_eyes(out, rest, blink, skip=mapped_eyes)
         maps_key = (
             tuple(sorted(mouth_bits.maps().items())),
             tuple(sorted(eye_bits.maps().items())),
@@ -836,30 +833,3 @@ def _apply_eye_maps(
             used.add(slot)
     return used
 
-
-def _close_eyes(
-    pts: np.ndarray,
-    rest: np.ndarray,
-    blink: dict[str, float],
-    skip: set[int] | None = None,
-) -> None:
-    skip = skip or set()
-    for slots, key in ((_LEFT_EYE, "l"), (_RIGHT_EYE, "r")):
-        amount = float(np.clip(float(blink.get(key, 0.0)), 0.0, 1.0))
-        if amount < 0.03:
-            continue
-        lid = slots[1]
-        corners = [i for i in (slots[0], slots[2]) if i < len(pts)]
-        if not corners and lid >= len(rest):
-            continue
-        chord_y = (
-            float(np.mean(pts[corners, 1])) if corners else float(rest[lid, 1])
-        )
-        # Lid mid always follows blink so a wink slams even when maps drove corners.
-        # Only drop toward the aperture; never lift a lid that maps already shut.
-        if lid < len(pts) and float(pts[lid, 1]) < chord_y:
-            pts[lid, 1] = float(pts[lid, 1]) * (1.0 - amount) + chord_y * amount
-        for i in corners:
-            if i in skip:
-                continue
-            pts[i, 1] = float(pts[i, 1]) * (1.0 - amount) + chord_y * amount

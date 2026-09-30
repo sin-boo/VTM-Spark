@@ -110,6 +110,29 @@ const DRAFT: Record<string, { open: number; spread: number; lift: number }> = {
   O: { open: 0.24, spread: -0.12, lift: 0 },
 }
 
+/** Unsaved Eye closed: each lid mid on its corner line (presets.draft_eyes). */
+export function draftEyes(rest: number[][]): number[][] {
+  const out = rest.map((row) => row.slice())
+  for (const [a, lid, b] of [EYE_L, EYE_R]) {
+    const pa = out[a]
+    const pl = out[lid]
+    const pb = out[b]
+    if (!pa || !pl || !pb) continue
+    const cx = pb[0] - pa[0]
+    const cy = pb[1] - pa[1]
+    const span = cx * cx + cy * cy
+    if (span < 1e-6) continue
+    const t = Math.min(1, Math.max(0, ((pl[0] - pa[0]) * cx + (pl[1] - pa[1]) * cy) / span))
+    pl[0] = pa[0] + t * cx
+    pl[1] = pa[1] + t * cy
+  }
+  return out
+}
+
+export function draftShape(name: string, rest: number[][]): number[][] {
+  return name === 'eye_closed' ? draftEyes(rest) : draftMouth(name, rest)
+}
+
 export function draftMouth(name: string, rest: number[][]): number[][] {
   const out = rest.map((row) => row.slice())
   const spec = DRAFT[name]
@@ -150,8 +173,11 @@ export function draftMouth(name: string, rest: number[][]): number[][] {
 }
 
 export const MOUTH_ENDS = ['rest', 'smile', 'sad', 'A', 'I', 'U', 'E'] as const
+// Blink blends Eye open -> Eye closed; they own only the eye points.
+export const EYE_ENDS = ['eye_open', 'eye_closed'] as const
+const SHAPE_ENDS: readonly string[] = [...MOUTH_ENDS, ...EYE_ENDS]
 
-export const MOUTH_LABEL: Record<(typeof MOUTH_ENDS)[number], string> = {
+export const SHAPE_LABEL: Record<string, string> = {
   rest: 'Rest',
   smile: 'Smile',
   sad: 'Sad',
@@ -159,12 +185,27 @@ export const MOUTH_LABEL: Record<(typeof MOUTH_ENDS)[number], string> = {
   I: 'I',
   U: 'U',
   E: 'E',
+  eye_open: 'Eye open',
+  eye_closed: 'Eye closed',
+}
+
+export const MOUTH_SLOTS = [20, 21, 22, 23, 24, 25, 26, 27]
+// Character eyes by screen side: corner, lid mid, corner.
+const EYE_L = [11, 12, 13] as const
+const EYE_R = [17, 18, 19] as const
+export const EYE_SLOTS = [...EYE_L, ...EYE_R]
+
+const isEye = (id: string) => (EYE_ENDS as readonly string[]).includes(id)
+
+/** Points a shape (or a stop between two) owns: the eyes or the lips. */
+export function shapeSlots(id: string): number[] {
+  return isEye(id.split('@')[0].split('+')[0]) ? EYE_SLOTS : MOUTH_SLOTS
 }
 
 export function pairId(a: string, b: string): string {
-  const i = MOUTH_ENDS.indexOf(a as (typeof MOUTH_ENDS)[number])
-  const j = MOUTH_ENDS.indexOf(b as (typeof MOUTH_ENDS)[number])
-  if (i < 0 || j < 0 || i === j) return ''
+  const i = SHAPE_ENDS.indexOf(a)
+  const j = SHAPE_ENDS.indexOf(b)
+  if (i < 0 || j < 0 || i === j || isEye(a) !== isEye(b)) return ''
   return i < j ? `${a}+${b}` : `${b}+${a}`
 }
 

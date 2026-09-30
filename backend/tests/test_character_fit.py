@@ -250,6 +250,85 @@ def test_fit_button_keeps_look_and_saves_even_an_unchanged_box(tmp_path: Path, m
     assert rt._travel_from_desk is True
 
 
+def _overlay_runtime():
+    import threading
+
+    from backend.stream import StreamRuntime
+
+    rt = StreamRuntime.__new__(StreamRuntime)
+    rt._lock = threading.RLock()
+    rt._pose_frozen = False
+    rt._mesh_edited = False
+    rt._last_image = None
+    rt._emit = lambda event: None
+    return rt
+
+
+def test_status_poll_from_before_a_fit_edit_cannot_undo_it() -> None:
+    from backend.stream import StreamRuntime, fit_edit
+
+    rt = _overlay_runtime()
+    adopted: list = []
+    rt._lab_overlay_keypoints = lambda frame=None: adopted.append(frame) or neutral_keypoints()
+    before = StreamRuntime.fit_generation(rt)
+    during: list[bool] = []
+
+    @fit_edit
+    def edit(self) -> None:
+        during.append(StreamRuntime.fit_poll_stale(self, StreamRuntime.fit_generation(self)))
+
+    edit(rt)
+    assert during == [True]
+    assert StreamRuntime.adopt_lab_overlay(rt, {"keypoints": []}, fit_gen=before) is False
+    assert adopted == []
+    after = StreamRuntime.fit_generation(rt)
+    assert StreamRuntime.adopt_lab_overlay(rt, {"keypoints": []}, fit_gen=after) is True
+    # The fit endpoints and the track thread pass no token and are never held back.
+    assert StreamRuntime.adopt_lab_overlay(rt, {"keypoints": []}) is True
+    assert len(adopted) == 2
+
+
+def test_point_move_saves_track_labs_whole_rest(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from backend.pose_controller import pixels_to_normalized
+    from backend.stream import StreamRuntime
+
+    dest = tmp_path / "hero.vtm"
+    write_character_pack(dest, **_tiny_pack_payload())
+    rt = _overlay_runtime()
+    rt._last_image = Image.new("RGB", (100, 100))
+    rt._frame_payload = lambda image, kps: {}
+    rt.character_fit = lambda: {}
+    rt._ref_path = dest
+    rt.engine = SimpleNamespace(adopt_ref_keypoints=lambda kps, **kw: None, _ref_keypoints_session_base=None)
+    # Track Lab holds an earlier edit (slot 12) that a stale poll dropped from the desk.
+    lab_rest = neutral_keypoints().copy()
+    lab_rest[12, :2] = (0.1, 0.2)
+    rt._last_overlay_kps = neutral_keypoints().copy()
+
+    def lab_overlay(frame=None):
+        rt._last_overlay_kps = lab_rest.copy()
+        return lab_rest.copy()
+
+    rt._lab_overlay_keypoints = lab_overlay
+    rt._desk_px_to_lab = lambda x, y: (x, y)
+    sent: list = []
+    rt._lab_ack = lambda op, body=None: sent.append((op, body)) or {"ok": True}
+    rt._lab_packet_from_ack = lambda ack: {"keypoints": []}
+
+    StreamRuntime.move_character_point(rt, 18, 60.0, 40.0)
+
+    assert sent == [("set_rest_point", {"id": 18, "x": 60.0, "y": 40.0})]
+    saved = read_character_pack(dest).keypoints
+    np.testing.assert_allclose(saved[12, :2], (0.1, 0.2), atol=1e-5)
+    np.testing.assert_allclose(saved[18, :2], pixels_to_normalized(60.0, 40.0, 100, 100), atol=1e-5)
+    # A later mesh reset returns to the fitted rest, not the pre-fit one.
+    np.testing.assert_allclose(rt.engine._ref_keypoints_session_base, saved, atol=1e-5)
+
+
 def test_sidecar_folds_into_pack_once_and_is_deleted(tmp_path: Path) -> None:
     import json
     import zipfile
@@ -287,3 +366,108 @@ def test_sidecar_kept_when_pack_is_broken(tmp_path: Path) -> None:
     legacy.write_text('{"hair": []}', encoding="utf-8")
     assert read_character_fit("hero", dest_dir=tmp_path) == {"hair": []}
     assert legacy.exists()
+
+
+def _edit_runtime(tmp_path: Path, monkeypatch):
+    """A loaded character whose Track Lab replies to every command."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    monkeypatch.setattr("backend.character_pack.characters_dir", lambda: tmp_path)
+    write_character_pack(tmp_path / "hero.vtm", **_tiny_pack_payload())
+    rt = _overlay_runtime()
+    rt._status = {"character_id": "hero"}
+    rt._last_image = Image.new("RGB", (100, 100))
+    rt._frame_payload = lambda image, kps: {}
+    rt.character_fit = lambda: {}
+    rt._ref_path = tmp_path / "hero.vtm"
+    rt.engine = SimpleNamespace(adopt_ref_keypoints=lambda kps, **kw: None, _ref_keypoints_session_base=None)
+    rt._last_overlay_kps = neutral_keypoints().copy()
+    rt._lab_image_wh = (100, 100)
+    rt._desk_px_to_lab = lambda x, y: (x, y)
+    rt._lab_packet_from_ack = lambda ack: {"keypoints": []}
+    rt.adopt_lab_overlay = lambda packet, **kw: True
+    rt.lab_offsets = []
+    rt.sent = []
+
+    def ack(op: str, body: dict | None = None) -> dict:
+        rt.sent.append((op, body))
+        if op == "set_point":
+            rt.lab_offsets = [{"id": int(body["id"]), "dx": 3.0, "dy": -2.0}]
+        if op in ("reset_points", "set_rest_point"):
+            rt.lab_offsets = [r for r in rt.lab_offsets if op == "set_rest_point" and r["id"] != body["id"]]
+        return {"ok": True, "status": {"point_offsets": list(rt.lab_offsets)}}
+
+    rt._lab_ack = ack
+    return rt
+
+
+def test_a_redetect_never_overrides_the_users_points_or_nudges(tmp_path: Path, monkeypatch) -> None:
+    """Track Lab re-detecting the still put its own face back and the restore
+    saved that into the pack; a moved eye point and a nudge were lost."""
+    from backend.pose_controller import pixels_to_normalized
+    from backend.stream import StreamRuntime
+
+    rt = _edit_runtime(tmp_path, monkeypatch)
+    StreamRuntime.move_character_point(rt, 12, 30.0, 40.0)
+    StreamRuntime._nudge_lab_point(rt, 18, 70.0, 45.0)
+    fit = read_character_fit("hero")
+    assert "12" in fit["points"]
+    assert fit["point_offsets"] == [{"id": 18, "dx": 3.0, "dy": -2.0}]
+
+    # Track Lab re-detects: a different face, no nudges.
+    rt._last_overlay_kps = neutral_keypoints().copy()
+    rt.lab_offsets = []
+    rt.sent.clear()
+    assert StreamRuntime._apply_character_fit(rt) is True
+    want = pixels_to_normalized(30.0, 40.0, 100, 100)
+    np.testing.assert_allclose(rt._last_overlay_kps[12, :2], want, atol=1e-5)
+    np.testing.assert_allclose(read_character_pack(tmp_path / "hero.vtm").keypoints[12, :2], want, atol=1e-5)
+    ops = [op for op, _ in rt.sent]
+    assert ops.index("set_rest_point") < ops.index("set_offsets")  # the move would drop the nudge
+    assert ("set_offsets", {"point_offsets": [{"id": 18, "dx": 3.0, "dy": -2.0}]}) in rt.sent
+
+    # Already in place: nothing is re-sent for the point.
+    rt.sent.clear()
+    StreamRuntime._apply_character_fit(rt)
+    assert [op for op, _ in rt.sent] == ["set_offsets"]
+
+
+def test_a_packaged_rest_brings_its_nudges(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _edit_runtime(tmp_path, monkeypatch)
+    StreamRuntime._nudge_lab_point(rt, 18, 70.0, 45.0)
+    rt._still_image = rt._last_image
+    rt.engine._ref_keypoints = neutral_keypoints().copy()
+    body = StreamRuntime._packaged_lab_rest(rt, {"commands": ["set_rest"]})
+    assert body is not None and body["point_offsets"] == [{"id": 18, "dx": 3.0, "dy": -2.0}]
+
+
+def test_a_reset_is_the_users_choice_and_is_kept(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _edit_runtime(tmp_path, monkeypatch)
+    StreamRuntime._nudge_lab_point(rt, 18, 70.0, 45.0)
+    rt._freeze_auto_kps = None
+    rt._drag_kp_idx = None
+    rt._drag_slots = set()
+    rt._drag_base_kps = None
+    rt._drag_xy = None
+    rt._lab_drive = True
+    rt._tracking = False
+    StreamRuntime.mesh_reset(rt)
+    assert read_character_fit("hero")["point_offsets"] == []
+
+
+def test_detected_hair_never_replaces_painted_hair(tmp_path: Path, monkeypatch) -> None:
+    from backend.character_fit import update_character_fit
+    from backend.stream import StreamRuntime
+
+    rt = _edit_runtime(tmp_path, monkeypatch)
+    painted = [{"class": "hair_middle", "polygon": [[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]]}]
+    update_character_fit("hero", {"hair": painted})
+    rt._last_lab_hair = [{"class": "hair_left", "polygon": [[0.5, 0.5], [0.6, 0.5], [0.5, 0.6]]}]
+    StreamRuntime._store_pack_hair(rt)
+    assert read_character_fit("hero")["hair"] == painted

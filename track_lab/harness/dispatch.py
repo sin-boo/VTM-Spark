@@ -109,6 +109,8 @@ def _call(bench: Any, op: str, body: dict[str, Any]) -> Any:
         return bench.set_point(body)
     if op == "reset_points":
         return bench.reset_points(body)
+    if op == "set_offsets":
+        return bench.set_offsets(body)
     if op == "generate":
         from backend.vtm_gen import generate as run_generate
 

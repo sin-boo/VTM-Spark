@@ -692,6 +692,40 @@ def test_update_settings_sends_set_travel_not_feel_caps(monkeypatch) -> None:
     assert abs(float(rt._status["travel_box"]["left"]) - 0.2) < 1e-6
 
 
+def test_limiter_edit_wins_even_when_track_lab_misses_the_push(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from backend.stream import StreamRuntime
+    from backend.travel_box import normalize_travel_box
+
+    class _Offline:
+        def command(self, op, body=None):
+            return {"ok": False, "online": False, "error": "Track Lab is not running"}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Offline())
+    monkeypatch.setattr("backend.ui_session.save_ui_session", lambda **_kw: None)
+    rt = StreamRuntime.__new__(StreamRuntime)
+    rt._lock = threading.Lock()
+    rt._status = {"travel_box": normalize_travel_box(None)}
+    rt._lab_drive = True
+    rt._lab_seen_online = True
+    rt._tracking = False
+    rt._listeners = []
+    rt._last_image = None
+    rt._travel_ref_rgb = None
+    rt._travel_preview_kps = None
+    rt._last_overlay_kps = None
+    rt._travel_from_desk = False
+    rt.engine = SimpleNamespace(_ref_keypoints=None)
+    rt.tracker = SimpleNamespace(mirror=False)
+    StreamRuntime.update_settings(rt, travel_box={"left": 0.12})
+    assert rt._travel_from_desk is True
+    # A status poll carrying Track Lab's old box must not put it back.
+    assert StreamRuntime.adopt_lab_travel_box(rt, {"travel_box": {"left": 0.5}}) is False
+    assert abs(float(rt._status["travel_box"]["left"]) - 0.12) < 1e-6
+
+
 def test_adopt_lab_travel_box_updates_desk_without_set_travel(monkeypatch) -> None:
     import threading
 
@@ -1016,6 +1050,58 @@ def test_desk_stops_boot_poll_when_ready() -> None:
 
 def rest_label_is_calibrate(rail: str) -> bool:
     return ": t('track.calibrate')" in rail
+
+
+def _input_switch_runtime(ack):
+    import threading
+
+    from backend.stream import StreamRuntime
+
+    rt = StreamRuntime.__new__(StreamRuntime)
+    rt._lock = threading.Lock()
+    rt._status = {"mirror": True}
+    rt._tracking = True
+    rt._lab_drive = True
+    rt.preferred_camera = lambda: 1
+    rt.calls = []
+
+    def lab_ack(op, body=None):
+        rt.calls.append((op, dict(body or {})))
+        return ack(op, body)
+
+    rt._lab_ack = lab_ack
+    return rt
+
+
+def test_input_switch_restarts_tracking_on_the_new_input() -> None:
+    from backend.stream import StreamRuntime
+
+    rt = _input_switch_runtime(lambda op, body: {"ok": True, "live": True})
+    assert StreamRuntime.restart_tracking_on_input(rt, "camera") == {"ok": True, "live": True}
+    assert StreamRuntime.restart_tracking_on_input(rt, "ifm") == {"ok": True, "live": True}
+    assert rt.calls == [
+        ("start", {"source": "camera", "camera": 1, "mirror": True}),
+        ("start", {"source": "ifm"}),
+    ]
+    rt._tracking = False
+    assert StreamRuntime.restart_tracking_on_input(rt, "camera") is None
+    assert len(rt.calls) == 2
+
+
+def test_failed_restart_after_input_switch_turns_tracking_off() -> None:
+    import pytest
+
+    from backend.stream import StreamRuntime
+
+    def no_camera(op, body):
+        raise RuntimeError("No camera at index 1")
+
+    rt = _input_switch_runtime(no_camera)
+    stopped: list[bool] = []
+    rt.stop_tracking = lambda: stopped.append(True)
+    with pytest.raises(RuntimeError, match="No camera"):
+        StreamRuntime.restart_tracking_on_input(rt, "camera")
+    assert stopped == [True]
 
 
 def test_update_settings_sends_set_mirror_when_lab_is_seen() -> None:

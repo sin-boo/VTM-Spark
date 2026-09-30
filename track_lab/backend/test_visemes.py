@@ -1128,8 +1128,8 @@ def test_face_expr_still_pose_does_not_move_mesh() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        out = expr.apply(mixed, rest, osf, {"l": 0.0, "r": 0.0})
-        out = expr.apply(mixed, rest, osf, {"l": 0.0, "r": 0.0})
+        out = expr.apply(mixed, rest, osf)
+        out = expr.apply(mixed, rest, osf)
         assert out is not None
         assert np.allclose(out[:20, :2], rest[:20, :2], atol=0.05)
         assert abs(float(out[21, 1]) - float(rest[21, 1])) < 1e-5
@@ -1137,7 +1137,7 @@ def test_face_expr_still_pose_does_not_move_mesh() -> None:
         feel.update(prev)
 
 
-def test_face_expr_brow_and_blink_move_eyes_not_mouth() -> None:
+def test_face_expr_brow_moves_brows_not_mouth() -> None:
     from .eye_bits import bits as eyes
     from .feel import feel
     from .retarget import FaceExpr
@@ -1151,14 +1151,13 @@ def test_face_expr_brow_and_blink_move_eyes_not_mouth() -> None:
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
         eyes.restore(frozenset(), {})
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(rest, rest, osf)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live, {"l": 0.8, "r": 0.0})
+            out = expr.apply(rest, rest, live)
         assert out is not None
         assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
         assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
-        assert float(out[12, 1]) > float(rest[12, 1])
         assert np.allclose(out[20:28, :2], rest[20:28, :2], atol=0.05)
     finally:
         feel.update(prev)
@@ -1189,10 +1188,10 @@ def test_camera_brow_down_moves_character_brows_down() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live_osf, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            out = expr.apply(rest, rest, live_osf, mouth_pts=live_cam)
         assert out is not None
         assert float(out[6, 1]) > float(rest[6, 1]) + 1.0
         assert float(out[9, 1]) > float(rest[9, 1]) + 1.0
@@ -1213,10 +1212,10 @@ def test_head_turn_in_camera_does_not_move_brows() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=turned_cam)
+            out = expr.apply(rest, rest, osf, mouth_pts=turned_cam)
         assert out is not None
         assert np.allclose(out[5:11, :2], rest[5:11, :2], atol=0.3)
         assert np.allclose(out[11:14, :2], rest[11:14, :2], atol=0.3)
@@ -1238,10 +1237,10 @@ def test_osf_y_up_frown_moves_character_brows_down() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(rest, rest, osf)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0})
+            out = expr.apply(rest, rest, live)
         assert out is not None
         assert float(out[6, 1]) > float(rest[6, 1]) + 1.0
         assert float(out[9, 1]) > float(rest[9, 1]) + 1.0
@@ -1264,10 +1263,10 @@ def test_camera_left_brow_drives_character_left_brow() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live_osf, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            out = expr.apply(rest, rest, live_osf, mouth_pts=live_cam)
         assert out is not None
         assert float(out[6, 1]) > float(rest[6, 1]) + 1.0
         assert float(out[9, 1]) < float(rest[9, 1]) + 0.4
@@ -1292,10 +1291,10 @@ def test_head_pitch_does_not_invert_camera_brow_down() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = posed
         for _ in range(8):
-            expr.apply(rest, rest, live_osf, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            expr.apply(rest, rest, live_osf, mouth_pts=live_cam)
             out = expr.place_brows(posed.copy(), rest)
         assert out is not None
         assert float(out[6, 1]) > float(posed[6, 1]) + 1.0
@@ -1331,10 +1330,10 @@ def test_osf_lids_drive_anime_12_and_18() -> None:
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
         eyes.restore(frozenset(DEFAULT_ON), dict(DEFAULT_TO))
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live_osf, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            out = expr.apply(rest, rest, live_osf, mouth_pts=live_cam)
         assert out is not None
         assert float(out[12, 1]) > float(rest[12, 1]) + 0.4
         assert float(out[18, 1]) > float(rest[18, 1]) + 0.4
@@ -1375,10 +1374,10 @@ def test_crossed_eye_maps_still_drive_dest_slots() -> None:
             frozenset((36, 39, 42, 45, LID_MID_R, LID_MID_L)),
             {36: 11, 39: 13, LID_MID_R: 12, 42: 17, 45: 19, LID_MID_L: 18},
         )
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live_osf, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            out = expr.apply(rest, rest, live_osf, mouth_pts=live_cam)
         assert out is not None
         assert float(out[12, 1]) > float(rest[12, 1]) + 0.4
         assert float(out[18, 1]) > float(rest[18, 1]) + 0.4
@@ -1408,10 +1407,10 @@ def test_osf_58_drives_anime_23() -> None:
     try:
         bits.set_on(58, True)
         bits.set_to(58, 23)
-        expr.apply(mixed, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(mixed, rest, osf)
         out = mixed
         for _ in range(8):
-            out = expr.apply(mixed, rest, live, {"l": 0.0, "r": 0.0})
+            out = expr.apply(mixed, rest, live)
         assert out is not None
         assert float(out[23, 1]) < float(rest[23, 1]) - 1.0
     finally:
@@ -1810,13 +1809,13 @@ def test_mapped_lips_keep_viseme_mix() -> None:
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
         bits.restore(frozenset(DEFAULT_ON), dict(DEFAULT_TO))
-        expr.apply(mixed, rest, osf, {"l": 0.0, "r": 0.0})
-        still = expr.apply(mixed, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(mixed, rest, osf)
+        still = expr.apply(mixed, rest, osf)
         assert still is not None
         assert abs(float(still[21, 1]) - float(rest[21, 1])) < 1e-5
         out = mixed
         for _ in range(8):
-            out = expr.apply(mixed, rest, live, {"l": 0.0, "r": 0.0})
+            out = expr.apply(mixed, rest, live)
         assert out is not None
         assert float(out[21, 1]) < float(rest[21, 1])
     finally:
@@ -1929,10 +1928,10 @@ def test_mouth_map_54_drives_anime_21() -> None:
     try:
         bits.set_on(54, True)
         bits.set_to(54, 21)
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(rest, rest, osf)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0})
+            out = expr.apply(rest, rest, live)
         assert out is not None
         assert float(out[21, 1]) < float(rest[21, 1]) - 1.0
     finally:
@@ -1981,10 +1980,10 @@ def test_chin_stays_when_osf_jaw_slides() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0})
+        expr.apply(rest, rest, osf)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0})
+            out = expr.apply(rest, rest, live)
         assert out is not None
         assert abs(float(out[2, 0]) - float(rest[2, 0])) < 0.2
         assert abs(float(out[2, 1]) - float(rest[2, 1])) < 0.2
@@ -2070,6 +2069,37 @@ def test_head_turn_and_nod_leave_the_torso_put() -> None:
             for idx, joint in parked.items():
                 assert abs(turned[idx]["x"] - joint["x"]) < 0.2, (source, look, idx)
                 assert abs(turned[idx]["y"] - joint["y"]) < 0.2, (source, look, idx)
+
+
+def test_nod_the_neck_model_misses_leaves_the_torso_put() -> None:
+    """A real neck swings the eyes by more (or less) than NECK_UP models. On a
+    webcam that miss read as a walk: past the dead band every look-down slid
+    the face and pulled the shoulders down with it."""
+    import math
+
+    from .feel import feel
+    from .rig import FaceRig, neck_offset
+    from .skeleton import follow_skeleton, skeleton_from_face
+
+    rest, _osf = _toy_face()
+    body = skeleton_from_face(rest)
+    head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+    feel.update({"smoothing": 0.0})
+    for miss in (1.5, 0.5):
+        rig = FaceRig()
+        rig.apply(rest, rest, head0, _webcam_pose(head0))
+        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        # A 30 deg look-down over a few frames.
+        for pitch in range(2, 32, 2):
+            look = {"pitch": float(pitch), "yaw": 0.0, "roll": 0.0}
+            pose = _webcam_pose(look)
+            _nx, ny = neck_offset(0.0, math.radians(pitch), 0.0)
+            pose["cy"] = pose["by"] = 200.0 + 100.0 * ny * miss
+            assert rig.apply(rest, rest, look, pose) is not None
+        nodded = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        for idx, joint in parked.items():
+            assert abs(nodded[idx]["x"] - joint["x"]) < 0.5, (miss, idx)
+            assert abs(nodded[idx]["y"] - joint["y"]) < 0.5, (miss, idx)
 
 
 def test_webcam_lean_still_moves_the_torso() -> None:

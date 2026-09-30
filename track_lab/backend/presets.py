@@ -1,4 +1,4 @@
-"""Mouth shape presets authored on top of the anime rest mesh."""
+"""Mouth and eye shape presets authored on top of the anime rest mesh."""
 
 from __future__ import annotations
 
@@ -11,9 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 PRESET_PATH = ROOT / "output" / "mouth_presets.json"
 
 MOUTH_SLOTS = tuple(range(20, 28))
+# Character eyes by screen side: (corner, lid mid, corner). Blink "l" drives
+# 11-13, "r" drives 17-19.
+EYE_L = (11, 12, 13)
+EYE_R = (17, 18, 19)
+EYE_SLOTS = EYE_L + EYE_R
 VOWEL_IDS = ("A", "I", "U", "E")
 FORM_IDS = ("smile", "sad")
-PRESET_IDS = ("rest",) + FORM_IDS + VOWEL_IDS
+# Blink blends Eye open -> Eye closed; they own only the eye points.
+EYE_IDS = ("eye_open", "eye_closed")
+PRESET_IDS = ("rest",) + FORM_IDS + VOWEL_IDS + EYE_IDS
 # Every shape in PRESET_IDS is authored. O was folded into U (rounded lips).
 AUTHOR_IDS = PRESET_IDS
 PRESET_LABELS = {
@@ -24,6 +31,8 @@ PRESET_LABELS = {
     "I": "I",
     "U": "U",
     "E": "E",
+    "eye_open": "Eye open",
+    "eye_closed": "Eye closed",
 }
 
 
@@ -49,12 +58,23 @@ def pair_ends(name: str) -> tuple[str, str] | None:
         return None
     if PRESET_IDS.index(left) > PRESET_IDS.index(right):
         return None
+    if (left in EYE_IDS) != (right in EYE_IDS):
+        return None
     return left, right
+
+
+def shape_slots(name: str) -> tuple[int, ...]:
+    """Points a shape (or a stop between two) owns: the eyes or the lips."""
+    ends = pair_ends(name)
+    head = ends[0] if ends else name
+    return EYE_SLOTS if head in EYE_IDS else MOUTH_SLOTS
 
 
 def pair_id(a: str, b: str) -> str:
     if a not in PRESET_IDS or b not in PRESET_IDS or a == b:
-        raise ValueError("Mouth pair needs two different shapes")
+        raise ValueError("Pair needs two different shapes")
+    if (a in EYE_IDS) != (b in EYE_IDS):
+        raise ValueError("Pair eyes with eyes and mouths with mouths")
     if PRESET_IDS.index(a) > PRESET_IDS.index(b):
         a, b = b, a
     return f"{a}+{b}"
@@ -106,15 +126,16 @@ def _midpoint(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def _along(
-    rest: np.ndarray,
+    start: np.ndarray,
     shape: np.ndarray,
     stops: list[tuple[float, np.ndarray]],
     amount: float,
+    slots: tuple[int, ...] = MOUTH_SLOTS,
 ) -> np.ndarray:
-    """Piecewise mouth at ``amount`` through rest, the saved stops, and the end."""
-    slots = list(MOUTH_SLOTS)
+    """``slots`` at ``amount`` through start, the saved stops, and the end."""
+    slots = list(slots)
     knots_t = [0.0]
-    knots_xy = [np.asarray(rest[slots, :2], dtype=np.float32)]
+    knots_xy = [np.asarray(start[slots, :2], dtype=np.float32)]
     seen: set[int] = set()
     for t, mid in stops:
         slot = int(round(float(t) * 1000))
@@ -177,7 +198,10 @@ def copy_pts(pts: np.ndarray) -> np.ndarray:
     return np.asarray(pts, dtype=np.float32)[:28].copy()
 
 
-def apply_mouth(base: np.ndarray, mouth: object) -> np.ndarray:
+def apply_mouth(
+    base: np.ndarray, mouth: object, slots: tuple[int, ...] = MOUTH_SLOTS
+) -> np.ndarray:
+    """Write absolute ``slots`` from ``mouth`` ({slot: [x, y, score?]})."""
     out = copy_pts(base)
     if not isinstance(mouth, dict):
         return out
@@ -186,7 +210,7 @@ def apply_mouth(base: np.ndarray, mouth: object) -> np.ndarray:
             slot = int(key)
         except (TypeError, ValueError):
             continue
-        if slot not in MOUTH_SLOTS:
+        if slot not in slots:
             continue
         if not isinstance(value, (list, tuple)) or len(value) < 2:
             continue
@@ -214,9 +238,12 @@ _OPEN_UP = ((20, 0.45), (21, 0.50), (22, 0.45))
 _OPEN_DOWN = ((24, 0.55), (25, 0.62), (27, 0.55))
 
 
-def _mouth_frame(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    right = np.asarray(pts[23, :2], dtype=np.float32)
-    left = np.asarray(pts[26, :2], dtype=np.float32)
+def _mouth_frame(
+    pts: np.ndarray, a: int = 23, b: int = 26
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """(along a to b, down the screen, width) for a pair of corners."""
+    right = np.asarray(pts[a, :2], dtype=np.float32)
+    left = np.asarray(pts[b, :2], dtype=np.float32)
     across = left - right
     width = float(np.hypot(across[0], across[1]))
     if width < 1e-3:
@@ -306,24 +333,51 @@ def draft_mouth(name: str, rest: np.ndarray) -> np.ndarray:
     return out
 
 
-def retarget_mouth(shape: np.ndarray, old_rest: np.ndarray, new_rest: np.ndarray) -> np.ndarray:
-    """Move authored lips onto a new rest. Eyes/jaw stay on the new face."""
+def draft_eyes(rest: np.ndarray) -> np.ndarray:
+    """Unsaved Eye closed: each lid mid on its corner line."""
+    out = copy_pts(rest)
+    for a, lid, b in (EYE_L, EYE_R):
+        chord = out[b, :2] - out[a, :2]
+        span = float(np.dot(chord, chord))
+        if span < 1e-6:
+            continue
+        t = float(np.clip(np.dot(out[lid, :2] - out[a, :2], chord) / span, 0.0, 1.0))
+        out[lid, :2] = out[a, :2] + t * chord
+    return out
+
+
+def draft_shape(name: str, rest: np.ndarray) -> np.ndarray:
+    return draft_eyes(rest) if name == "eye_closed" else draft_mouth(name, rest)
+
+
+# Each group moves in the frame of its two corners.
+_GROUPS = {
+    "mouth": ((MOUTH_SLOTS, 23, 26),),
+    "eyes": ((EYE_L, 11, 13), (EYE_R, 17, 19)),
+}
+
+
+def retarget_mouth(
+    shape: np.ndarray, old_rest: np.ndarray, new_rest: np.ndarray, group: str = "mouth"
+) -> np.ndarray:
+    """Move an authored shape onto a new rest. Other points stay on the new face."""
     out = copy_pts(new_rest)
     src = copy_pts(shape)
     prev = copy_pts(old_rest)
     nxt = copy_pts(new_rest)
-    old_along, old_down, old_w = _mouth_frame(prev)
-    new_along, new_down, new_w = _mouth_frame(nxt)
-    if old_w < 1e-3 or new_w < 1e-3:
-        return out
-    scale = new_w / old_w
-    for slot in MOUTH_SLOTS:
-        delta = src[slot, :2] - prev[slot, :2]
-        along_amt = float(np.dot(delta, old_along))
-        down_amt = float(np.dot(delta, old_down))
-        out[slot, :2] = nxt[slot, :2] + scale * (along_amt * new_along + down_amt * new_down)
-        if src.shape[1] > 2:
-            out[slot, 2] = float(src[slot, 2])
+    for slots, a, b in _GROUPS[group]:
+        old_along, old_down, old_w = _mouth_frame(prev, a, b)
+        new_along, new_down, new_w = _mouth_frame(nxt, a, b)
+        if old_w < 1e-3 or new_w < 1e-3:
+            continue
+        scale = new_w / old_w
+        for slot in slots:
+            delta = src[slot, :2] - prev[slot, :2]
+            along_amt = float(np.dot(delta, old_along))
+            down_amt = float(np.dot(delta, old_down))
+            out[slot, :2] = nxt[slot, :2] + scale * (along_amt * new_along + down_amt * new_down)
+            if src.shape[1] > 2:
+                out[slot, 2] = float(src[slot, 2])
     return out
 
 
@@ -391,19 +445,15 @@ class MouthBook:
         self.save()
 
     def rebase(self, pts: np.ndarray) -> None:
-        """Keep visemes when rest jumps; only the lips move onto the new face."""
+        """Keep shapes when rest jumps; only their own points move onto the new face."""
         old = self.shapes.get("rest")
         nxt = copy_pts(pts)
         if old is not None:
-            for name in FORM_IDS + VOWEL_IDS:
-                stored = self.shapes.get(name)
-                if stored is None:
-                    continue
-                self.shapes[name] = retarget_mouth(stored, old, nxt)
             for name in list(self.shapes):
-                if pair_ends(name) is None:
+                if name == "rest":
                     continue
-                self.shapes[name] = retarget_mouth(self.shapes[name], old, nxt)
+                group = "eyes" if shape_slots(name) == EYE_SLOTS else "mouth"
+                self.shapes[name] = retarget_mouth(self.shapes[name], old, nxt, group)
         self.shapes["rest"] = nxt
         self.active = "rest"
         self.save()
@@ -416,7 +466,7 @@ class MouthBook:
     def _ends(self, name: str, rest: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         ends = pair_ends(name)
         if ends is None:
-            raise ValueError(f"Unknown mouth preset: {name}")
+            raise ValueError(f"Unknown shape: {name}")
         return self.preview(ends[0], rest), self.preview(ends[1], rest)
 
     def preview(self, name: str, rest: np.ndarray | None) -> np.ndarray:
@@ -428,7 +478,7 @@ class MouthBook:
             left, right = self._ends(name, rest)
             return _blend(left, right, key_t(name) or 0.5)
         if name not in PRESET_IDS:
-            raise ValueError(f"Unknown mouth preset: {name}")
+            raise ValueError(f"Unknown shape: {name}")
         stored = self.shapes.get(name)
         if stored is not None:
             return copy_pts(stored)
@@ -437,11 +487,11 @@ class MouthBook:
             raise ValueError("Track a face first")
         if name == "rest":
             return copy_pts(source)
-        return draft_mouth(name, source)
+        return draft_shape(name, source)
 
     def apply(self, name: str, rest: np.ndarray | None) -> np.ndarray:
         if name not in PRESET_IDS and pair_ends(name) is None:
-            raise ValueError(f"Unknown mouth preset: {name}")
+            raise ValueError(f"Unknown shape: {name}")
         stored = self.shapes.get(name)
         if stored is None:
             if name != "rest":
@@ -457,8 +507,9 @@ class MouthBook:
         return copy_pts(stored)
 
     def set_mouth(self, name: str, mouth: object, rest: np.ndarray | None) -> np.ndarray:
+        """Write ``name``'s own points (lips, or eyes for the eye shapes)."""
         if name not in PRESET_IDS and pair_ends(name) is None:
-            raise ValueError(f"Unknown mouth preset: {name}")
+            raise ValueError(f"Unknown shape: {name}")
         base = self.shapes.get(name)
         if base is None:
             if pair_ends(name) is not None:
@@ -468,8 +519,8 @@ class MouthBook:
                 source = self.template(rest)
                 if source is None:
                     raise ValueError("Track a face first")
-                base = source
-        pts = apply_mouth(base, mouth)
+                base = draft_shape(name, source) if name == "eye_closed" else source
+        pts = apply_mouth(base, mouth, shape_slots(name))
         self.shapes[name] = pts
         self.active = name
         self.save()
@@ -566,6 +617,36 @@ class MouthBook:
                 out[slots, :2] += _along(rest, shape, stops, amount) - rest[slots, :2]
         amt = open_amount(weights)
         apply_open_offset(out, rest, amt)
+        return out
+
+    def blink(
+        self,
+        mesh: np.ndarray | None,
+        rest: np.ndarray | None,
+        blink: dict[str, float] | None,
+    ) -> np.ndarray | None:
+        """Each eye at its blink (0 open, 1 shut) along Eye open -> Eye closed.
+
+        Adds the shape's move from ``rest`` to ``mesh``, so whatever else
+        drove the eye points stays on top. Unsaved, Eye open is rest and Eye
+        closed lays each lid on its corner line.
+        """
+        if mesh is None or rest is None:
+            return mesh
+        rest = copy_pts(rest)
+        opened = self.shapes.get("eye_open", rest)
+        shut = self.shapes.get("eye_closed")
+        if shut is None:
+            shut = draft_eyes(opened)
+        stops = self._stops("eye_open", "eye_closed")
+        out = copy_pts(mesh)
+        for key, slots in (("l", EYE_L), ("r", EYE_R)):
+            try:
+                amount = float(np.clip(float((blink or {}).get(key) or 0.0), 0.0, 1.0))
+            except (TypeError, ValueError):
+                amount = 0.0
+            xy = _along(opened, shut, stops, amount, slots)
+            out[list(slots), :2] += xy - rest[list(slots), :2]
         return out
 
     def current(self) -> np.ndarray | None:

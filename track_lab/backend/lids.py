@@ -1,10 +1,8 @@
-"""Blink → eyelids on the posed character.
+"""Tracker blink -> lid amount (0 open, 1 shut) per character eye.
 
-A real closed eye rarely reads 1.0, so the tracker's blink is reshaped per
-source, eased (fast close, softer reopen), and the lid mid is laid on its
-corner chord *after* smoothing and the head rig. Before, the lid moved a
-linear share of the blink and then trailed the 28-point smoothing, so a
-closed eye stopped part-open and the model kept drawing a pupil.
+A real closed eye rarely reads 1.0, so the blink is reshaped per source and
+eased (fast close, softer reopen). The eyes themselves are the Eye open /
+Eye closed shapes (presets.py), blended by this amount after the rig.
 """
 
 from __future__ import annotations
@@ -12,8 +10,6 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
-
-import numpy as np
 
 # Raw blink (0 open, 1 shut) that reads as fully open / fully shut. ARKit
 # tops out around 0.6-0.9 on a closed eye depending on the face, and
@@ -29,8 +25,6 @@ CLOSE_TAU = 0.008
 OPEN_TAU = 0.045
 # A gap longer than this is a stall, not a blink: jump to the new value.
 _STALE_S = 0.5
-# Character slots by screen side: (corner, lid mid, corner).
-EYE_SLOTS: dict[str, tuple[int, int, int]] = {"l": (11, 12, 13), "r": (17, 18, 19)}
 
 
 def _smoothstep(t: float) -> float:
@@ -81,38 +75,3 @@ class LidFilter:
             out[key] = prev + (want - prev) * (1.0 - math.exp(-dt / tau))
         self._last = out
         return {key: round(value, 3) for key, value in out.items()}
-
-
-def shut_lids(pts: np.ndarray | None, blink: Mapping[str, float] | None) -> np.ndarray | None:
-    """Move each lid mid ``blink`` of the way onto its corner chord.
-
-    Runs on the posed mesh, so the chord already carries the head's tilt and
-    the lid closes along the eye's own up axis. Only the lid moves: levelling
-    the corners here would undo the tilt. A lid already on or below its
-    chord (an authored squint) is left alone.
-    """
-    if pts is None:
-        return None
-    out = np.array(pts, dtype=np.float32, copy=True)
-    for key, (a, lid, b) in EYE_SLOTS.items():
-        amount = min(max(_get(blink, key), 0.0), 1.0)
-        if amount <= 0.0 or len(out) <= max(a, lid, b):
-            continue
-        if out.shape[1] > 2 and float(min(out[a, 2], out[lid, 2], out[b, 2])) < 0.05:
-            continue
-        ax, ay = float(out[a, 0]), float(out[a, 1])
-        cx, cy = float(out[b, 0]) - ax, float(out[b, 1]) - ay
-        span = cx * cx + cy * cy
-        if span < 1e-9:
-            continue
-        px, py = float(out[lid, 0]) - ax, float(out[lid, 1]) - ay
-        along = min(max((px * cx + py * cy) / span, 0.0), 1.0)
-        fx, fy = along * cx, along * cy
-        # The chord's normal that points up the screen (Y down), whichever
-        # corner comes first. Positive height = the lid is open.
-        nx, ny = (cy, -cx) if cx > 0.0 else (-cy, cx)
-        if (px - fx) * nx + (py - fy) * ny <= 0.0:
-            continue
-        out[lid, 0] = ax + px + amount * (fx - px)
-        out[lid, 1] = ay + py + amount * (fy - py)
-    return out

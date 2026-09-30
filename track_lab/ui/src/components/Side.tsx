@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { FeelSettings, HairPart, IrisCamHit, LabStatus, MixWeights, MouthPreset, TravelBox as TravelBoxValue } from '../api'
 import { FEEL, METERS, OVERLAY, ZERO_FEEL, type Busy } from '../constants'
-import { MOUTH_ENDS, MOUTH_LABEL, keysOn, pairId } from '../points'
+import { EYE_ENDS, MOUTH_ENDS, SHAPE_LABEL, keysOn, pairId } from '../points'
 import { TravelBox, type TravelFocus } from './TravelBox'
 
 export type SideProps = {
@@ -156,6 +156,8 @@ function homeCursor(saved: { t: number }[]) {
 const MOUTH_PAIRS: [string, string][] = MOUTH_ENDS.flatMap((left, index) =>
   MOUTH_ENDS.slice(index + 1).map((right) => [left, right] as [string, string]),
 )
+// Blink runs along this bar: 0 open, 1 shut.
+const EYE_PAIRS: [string, string][] = [[EYE_ENDS[0], EYE_ENDS[1]]]
 
 type KeyDrag =
   | { kind: 'cursor'; origin: number; moved: boolean }
@@ -197,7 +199,7 @@ function MouthSection({
   return (
     <>
       <div className="mouth-head">
-        <p className="side-label">{editing ? 'Shapes' : 'Mouth'}</p>
+        <p className="side-label">{editing ? 'Shapes' : 'Blends'}</p>
         <button
           type="button"
           className="mouth-arrow"
@@ -229,7 +231,7 @@ function MouthSection({
         </ul>
       ) : (
       <div className="keybar-list">
-        {MOUTH_PAIRS.map(([left, right]) => (
+        {[...MOUTH_PAIRS, ...EYE_PAIRS].map(([left, right]) => (
           <PairBar
             key={pairId(left, right)}
             left={left}
@@ -443,8 +445,8 @@ function PairBar({
     return `calc(${KEY_INSET}px + ${t} * (100% - ${KEY_INSET * 2}px))`
   }
 
-  const leftLabel = MOUTH_LABEL[left as keyof typeof MOUTH_LABEL]
-  const rightLabel = MOUTH_LABEL[right as keyof typeof MOUTH_LABEL]
+  const leftLabel = SHAPE_LABEL[left] ?? left
+  const rightLabel = SHAPE_LABEL[right] ?? right
 
   return (
     <div className="keybar">

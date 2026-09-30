@@ -196,6 +196,29 @@ def test_head_ease_holds_jitter_and_keeps_easing_a_move() -> None:
     assert abs(got - 0.48) < 0.005
 
 
+def test_jitter_does_not_hold_a_still_head_ease_open() -> None:
+    """Webcam jitter on a still head must not read as movement: the ease keeps
+    close to its designed still time constant instead of a third of it."""
+    import math
+
+    import numpy as np
+
+    from backend.ease import HeadEase, cutoffs
+
+    rng = np.random.default_rng(1)
+    fps = 24.0
+    jitter = math.radians(0.7)
+    for smooth in (0.88, 1.0):
+        ease = HeadEase()
+        noise = rng.normal(0.0, jitter, 240)
+        out = [float(ease.step((v,), (1.0,), smooth, i / fps)[0]) for i, v in enumerate(noise)]
+        still_hz, _ = cutoffs(smooth)
+        designed = 1.0 / (2.0 * math.pi * still_hz)
+        # A first-order ease with time constant tau passes std * sqrt(dt / (2 tau + dt)).
+        tau_seen = (1.0 / fps) * (np.var(noise[48:]) / np.var(out[48:]) - 1.0) / 2.0
+        assert tau_seen > 0.75 * designed
+
+
 def test_rig_eases_the_turn_but_not_the_mouth(monkeypatch) -> None:
     """Smooth eases the head in the rig; the mesh it is handed (mouth,
     brows) goes through at once, so a strong Smooth does not blur lip sync."""

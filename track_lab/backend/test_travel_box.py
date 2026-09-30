@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from backend.travel_box import (
     DEFAULT_TRAVEL_BOX,
@@ -379,3 +381,64 @@ def test_travel_disabled_skips_clamp() -> None:
     live[:28, 0] -= 90.0
     out, _ = apply_limits(live, rest, {"enabled": False})
     assert abs(float(out[0, 0]) - float(live[0, 0])) < 1e-5
+
+
+def test_old_look_down_default_moves_on_but_a_chosen_one_stays() -> None:
+    """Characters made before version 3 carry the old 3 deg look-down default,
+    which capped every nod; it reads as today's default. Room values stay."""
+    old = normalize_travel_box({"version": 2, "left": 0.3, "pitch_down": 3.0})
+    assert old["pitch_down"] == DEFAULT_TRAVEL_BOX["pitch_down"]
+    assert old["left"] == 0.3
+    assert old["version"] == TRAVEL_VERSION
+    assert normalize_travel_box({"version": 2, "pitch_down": 5.0})["pitch_down"] == 5.0
+    chosen = merge_travel_box(old, {"pitch_down": 3.0})
+    assert chosen["pitch_down"] == 3.0
+    assert normalize_travel_box(chosen)["pitch_down"] == 3.0
+
+
+def test_a_blink_at_the_wall_does_not_slide_the_face_up() -> None:
+    """Shut eyes drop the eye line and brows. Measured as the head, that read
+    as a step down and the limiter pushed the whole face up while closed."""
+    rest = _rest()
+    fh = face_height(rest)
+    live = rest.copy()
+    live[:, 1] += 0.2 * fh  # standing right at a 0.2 fh bottom wall
+    box = merge_travel_box(default_travel_box(), {"down": 0.2})
+    shut = live.copy()
+    shut[[5, 6, 7, 8, 9, 10], 1] += 0.1 * fh
+    shut[[11, 12, 13, 17, 18, 19], 1] += 0.2 * fh
+    pushed, _ = apply_limits(shut, rest, box)
+    assert float(pushed[15, 1]) < float(live[15, 1]) - 1.0  # the old slide
+    out, _ = apply_limits(shut, rest, box, measure=live)
+    np.testing.assert_allclose(out[:28, :2], shut[:28, :2], atol=1e-4)
+
+
+def test_the_head_wall_is_an_oval() -> None:
+    """Straight moves stop at the same walls; a diagonal no longer reaches
+    the old box's corner, it stops on the oval between them."""
+    from backend.travel_box import oval_outline, oval_stop
+
+    room = (-4.0, 2.0, -1.0, 3.0)  # left 4, right 2, up 1, down 3
+    assert oval_stop(np.array([10.0, 0.0]), room) == (2.0, 0.0)
+    assert oval_stop(np.array([-10.0, 0.0]), room) == (-4.0, 0.0)
+    assert oval_stop(np.array([0.0, -5.0]), room) == (0.0, -1.0)
+    assert oval_stop(np.array([1.0, 1.0]), room) == (1.0, 1.0)  # inside: kept
+    x, y = oval_stop(np.array([2.0, 3.0]), room)  # the old corner
+    assert abs((x / 2.0) ** 2 + (y / 3.0) ** 2 - 1.0) < 1e-9
+    assert abs(x / y - 2.0 / 3.0) < 1e-9  # pulled straight back along the move
+    # Live: a diagonal walk stops on the oval, not the corner.
+    rest = _rest()
+    fh = face_height(rest)
+    live = rest.copy()
+    live[:, 0] += 2.0 * fh
+    live[:, 1] += 2.0 * fh
+    box = merge_travel_box(default_travel_box(), {"right": 0.3, "down": 0.3})
+    out, _ = apply_limits(live, rest, box)
+    dx, dy = out[15, :2] - rest[15, :2]
+    assert abs(math.hypot(dx, dy) - 0.3 * fh) < 0.05 * fh
+    # The drawn outline touches each wall at its middle and rounds the corners.
+    pts = oval_outline((10.0, 10.0, 20.0, 30.0), (6.0, 9.0, 22.0, 33.0))
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    assert (min(xs), max(xs), min(ys), max(ys)) == pytest.approx((6.0, 22.0, 9.0, 33.0))
+    assert all(not (abs(px - 6.0) < 1e-6 and abs(py - 9.0) < 1e-6) for px, py in pts)

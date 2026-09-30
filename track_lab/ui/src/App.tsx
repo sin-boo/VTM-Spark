@@ -2,7 +2,20 @@ import { useEffect, useRef, useState, type JSX } from 'react'
 import { api, frameUrl, type FeelSettings, type LabStatus, type TravelBox } from './api'
 import { Side } from './components/Side'
 import { DEFAULT_PRESETS, ZERO_FEEL, ZERO_WEIGHTS, type Busy } from './constants'
-import { camRefOf, camShortOf, blendMouth, draftMouth, keyId, keyT, keysOn, pairId, sampleMouth, refOf } from './points'
+import {
+  camRefOf,
+  camShortOf,
+  blendMouth,
+  draftShape,
+  keyId,
+  keyT,
+  keysOn,
+  MOUTH_SLOTS,
+  pairId,
+  sampleMouth,
+  refOf,
+  shapeSlots,
+} from './points'
 
 type View = { scale: number; x: number; y: number }
 
@@ -13,8 +26,7 @@ const CAM_MAX = 12
 const CAM_START = 2.2
 const PAD = 12
 const AUTO_GEN_KEY = 'track-lab-auto-gen'
-const MOUTH = [20, 21, 22, 23, 24, 25, 26, 27]
-const MOUTH_SET = new Set(MOUTH)
+const MOUTH_SET = new Set(MOUTH_SLOTS)
 const HAIR_FILL: Record<string, string> = {
   hair_middle: 'rgba(255, 200, 0, 0.28)',
   hair_left: 'rgba(0, 180, 255, 0.28)',
@@ -52,9 +64,10 @@ function pinRows<T extends { id: number; x: number; y: number }>(
   return rows.map((row) => (row.id === held.id ? { ...row, x: held.x, y: held.y } : row))
 }
 
-function mouthMap(pts: number[][]): Record<string, [number, number, number]> {
+/** The points shape ``id`` owns, for set_mouth. */
+function shapeMap(id: string, pts: number[][]): Record<string, [number, number, number]> {
   const out: Record<string, [number, number, number]> = {}
-  for (const i of MOUTH) {
+  for (const i of shapeSlots(id)) {
     const row = pts[i]
     if (!row) continue
     out[String(i)] = [row[0], row[1], row[2] ?? 1]
@@ -77,13 +90,13 @@ function mouthMesh(
     return blendMouth(left, right)
   }
   if (!rest || rest.length < 28) return null
-  if (id === 'rest') return rest.map((row) => row.slice())
-  return draftMouth(id, rest)
+  if (id === 'rest' || id === 'eye_open') return rest.map((row) => row.slice())
+  return draftShape(id, rest)
 }
 
-function pasteMouthOnto(base: number[][], clip: number[][]): number[][] {
+function pasteShapeOnto(id: string, base: number[][], clip: number[][]): number[][] {
   const out = base.map((row) => row.slice())
-  for (const i of MOUTH) {
+  for (const i of shapeSlots(id)) {
     const row = clip[i]
     if (!row) continue
     out[i] = row.slice()
@@ -704,7 +717,7 @@ export default function App() {
     setBusy('apply')
     setError('')
     try {
-      const next = await api.setMouth(id, mouthMap(mid))
+      const next = await api.setMouth(id, shapeMap(id, mid))
       if (next.error) {
         setError(next.error)
         return
@@ -750,7 +763,7 @@ export default function App() {
     if (!mesh) return
     setError('')
     try {
-      const next = await api.setMouth(id, mouthMap(mesh))
+      const next = await api.setMouth(id, shapeMap(id, mesh))
       if (next.error) {
         setError(next.error)
         return
@@ -788,7 +801,7 @@ export default function App() {
     setError('')
     try {
       const authored = pointsRef.current.map((row) => row.slice())
-      const next = await api.setMouth(id, mouthMap(authored))
+      const next = await api.setMouth(id, shapeMap(id, authored))
       if (next.error) {
         setError(next.error)
         return
@@ -867,7 +880,7 @@ export default function App() {
     setBusy('apply')
     setError('')
     try {
-      const next = await api.setMouth(id, mouthMap(clip))
+      const next = await api.setMouth(id, shapeMap(id, clip))
       if (next.error) {
         setError(next.error)
         return
@@ -878,7 +891,7 @@ export default function App() {
         (shapes[id] && shapes[id].length >= 28 && shapes[id]) ||
         (shapes.rest && shapes.rest.length >= 28 && shapes.rest) ||
         clip
-      const pasted = next.shapes?.[id]?.length >= 28 ? next.shapes[id].map((row) => row.slice()) : pasteMouthOnto(base, clip)
+      const pasted = next.shapes?.[id]?.length >= 28 ? next.shapes[id].map((row) => row.slice()) : pasteShapeOnto(id, base, clip)
       apply(next, true, false)
       setSelected(id)
       setStatus((s) => {
@@ -1183,6 +1196,26 @@ export default function App() {
       />
     )
   }
+  const limitOval = (outline: number[][] | null | undefined, color: string, key: string) => {
+    if (!outline || outline.length < 3) return null
+    const points = outline
+      .map(([x, y]) => {
+        const p = toScreen(x, y)
+        return `${p.x},${p.y}`
+      })
+      .join(' ')
+    return (
+      <polygon
+        key={key}
+        points={points}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeDasharray="6 4"
+        pointerEvents="none"
+      />
+    )
+  }
 
   return (
     <div className="bench">
@@ -1360,7 +1393,9 @@ export default function App() {
                         ? limitRect(travelRects?.head, '#f45b69', false, 'lim-head')
                         : null,
                       travelFocus === null || travelFocus === 'head'
-                        ? limitRect(travelRects?.head_wall, '#f45b69', true, 'lim-head-wall')
+                        ? travelRects?.head_oval
+                          ? limitOval(travelRects.head_oval, '#f45b69', 'lim-head-wall')
+                          : limitRect(travelRects?.head_wall, '#f45b69', true, 'lim-head-wall')
                         : null,
                       travelFocus === null || travelFocus === 'body'
                         ? limitRect(travelRects?.body, '#5ba4f4', false, 'lim-body')

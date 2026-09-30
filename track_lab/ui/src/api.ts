@@ -91,6 +91,8 @@ export type TravelBox = {
 export type TravelRects = {
   head?: number[] | null
   head_wall?: number[] | null
+  /** Oval head wall outline, [x, y] per point; drawn instead of head_wall. */
+  head_oval?: number[][] | null
   body?: number[] | null
   body_wall?: number[] | null
 }

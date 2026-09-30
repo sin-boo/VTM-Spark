@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import {
   characterThumb,
@@ -42,15 +48,22 @@ type Props = {
   onMeta: (meta: CharacterMeta) => Promise<CharacterCard>
   onRefresh?: () => void
   travel?: TravelBox | null
-  onTravel: (box: TravelBox) => void
+  onTravel: (box: TravelBox) => Promise<boolean | undefined>
 }
 
 type CtxMenu = { id: string; x: number; y: number }
 
 type LibNotice = { error: boolean; text: string }
 
+/** Where files from Explorer can land: the rail preview or the open library. */
+type DropZone = 'rail' | 'library'
+
 function cleanError(e: unknown): string {
   return String(e).replace(/^Error:\s*/, '')
+}
+
+function hasFiles(ev: ReactDragEvent): boolean {
+  return Array.from(ev.dataTransfer.types).includes('Files')
 }
 
 /** Grid thumbnail that drops back to the full preview if /thumb fails. */
@@ -95,6 +108,7 @@ export function CharacterLibrary(props: Props) {
   const [importing, setImporting] = useState(false)
   const [libNotice, setLibNotice] = useState<LibNotice | null>(null)
   const [revealId, setRevealId] = useState<string | null>(null)
+  const [dropOver, setDropOver] = useState<DropZone | null>(null)
   const locked = props.busy || props.creating
   const creating = props.creating
   const current = props.characters.find((c) => c.id === props.currentId)
@@ -264,24 +278,66 @@ export function CharacterLibrary(props: Props) {
     importRef.current?.click()
   }
 
-  async function beginImport(file: File) {
+  /** Picked or dropped files. Each .vtm is copied into the characters folder by the backend. */
+  async function beginImport(files: File[]) {
     setLibNotice(null)
-    if (!/\.vtm$/i.test(file.name)) {
+    const packs = files.filter((f) => /\.vtm$/i.test(f.name))
+    if (!packs.length) {
       setLibNotice({ error: true, text: t('lib.pickVtm') })
       return
     }
     setImporting(true)
+    const added: CharacterCard[] = []
+    const failed: string[] = []
     try {
-      const card = await props.onImport(file)
-      if (card?.id) {
-        setPickedId(card.id)
-        setRevealId(card.id)
-        setLibNotice({ error: false, text: t('lib.imported', { name: card.name }) })
+      for (const file of packs) {
+        try {
+          const card = await props.onImport(file)
+          if (card?.id) added.push(card)
+        } catch (e) {
+          failed.push(packs.length > 1 ? `${file.name}: ${cleanError(e)}` : cleanError(e))
+        }
       }
-    } catch (e) {
-      setLibNotice({ error: true, text: t('lib.importFailed', { error: cleanError(e) }) })
     } finally {
       setImporting(false)
+    }
+    const last = added[added.length - 1]
+    if (last) {
+      setPickedId(last.id)
+      setRevealId(last.id)
+    }
+    if (failed.length) {
+      setLibNotice({ error: true, text: t('lib.importFailed', { error: failed.join(' · ') }) })
+    } else if (added.length > 1) {
+      setLibNotice({ error: false, text: t('lib.importedMany', { count: added.length }) })
+    } else if (last) {
+      setLibNotice({ error: false, text: t('lib.imported', { name: last.name }) })
+    }
+  }
+
+  function dropZone(zone: DropZone) {
+    const closed = locked || importing
+    return {
+      onDragOver(ev: ReactDragEvent<HTMLElement>) {
+        if (!hasFiles(ev)) return
+        ev.preventDefault()
+        ev.dataTransfer.dropEffect = closed ? 'none' : 'copy'
+        if (!closed) setDropOver(zone)
+      },
+      onDragLeave(ev: ReactDragEvent<HTMLElement>) {
+        if (ev.currentTarget.contains(ev.relatedTarget as Node | null)) return
+        setDropOver(null)
+      },
+      onDrop(ev: ReactDragEvent<HTMLElement>) {
+        if (!hasFiles(ev)) return
+        ev.preventDefault()
+        setDropOver(null)
+        if (closed) return
+        const files = Array.from(ev.dataTransfer.files)
+        // Dropped on the rail: open the library so the new card and notice show.
+        if (zone === 'rail') openDock()
+        void beginImport(files)
+      },
     }
   }
 
@@ -456,7 +512,7 @@ export function CharacterLibrary(props: Props) {
     <>
       <button
         type="button"
-        className={`char-preview${current ? ' is-on' : ' is-empty'}`}
+        className={`char-preview${current ? ' is-on' : ' is-empty'}${dropOver === 'rail' ? ' is-drop' : ''}`}
         disabled={locked}
         aria-label={current ? t('lib.openCharacters', { name: current.name }) : t('lib.emptyAria')}
         onClick={openDock}
@@ -464,6 +520,7 @@ export function CharacterLibrary(props: Props) {
           if (!current) return
           openMenu(current, e)
         }}
+        {...dropZone('rail')}
       >
         {previewSrc ? (
           <img src={previewSrc} alt="" />
@@ -473,6 +530,7 @@ export function CharacterLibrary(props: Props) {
             <span>{t('lib.clickToAdd')}</span>
           </span>
         )}
+        {dropOver === 'rail' ? <span className="char-drop-hint">{t('lib.dropHint')}</span> : null}
       </button>
       <input
         ref={createRef}
@@ -491,13 +549,14 @@ export function CharacterLibrary(props: Props) {
         ref={importRef}
         type="file"
         accept=".vtm"
+        multiple
         className="file-input-hidden"
         disabled={locked || importing}
         onChange={(e) => {
-          const f = e.target.files?.[0]
+          const files = Array.from(e.target.files ?? [])
           e.target.value = ''
-          if (!f) return
-          void beginImport(f)
+          if (!files.length) return
+          void beginImport(files)
         }}
       />
 
@@ -509,8 +568,16 @@ export function CharacterLibrary(props: Props) {
               onClick={(e) => {
                 if (e.target === e.currentTarget) closeLibrary()
               }}
+              {...dropZone('library')}
             >
-              <div className="char-modal" role="dialog" aria-labelledby="char-library-title">
+              <div
+                className={`char-modal${dropOver === 'library' ? ' is-drop' : ''}`}
+                role="dialog"
+                aria-labelledby="char-library-title"
+              >
+                {dropOver === 'library' ? (
+                  <div className="char-drop-hint">{t('lib.dropHint')}</div>
+                ) : null}
                 <header className="char-modal-head">
                   <h2 id="char-library-title" className="char-modal-title">
                     {t('lib.characters')}
@@ -566,7 +633,7 @@ export function CharacterLibrary(props: Props) {
                     <div className="char-empty-well" aria-hidden="true">
                       <span className="char-preview-empty">
                         <span>{t('lib.noCharacter')}</span>
-                        <span>{t('lib.clickToAdd')}</span>
+                        <span>{t('lib.dropHint')}</span>
                       </span>
                     </div>
                   )}

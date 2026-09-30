@@ -267,3 +267,26 @@ def test_limiter_panel_has_the_simple_set() -> None:
         assert gone not in text
     for kept in ("body_left", "body_up", "pitch_up", "'travel.head'", "'travel.body'", "'travel.eyes'", "'common.show'"):
         assert kept in text
+
+
+def test_old_look_down_default_moves_on_but_a_chosen_one_stays() -> None:
+    """Characters made before version 3 carry the old 3 deg look-down default,
+    which capped every nod; it reads as today's default. Room values stay."""
+    old = normalize_travel_box({"version": 2, "left": 0.3, "pitch_down": 3.0})
+    assert old["pitch_down"] == DEFAULT_TRAVEL_BOX["pitch_down"]
+    assert old["left"] == 0.3
+    assert old["version"] == TRAVEL_VERSION
+    assert normalize_travel_box({"version": 2, "pitch_down": 5.0})["pitch_down"] == 5.0
+    chosen = merge_travel_box(old, {"pitch_down": 3.0})
+    assert chosen["pitch_down"] == 3.0
+    assert normalize_travel_box(chosen)["pitch_down"] == 3.0
+
+
+def test_desk_head_wall_is_the_same_oval() -> None:
+    from backend.travel_box import oval_outline, oval_stop
+
+    room = (-4.0, 2.0, -1.0, 3.0)
+    assert oval_stop(np.array([10.0, 0.0]), room) == (2.0, 0.0)
+    x, y = oval_stop(np.array([2.0, 3.0]), room)
+    assert abs((x / 2.0) ** 2 + (y / 3.0) ** 2 - 1.0) < 1e-9
+    assert len(oval_outline((0.0, 0.0, 1.0, 1.0), (-0.5, -0.5, 1.5, 1.5))) == 44

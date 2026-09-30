@@ -419,11 +419,12 @@ export default function App() {
         }
         onSettings={(patch) => {
           setStatus((cur) => (cur ? { ...cur, ...patch } : cur))
-          void run(t('err.settings'), async () => {
+          return run(t('err.settings'), async () => {
             const next = await api.settings(patch)
             if (next && typeof next === 'object' && next.state) {
               applyStatus({ ...next, ...patch })
             }
+            return true
           })
         }}
         onToggleTracking={() =>
@@ -490,11 +491,8 @@ export default function App() {
           )
           void run(t('err.input'), async () => {
             try {
+              // While tracking, the desk restarts Track Lab on the new input (camera or iFacialMocap).
               await sendLab('set_input', { source })
-              const live = Boolean(status?.tracking) || Boolean(lab?.live)
-              if (source === 'ifm' && live) {
-                await sendLab('start', { source: 'ifm' })
-              }
               if (inputHold.current?.gen === gen) {
                 inputHold.current = { source, gen: ++labGen.current, settled: true }
               }

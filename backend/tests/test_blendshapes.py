@@ -128,6 +128,25 @@ def test_plan_rebased_onto_another_face_stays_compatible(tmp_path: Path, monkeyp
     assert compatibility("Goblin")["compatible"] is False
 
 
+
+def test_eye_shapes_are_part_of_the_plan(tmp_path: Path, monkeypatch) -> None:
+    """Eye open / Eye closed travel with a character like the mouth shapes.
+    A rebased eye shape still matches; an edited one does not."""
+    monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
+    plan = _shapes(("rest", 0.0), ("A", 2.5))
+    shut = _pts(0.0)
+    shut[12][1] += 3.0
+    shut[18][1] += 3.0
+    plan["eye_closed"] = shut
+    assert "eye_closed" in normalize_shapes(plan)
+    save_character("Goblin", plan)
+    save_current(_rebased(plan, 40.0, -12.0, 1.7))
+    assert compatibility("Goblin")["compatible"] is True
+    moved = _rebased(plan, 40.0, -12.0, 1.7)
+    moved["eye_closed"][12][1] += 2.0
+    save_current(moved)
+    assert compatibility("Goblin")["compatible"] is False
+
 def test_repair_copies_current_plan(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("backend.blendshapes.blendshapes_dir", lambda: tmp_path)
     save_current(_shapes(("rest", 0.0), ("E", 4.0)))

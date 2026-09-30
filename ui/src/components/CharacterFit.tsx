@@ -1,4 +1,12 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { api, type CharacterFit as FitView, type FitBox, type TravelBox } from '../api'
 import { useI18n, type MessageKey } from '../i18n'
 
@@ -48,7 +56,8 @@ type Snap = {
 type Props = {
   stillUrl: string
   travel?: TravelBox | null
-  onTravel: (box: TravelBox) => void
+  /** Resolves true once saved; undefined if it failed. */
+  onTravel: (box: TravelBox) => Promise<boolean | undefined>
   onNotice: (message: string) => void
 }
 
@@ -101,6 +110,27 @@ function boxPath(box: FitBox) {
   return `${x0},${y0} ${x1},${y0} ${x1},${y1} ${x0},${y1} ${x0},${y0}`
 }
 
+/** Oval head wall round the rest head box: straight sides at the walls, each
+ * corner a quarter ellipse with that side's rooms as radii (as the limiter). */
+function ovalPath(tight: FitBox, wall: FitBox, steps = 10) {
+  if (!tight || !wall) return ''
+  const [x0, y0, x1, y1] = tight
+  const corners: [number, number, number, number, number][] = [
+    [x0, y0, x0 - wall[0], y0 - wall[1], Math.PI],
+    [x1, y0, wall[2] - x1, y0 - wall[1], 1.5 * Math.PI],
+    [x1, y1, wall[2] - x1, wall[3] - y1, 0],
+    [x0, y1, x0 - wall[0], wall[3] - y1, 0.5 * Math.PI],
+  ]
+  const pts: string[] = []
+  for (const [cx, cy, rx, ry, a0] of corners) {
+    for (let i = 0; i <= steps; i += 1) {
+      const a = a0 + (0.5 * Math.PI * i) / steps
+      pts.push(`${cx + Math.max(rx, 0) * Math.cos(a)},${cy + Math.max(ry, 0) * Math.sin(a)}`)
+    }
+  }
+  return pts.length ? `${pts.join(' ')} ${pts[0]}` : ''
+}
+
 export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function CharacterFit(props, ref) {
   const { t, tr } = useI18n()
   const [fit, setFit] = useState<FitView | null>(null)
@@ -109,6 +139,8 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
   const [erase, setErase] = useState(false)
   const [radius, setRadius] = useState(18)
   const [busy, setBusy] = useState(false)
+  const [applied, setApplied] = useState(false)
+  const commitRef = useRef<Promise<void> | null>(null)
   const [pastCount, setPastCount] = useState(0)
   const [futureCount, setFutureCount] = useState(0)
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
@@ -484,7 +516,17 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     if (changed) remember(before)
   }
 
-  async function commit() {
+  /** Apply and Save share one run, so a Save during Apply never sends the edits twice. */
+  function commit(): Promise<void> {
+    if (!commitRef.current) {
+      commitRef.current = sendEdits().finally(() => {
+        commitRef.current = null
+      })
+    }
+    return commitRef.current
+  }
+
+  async function sendEdits() {
     const strokes = pendingRef.current
     const saved = fitRef.current
     const moved = marksRef.current.filter((mark) => {
@@ -494,7 +536,11 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
     const box = draftRef.current
     if (!strokes.length && !moved.length && !box) return
     setBusy(true)
+    setApplied(false)
     try {
+      // Limiters first and awaited: a failure stops before anything else is sent,
+      // and Save's rename cannot move the pack while the box is being written.
+      if (box && !(await props.onTravel(box))) throw new Error(t('fit.limitsFailed'))
       let view = saved
       for (const stroke of strokes) {
         const res = await api.fitHair(stroke)
@@ -504,7 +550,6 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
         const res = await api.fitPoint(mark.id, mark.x, mark.y)
         view = res.fit
       }
-      if (box) props.onTravel(box)
       fitRef.current = view
       setFit(view)
       if (view) writeMarks(view.points ?? [])
@@ -514,6 +559,7 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
       futureRef.current = []
       setPastCount(0)
       setFutureCount(0)
+      setApplied(true)
       props.onNotice('')
     } catch (err: unknown) {
       props.onNotice(err instanceof Error ? err.message : String(err))
@@ -538,10 +584,13 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
       <div ref={stageRef} className={`fit-stage${zoom > 1.01 ? ' is-zoomed' : ''}`}>
         <div
           className="fit-frame"
-          style={{
-            aspectRatio: `${width} / ${height}`,
-            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-          }}
+          style={
+            {
+              aspectRatio: `${width} / ${height}`,
+              '--fit-aspect': width / height,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            } as CSSProperties
+          }
         >
           {props.stillUrl ? <img src={props.stillUrl} alt="" draggable={false} /> : null}
           <svg
@@ -554,7 +603,10 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
           >
             {mode === 'limiters' ? (
               <>
-                <polyline className="fit-head" points={boxPath(headWall)} />
+                <polyline
+                  className="fit-head"
+                  points={ovalPath(fit?.boxes.head_tight ?? null, headWall)}
+                />
                 <polyline className="fit-body" points={boxPath(bodyWall)} />
               </>
             ) : null}
@@ -702,9 +754,21 @@ export const CharacterFit = forwardRef<CharacterFitHandle, Props>(function Chara
             {t('common.redo')}
           </button>
         </div>
-        <button type="button" className="btn primary" disabled={!dirty || busy} onClick={() => void commit()}>
-          {t('common.apply')}
+        <button
+          type="button"
+          className="btn primary"
+          disabled={!dirty || busy}
+          title={dirty ? undefined : t('fit.nothingToApply')}
+          // A failure is already shown through onNotice.
+          onClick={() => commit().catch(() => undefined)}
+        >
+          {busy ? t('fit.applying') : t('common.apply')}
         </button>
+        {applied && !dirty && !busy ? (
+          <p className="hint fit-applied" role="status">
+            {t('fit.applied')}
+          </p>
+        ) : null}
       </div>
     </div>
   )

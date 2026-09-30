@@ -548,8 +548,6 @@ def weights_from_arkit(packet: IfmPacket) -> dict[str, float]:
 
 
 _MOUTH_SLOTS = tuple(range(20, 28))
-_LEFT_EYE = (11, 12, 13)
-_RIGHT_EYE = (17, 18, 19)
 
 
 def _mesh_span(rest: np.ndarray) -> float:
@@ -616,32 +614,16 @@ def _apply_brows(mesh: np.ndarray, rest: np.ndarray, brow: dict[str, float]) -> 
         mesh[slot, 1] = float(rest[slot, 1]) - span * up + 0.5 * span * down
 
 
-def _close_lids(mesh: np.ndarray, rest: np.ndarray, blink: dict[str, float]) -> None:
-    for slots, key in ((_LEFT_EYE, "l"), (_RIGHT_EYE, "r")):
-        amount = _clip(float(blink.get(key, 0.0)))
-        if amount < 0.03:
-            continue
-        lid = slots[1]
-        corners = [i for i in (slots[0], slots[2]) if i < len(mesh)]
-        if not corners and lid >= len(rest):
-            continue
-        chord_y = (
-            float(np.mean(mesh[corners, 1])) if corners else float(rest[lid, 1])
-        )
-        if lid < len(mesh) and float(mesh[lid, 1]) < chord_y:
-            mesh[lid, 1] = float(mesh[lid, 1]) * (1.0 - amount) + chord_y * amount
-        for i in corners:
-            mesh[i, 1] = float(mesh[i, 1]) * (1.0 - amount) + chord_y * amount
-
 
 def drive_ifm(
     rest: np.ndarray | None,
     weights: dict[str, float] | None,
-    blink: dict[str, float] | None = None,
     brow: dict[str, float] | None = None,
     mixed: np.ndarray | None = None,
 ) -> np.ndarray | None:
-    """Character mesh from ARKit AUs: authored or procedural mouth, lids, brows."""
+    """Character mesh from ARKit AUs: authored or procedural mouth, brows.
+
+    Eyes are the Eye open / Eye closed shapes, blended after the rig."""
     if rest is None:
         return mixed
     out = mixed.copy() if mixed is not None else rest.copy()
@@ -649,7 +631,6 @@ def drive_ifm(
         out = _procedural_mouth(rest, weights)
     apply_open_offset(out, rest, open_amount(weights))
     _apply_brows(out, rest, brow or {})
-    _close_lids(out, rest, blink or {})
     _scale_mouth(out, feel.mouth_gain())
     return out
 

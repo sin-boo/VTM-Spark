@@ -115,10 +115,10 @@ def _brow_raise(selfie: bool) -> tuple[np.ndarray, np.ndarray]:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         out = rest
         for _ in range(8):
-            out = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            out = expr.apply(rest, rest, live, mouth_pts=live_cam)
     finally:
         feel.update(prev)
     assert out is not None
@@ -147,13 +147,13 @@ def test_toggle_selfie_mid_session_swaps_without_relock() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         token = expr._token
         for _ in range(8):
-            plain = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            plain = expr.apply(rest, rest, live, mouth_pts=live_cam)
         expr.set_selfie(True)
         for _ in range(8):
-            flipped = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            flipped = expr.apply(rest, rest, live, mouth_pts=live_cam)
         assert expr._token == token and expr.locked
     finally:
         feel.update(prev)
@@ -173,25 +173,18 @@ def test_osf_blink_index_zero_is_image_left() -> None:
     assert out["l"] > 0.7 and out["r"] < 0.05
 
 
-def test_screen_blink_closes_matching_eye_slots() -> None:
-    from .retarget import _close_eyes
+def test_ifm_blink_left_person_eye_lands_on_its_screen_eye(tmp_path, monkeypatch) -> None:
+    from . import presets as presets_mod
 
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
     rest, _osf = _toy_face()
-    pts = rest.copy()
-    _close_eyes(pts, rest, {"l": 1.0, "r": 0.0})
-    assert abs(float(pts[12, 1]) - float(rest[11, 1])) < 0.6
-    assert abs(float(pts[18, 1]) - float(rest[18, 1])) < 1e-6
-
-
-def test_ifm_drive_blink_left_person_eye() -> None:
-    from .ifm import drive_ifm
-
-    rest, _osf = _toy_face()
-    # Person's left eye shuts → canonical "r" → selfie puts it screen-left (slots 11-13).
+    book = presets_mod.MouthBook()
+    book.seed_rest(rest)
+    # Person's left eye shuts -> canonical "r" -> selfie puts it screen-left (slots 11-13).
     canon = ifm_canonical({"l": 1.0, "r": 0.0})
     assert canon == {"r": 1.0, "l": 0.0}
-    selfie = drive_ifm(rest, {}, to_screen(canon, True), {})
-    plain = drive_ifm(rest, {}, to_screen(canon, False), {})
+    selfie = book.blink(rest, rest, to_screen(canon, True))
+    plain = book.blink(rest, rest, to_screen(canon, False))
     assert selfie is not None and plain is not None
     assert float(selfie[12, 1]) > float(rest[12, 1]) + 0.5
     assert abs(float(selfie[18, 1]) - float(rest[18, 1])) < 1e-6
@@ -264,16 +257,16 @@ def test_one_frame_without_image_landmarks_does_not_relock_rest() -> None:
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
     try:
-        expr.apply(rest, rest, osf, {"l": 0.0, "r": 0.0}, mouth_pts=camera)
+        expr.apply(rest, rest, osf, mouth_pts=camera)
         raised = rest
         for _ in range(8):
-            raised = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            raised = expr.apply(rest, rest, live, mouth_pts=live_cam)
         rest_rows = None if expr._rest is None else expr._rest.copy()
-        held = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=None)
+        held = expr.apply(rest, rest, live, mouth_pts=None)
         assert held is not None and np.allclose(held, raised)
         after = rest
         for _ in range(8):
-            after = expr.apply(rest, rest, live, {"l": 0.0, "r": 0.0}, mouth_pts=live_cam)
+            after = expr.apply(rest, rest, live, mouth_pts=live_cam)
         assert expr._rest is not None and rest_rows is not None
         assert np.allclose(expr._rest, rest_rows)
     finally:

@@ -65,7 +65,8 @@ class HeadEase:
     def reset(self) -> None:
         self._value: np.ndarray | None = None
         self._raw: np.ndarray | None = None
-        self._speed = 0.0
+        # Eased signed velocity (face widths a second, per value).
+        self._velocity: np.ndarray | None = None
         self._t: float | None = None
 
     def step(
@@ -84,16 +85,21 @@ class HeadEase:
         self._raw = goal.copy()
         if snap or smooth <= 0.0 or self._value is None or self._value.shape != goal.shape:
             self._value = goal.copy()
-            self._speed = 0.0
+            self._velocity = np.zeros_like(goal)
             return self._value.copy()
         dt = _FIRST_DT if last_t is None else float(now) - last_t
         dt = min(max(dt, _DT_MIN), _DT_MAX)
         # The reading's own speed, not how far behind the ease is: that
         # gap over a frame read 5x faster at 60 fps than at 12.
         step = (goal - (goal if last_raw is None else last_raw)) * np.asarray(units, dtype=np.float64)
-        speed = float(np.linalg.norm(step)) / dt
-        self._speed += ease_weight(dt, _SPEED_HZ) * (speed - self._speed)
+        # Ease the signed velocity, then take its size. Jitter flips sign
+        # frame to frame and cancels here; easing the size alone kept a still
+        # head reading as moving, which held the ease open at a third of its
+        # time constant.
+        if self._velocity is None or self._velocity.shape != step.shape:
+            self._velocity = np.zeros_like(step)
+        self._velocity += ease_weight(dt, _SPEED_HZ) * (step / dt - self._velocity)
         still_hz, open_hz = cutoffs(smooth)
-        weight = ease_weight(dt, still_hz + open_hz * self._speed)
+        weight = ease_weight(dt, still_hz + open_hz * float(np.linalg.norm(self._velocity)))
         self._value += weight * (goal - self._value)
         return self._value.copy()

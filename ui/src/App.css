@@ -1583,6 +1583,31 @@ button.char-preview:focus-visible {
   border-radius: 0;
 }
 
+.char-modal.is-drop,
+.char-preview.is-drop {
+  box-shadow: inset 0 0 0 2px var(--mark);
+}
+
+.char-preview.is-drop {
+  position: relative;
+}
+
+/* Files dragged in from Explorer. Never a hit target, so dragleave sees the real element. */
+.char-drop-hint {
+  position: absolute;
+  inset: 2px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  color: var(--paper);
+  background: rgba(30, 30, 30, 0.78);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
 .char-modal > .progress {
   margin: 0 6px;
 }
@@ -1810,11 +1835,12 @@ button.char-preview:focus-visible {
   overflow: auto;
 }
 
+/* Never shrink below the stage: a squeezed row lets the still paint over the name and notice. */
 .char-fit {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 200px;
   gap: 10px;
-  min-height: 0;
+  flex-shrink: 0;
   align-items: start;
 }
 
@@ -1826,9 +1852,12 @@ button.char-preview:focus-visible {
   border-radius: 0;
 }
 
+/* Capped by window height so the name row and Save stay on screen without scrolling. */
 .fit-frame {
   position: relative;
   width: 100%;
+  max-width: calc((100vh - 220px) * var(--fit-aspect, 1));
+  margin-inline: auto;
   overflow: hidden;
   border-radius: 0;
   transform-origin: center center;
@@ -1969,6 +1998,10 @@ button.char-preview:focus-visible {
 
 .fit-tools > .btn {
   width: 100%;
+}
+
+.fit-applied {
+  margin: 0;
 }
 
 .fit-save {

@@ -389,12 +389,14 @@ def test_mix_ignores_rest_leftover_vowels(tmp_path, monkeypatch) -> None:
 def test_pair_ids_cover_every_mouth_combination() -> None:
     from itertools import combinations
 
-    from .presets import pair_ends, pair_id
+    from .presets import EYE_IDS, pair_ends, pair_id
 
-    pairs = [pair_id(a, b) for a, b in combinations(PRESET_IDS, 2)]
+    mouths = [name for name in PRESET_IDS if name not in EYE_IDS]
+    pairs = [pair_id(a, b) for a, b in combinations(mouths, 2)]
     # Seven shapes (O folded into U) -> 7 choose 2.
     assert len(pairs) == 21
     assert len(set(pairs)) == 21
+    assert pair_id("eye_closed", "eye_open") == "eye_open+eye_closed"
     assert pair_id("smile", "rest") == "rest+smile"
     assert pair_ends("smile+rest") is None
     assert pair_ends("rest+smile") == ("rest", "smile")
@@ -471,3 +473,94 @@ def test_several_stops_bend_the_blend_and_can_slide(tmp_path, monkeypatch) -> No
     book.drop_key("rest+smile@400")
     assert "rest+smile@400" not in book.shapes
     assert "rest+smile@750" in book.shapes
+
+
+def _eye_rest() -> np.ndarray:
+    pts = _rest()
+    pts[11, :2] = [100.0, 100.0]
+    pts[12, :2] = [120.0, 80.0]
+    pts[13, :2] = [140.0, 100.0]
+    pts[17, :2] = [200.0, 100.0]
+    pts[18, :2] = [220.0, 80.0]
+    pts[19, :2] = [240.0, 100.0]
+    return pts
+
+
+def test_eye_shapes_are_chips_that_own_only_the_eyes(tmp_path, monkeypatch) -> None:
+    from .presets import EYE_SLOTS, pair_ends, shape_slots
+
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _eye_rest()
+    book.seed_rest(rest)
+    ids = [row["id"] for row in book.payload(rest)["presets"]]
+    assert ids[-2:] == ["eye_open", "eye_closed"]
+    assert shape_slots("eye_closed") == EYE_SLOTS
+    assert shape_slots("eye_open+eye_closed@300") == EYE_SLOTS
+    assert pair_ends("eye_open+eye_closed") == ("eye_open", "eye_closed")
+    # Eyes pair with eyes only.
+    assert pair_ends("rest+eye_closed") is None
+    assert pair_ends("A+eye_open") is None
+    saved = book.set_mouth("eye_closed", {"12": [120.0, 99.0], "20": [0.0, 0.0]}, rest)
+    assert saved[12, 1] == 99.0
+    assert np.array_equal(saved[20], rest[20])
+
+
+def test_blink_moves_each_eye_along_its_shapes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _eye_rest()
+    book.seed_rest(rest)
+    # Unsaved: the lid lies on its corner line.
+    drafted = book.blink(rest, rest, {"l": 1.0, "r": 0.0})
+    assert drafted is not None
+    assert abs(float(drafted[12, 1]) - 100.0) < 1e-4
+    assert np.array_equal(drafted[[17, 18, 19]], rest[[17, 18, 19]])
+    closed = rest.copy()
+    closed[[12, 18], 1] = 104.0
+    closed[[11, 13, 17, 19], 1] = 102.0
+    book.shapes["eye_closed"] = closed
+    # "l" drives 11-13, "r" drives 17-19; half a blink is halfway.
+    out = book.blink(rest, rest, {"l": 1.0, "r": 0.5})
+    assert out is not None
+    assert np.allclose(out[[11, 12, 13], 1], [102.0, 104.0, 102.0])
+    assert abs(float(out[18, 1]) - 92.0) < 1e-4
+    # A saved in-between is honoured.
+    mid = rest.copy()
+    mid[[12, 18], 1] = 100.0
+    book.shapes["eye_open+eye_closed@250"] = mid
+    early = book.blink(rest, rest, {"l": 0.25, "r": 0.0})
+    assert early is not None and abs(float(early[12, 1]) - 100.0) < 1e-4
+    # The move rides on top of whatever else drove the mesh.
+    moved = rest.copy()
+    moved[12, 0] += 3.0
+    shifted = book.blink(moved, rest, {"l": 1.0, "r": 0.0})
+    assert shifted is not None and abs(float(shifted[12, 0]) - 123.0) < 1e-4
+
+
+def test_eye_open_is_where_an_open_eye_sits(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _eye_rest()
+    book.seed_rest(rest)
+    wide = rest.copy()
+    wide[[12, 18], 1] = 76.0
+    book.shapes["eye_open"] = wide
+    out = book.blink(rest, rest, {"l": 0.0, "r": 0.0})
+    assert out is not None
+    assert np.allclose(out[[12, 18], 1], 76.0)
+
+
+def test_rebase_carries_eye_shapes_with_the_eyes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    book = MouthBook()
+    rest = _eye_rest()
+    book.seed_rest(rest)
+    closed = rest.copy()
+    closed[12, 1] = 100.0
+    book.set_mouth("eye_closed", {"12": [120.0, 100.0]}, rest)
+    moved = rest.copy()
+    moved[:, 0] += 10.0
+    book.rebase(moved)
+    assert abs(float(book.shapes["eye_closed"][12, 0]) - 130.0) < 1e-3
+    assert abs(float(book.shapes["eye_closed"][12, 1]) - 100.0) < 1e-3

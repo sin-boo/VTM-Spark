@@ -332,3 +332,25 @@ def test_track_drops_nudges_from_the_old_rest(tmp_path, monkeypatch) -> None:
     out = bench.track()
     assert str(out.get("error") or "") == ""
     assert bench._point_offsets == {}
+
+
+def test_set_rest_keeps_the_characters_nudges(tmp_path, monkeypatch) -> None:
+    """Nudges are the user's edits and come with the character; loading it
+    used to wipe them. A stale nudge from another character does not stay."""
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(10.0, 10.0))
+    _no_models(monkeypatch)
+    bench._point_offsets = {3: (9.0, 9.0)}
+    body = _rest_body(_mesh(620.0, 400.0), hair=True)
+    body["point_offsets"] = [{"id": 18, "dx": 3.0, "dy": -2.0}]
+    bench.set_rest(body)
+    assert bench._point_offsets == {18: (3.0, -2.0)}
+    bench.set_rest(_rest_body(_mesh(620.0, 400.0), hair=True))
+    assert bench._point_offsets == {}
+
+
+def test_set_offsets_replaces_every_nudge(tmp_path, monkeypatch) -> None:
+    bench, _book = _bench_for_track(monkeypatch, tmp_path, _mesh(620.0, 400.0))
+    bench._point_offsets = {3: (9.0, 9.0)}
+    out = bench.set_offsets({"point_offsets": [{"id": 12, "dx": 1.5, "dy": 0.5}]})
+    assert str(out.get("error") or "") == ""
+    assert bench._point_offsets == {12: (1.5, 0.5)}

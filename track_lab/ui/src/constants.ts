@@ -65,4 +65,6 @@ export const DEFAULT_PRESETS: MouthPreset[] = [
   { id: 'I', label: 'I', ready: false },
   { id: 'U', label: 'U', ready: false },
   { id: 'E', label: 'E', ready: false },
+  { id: 'eye_open', label: 'Eye open', ready: false },
+  { id: 'eye_closed', label: 'Eye closed', ready: false },
 ]
