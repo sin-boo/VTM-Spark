@@ -254,3 +254,78 @@ def test_merged_status_carries_the_frames_order() -> None:
     status = {"session": "s1", "seq": 3, "generation": 1}
     merge_frame_into_status(status, _frame("s1", 8, 10.0, gen=1))
     assert lab_packet_order(status) == ("s1", 8)
+
+
+def test_restore_skips_a_tracker_another_flow_already_synced(monkeypatch) -> None:
+    """Start tracking (or a load) synced the new tracker while the restore
+    waited: syncing again stopped the tracking it had started."""
+    rt, calls = _restore_runtime(monkeypatch)
+    rt._lab_restore_sync_n = 3
+    rt._lab_sync_n = 4
+    rt._lab_ack = lambda op, body=None: pytest.fail("the flow that synced it also started it")
+    StreamRuntime._restore_lab_session(rt)
+    assert calls == []
+    assert rt._lab_session_restore is False
+
+
+def test_a_restart_notes_the_sync_it_follows() -> None:
+    rt = _runtime()
+    rt._lab_sync_n = 5
+    StreamRuntime._note_lab_session(rt, _frame("s1", 1, 10.0))
+    assert not getattr(rt, "_lab_session_restore", False)  # the first tracker seen
+    StreamRuntime._note_lab_session(rt, _frame("s2", 1, 10.0))
+    assert rt._lab_session_restore is True
+    assert rt._lab_restore_sync_n == 5
+
+
+def test_character_syncs_take_turns() -> None:
+    """The restore runs on the track poll thread, Start tracking on another:
+    their set_source / set_rest / track must not interleave."""
+    rt = _runtime()
+    inside: list[int] = []
+    overlaps: list[int] = []
+    started = threading.Barrier(2)
+
+    def locked(*, replace: bool) -> None:
+        inside.append(1)
+        if len(inside) > 1:
+            overlaps.append(len(inside))
+        threading.Event().wait(0.05)
+        inside.pop()
+
+    rt._sync_lab_character_locked = locked
+
+    def sync() -> None:
+        started.wait()
+        StreamRuntime._sync_lab_character(rt)
+
+    workers = [threading.Thread(target=sync, daemon=True) for _ in range(2)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=2.0)
+    assert not overlaps
+    assert rt._lab_sync_n == 2
+
+
+def test_a_stale_reply_never_writes_its_rest_into_the_character() -> None:
+    """A late reply for the previous still (or a restarted tracker) carried
+    that face's rest rows; they were copied into this character's rest."""
+    import numpy as np
+
+    rt = _runtime()
+    held = np.zeros((37, 4), dtype=np.float32)
+    held[:, 3] = 1.0
+    rt._rest_kps = held.copy()
+    rt._lab_overlay_gen = 5
+    rows = [[80.0, 80.0]] * 28
+
+    def reply(**extra) -> dict:
+        return {"image_wh": [100, 100], "rest": rows, **extra}
+
+    for stale in (reply(generation=4), reply(generation=5, session="old")):
+        rt._lab_old_sessions = ("old",)
+        rest = StreamRuntime._lab_rest(rt, stale)
+        assert np.allclose(rest, held), stale
+    rest = StreamRuntime._lab_rest(rt, reply(generation=5))
+    assert np.allclose(rest[:28, :2], 0.6)  # 80 px of 100 -> +0.6

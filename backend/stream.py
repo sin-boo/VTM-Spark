@@ -356,6 +356,11 @@ class StreamRuntime:
     # Orders Track Lab packets applied onto the overlay / hair (track poll,
     # DiT feed, command acks all apply them) and guards the session / seq.
     _lab_order_lock = threading.RLock()
+    # One character sync into Track Lab at a time, counted so a restart
+    # restore can tell another flow already synced the new tracker.
+    _lab_sync_lock = threading.RLock()
+    _lab_sync_n = 0
+    _lab_restore_sync_n = 0
 
     def __init__(self) -> None:
         default_ckpt = default_stream_checkpoint()
@@ -969,7 +974,16 @@ class StreamRuntime:
 
         Track Lab is the authoring tool. Boot / Start tracking must not wipe
         mouth end-shapes. A new desk character still may replace them.
+
+        One at a time: a restart restore on the track poll thread and a
+        Start tracking / load / boot on another could interleave their
+        set_source / set_rest / track, and a late one stops live tracking.
         """
+        with self._lab_sync_lock:
+            self._lab_sync_n += 1
+            self._sync_lab_character_locked(replace=replace)
+
+    def _sync_lab_character_locked(self, *, replace: bool) -> None:
         from .lab_harness import lab as lab_harness
 
         probe = lab_harness.status(merge_frame=False)
@@ -3552,6 +3566,7 @@ class StreamRuntime:
             self._lab_seen_generation = 0
             if getattr(self, "_lab_overlay_gen", None) is not None:
                 self._lab_overlay_gen = 0
+            self._lab_restore_sync_n = self._lab_sync_n
             self._lab_session_restore = True
         print(f"[lab-harness] Track Lab restarted (session {current} -> {session})", flush=True)
 
@@ -5385,7 +5400,10 @@ class StreamRuntime:
             return None
         if rest.ndim != 2 or rest.shape[0] < 28:
             return None
-        rows = packet.get("rest") if isinstance(packet, dict) else None
+        # Only from a reply for the still the desk holds: a late one for the
+        # previous character (or a restarted tracker) is that face's rest.
+        current = isinstance(packet, dict) and self._lab_overlay_current(packet)
+        rows = packet.get("rest") if current else None
         if isinstance(rows, list) and len(rows) >= 28:
             w, h = self._lab_canvas(packet)
             for i, row in enumerate(rows[:28]):
@@ -5956,14 +5974,20 @@ class StreamRuntime:
         tracker reloads its saved rest, parts, nudges and limiters itself.
         """
         self._lab_session_restore = False
-        tracking = bool(self._tracking and self._lab_drive)
-        if tracking:
-            # Not "Tracking on" while nothing drives the pose.
-            self._set_track_status(track_message="Track Lab restarted — resuming…")
-        try:
-            self._sync_lab_character()
-        except Exception as exc:
-            print(f"[lab-harness] restarted Track Lab did not take the character: {exc}", flush=True)
+        with self._lab_sync_lock:
+            if self._lab_sync_n != self._lab_restore_sync_n:
+                # Start tracking, a load or boot already gave the new tracker
+                # its still: syncing again would stop the tracking it started
+                # and re-detect over the fit it put back.
+                return
+            tracking = bool(self._tracking and self._lab_drive)
+            if tracking:
+                # Not "Tracking on" while nothing drives the pose.
+                self._set_track_status(track_message="Track Lab restarted — resuming…")
+            try:
+                self._sync_lab_character()
+            except Exception as exc:
+                print(f"[lab-harness] restarted Track Lab did not take the character: {exc}", flush=True)
         if not (tracking and self._tracking and self._lab_drive):
             return
         from .lab_harness import lab as lab_harness
