@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -25,12 +26,20 @@ def _same_index(cam: dict[str, object], index: int) -> bool:
         return False
 
 
+def _stand_in_camera(name: str) -> bool:
+    """No real device name: the listing failed and cameras.py fell back to
+    "Camera n" ("#n" in files saved while this used its own). The same
+    webcam can come back under its real name next time, so a stand-in says
+    nothing about which it is."""
+    return not name or re.fullmatch(r"(Camera |#)\d+", name) is not None
+
+
 def _camera_name(cameras: list[dict[str, object]], index: int) -> str:
     for cam in cameras:
         if _same_index(cam, index):
             return str(cam.get("name") or "").strip()
     return ""
-from .calibrate import calibrator
+from .calibrate import WARMUP_SEC, calibrator
 from .ease import frame_dt, timed_alpha
 from .feel import feel
 from .hair import HAIR_CLASSES, build_hair_rig, detect_hair, follow_hair, rig_rest_hair
@@ -183,6 +192,41 @@ _REST_LOOK_BLINK = 0.35
 _REST_LOOK_STEADY_IFM = (0.05, 0.05)
 
 
+def _rest_look_sample(frame: OsfFrame) -> dict[str, object]:
+    """One frame's gaze as Set Rest keeps it: look x/y, webcam pupils."""
+    out: dict[str, object] = {}
+    look = getattr(frame, "look", None)
+    if isinstance(look, dict):
+        try:
+            out["x"] = float(look.get("x") or 0.0)
+            out["y"] = float(look.get("y") or 0.0)
+        except (TypeError, ValueError):
+            out = {}
+    lms = getattr(frame, "lms_xy", None)
+    iris = getattr(frame, "iris_cam", None)
+    if lms is not None and iris:
+        right, left = payload_to_hits(iris)
+        out.update(rest_look_from_cam(lms, right, left))
+    return out
+
+
+def _median_rest_look(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Per part median of Set Rest's gaze samples (a part missing on a frame is skipped)."""
+    out: dict[str, object] = {}
+    xy = [(float(row["x"]), float(row["y"])) for row in rows if "x" in row and "y" in row]
+    if xy:
+        out["x"] = float(np.median([p[0] for p in xy]))
+        out["y"] = float(np.median([p[1] for p in xy]))
+    for side in ("r", "l"):
+        fracs = [row[side] for row in rows if isinstance(row.get(side), dict)]
+        if fracs:
+            out[side] = {
+                "nx": round(float(np.median([float(f["nx"]) for f in fracs])), 4),
+                "ny": round(float(np.median([float(f["ny"]) for f in fracs])), 4),
+            }
+    return out
+
+
 def _steady_rest(
     window: list[tuple[float, float]],
     steady: tuple[float, float],
@@ -247,6 +291,14 @@ class FaceBench:
         # to the camera they were taken on (_look_rest_cam, "" = not known).
         self._look_rest: dict[str, object] = {}
         self._look_rest_cam = ""
+        # This session's camera is not the one they were taken on: skip them
+        # (kept on disk for when that camera is back).
+        self._look_rest_other = False
+        # Set Rest's gaze, gathered over its capture window like the mouth
+        # and head (None = not capturing); the calibrate rest it started from.
+        self._rest_look_hold: list[dict[str, object]] | None = None
+        self._rest_look_hold_t = 0.0
+        self._rest_look_before: dict[str, float] | None = None
         # This session's own gaze zero, learnt from a steady look while Set
         # Rest's has none; never saved. _look_seen: its windows by side.
         self._look_auto: dict[str, object] = {}
@@ -1114,11 +1166,13 @@ class FaceBench:
             seq = None
         with self._lock:
             cur = self._unoffset_xy(idx, seq)
-            if cur is None:
-                self.last_error = "No overlay point to nudge"
-                return self.status(publish=True)
-            self._point_offsets = nudge_offset(self._point_offsets, idx, cur, (x, y))
-            self.last_error = ""
+            if cur is not None:
+                self._point_offsets = nudge_offset(self._point_offsets, idx, cur, (x, y))
+        # status() takes _lock itself: answer only once it is released.
+        if cur is None:
+            self.last_error = "No overlay point to nudge"
+            return self.status(publish=True)
+        self.last_error = ""
         self._save_parts()
         return self.status(publish=True)
 
@@ -1155,12 +1209,9 @@ class FaceBench:
             self.last_error = str(exc)
             return self.status(publish=True)
         if str(name) == "rest":
-            if self._ifm.running:
-                frame = self._canonical_ifm(self._ifm.latest)
-            else:
-                frame = self._osf.latest
-            self._capture_rest_look(frame)
-            self._save_parts()
+            # The gaze zero is taken over the capture window with the mouth
+            # and head (_hold_rest_look), not from the frame at the click.
+            self._rest_look_hold = None
         self.last_error = ""
         return self.status(publish=True)
 
@@ -1373,6 +1424,7 @@ class FaceBench:
         posed = self._blink_eyes(posed, blink_screen)
         look = getattr(frame, "look", None)
         if isinstance(look, dict) or (frame.lms_xy is not None and frame.iris_cam):
+            self._hold_rest_look(frame, blink_screen)
             self._learn_rest_look(frame, blink_screen)
         rest_iris = [dict(row) for row in self._iris_rest]
         with self._lock:
@@ -1615,15 +1667,17 @@ class FaceBench:
         return None
 
     def _camera_key(self) -> str:
-        """The webcam in use, by name (indices shift as devices come and go)."""
+        """The webcam in use, by name (indices shift as devices come and go).
+        "" when only a stand-in name is known (see _stand_in_camera)."""
         name = _camera_name(self._cameras or [], self.camera_index)
-        return name or f"#{int(self.camera_index)}"
+        return "" if _stand_in_camera(name) else name
 
     def _rest_look(self) -> dict[str, object]:
         """The gaze zero in use: Set Rest's, else what this session learnt.
         Call with the lock held."""
         out = dict(self._look_auto)
-        out.update({key: self._look_rest[key] for key in ("x", "y", "r", "l") if key in self._look_rest})
+        keys = ("x", "y") if self._look_rest_other else ("x", "y", "r", "l")
+        out.update({key: self._look_rest[key] for key in keys if key in self._look_rest})
         return out
 
     def _forget_look_auto(self) -> None:
@@ -1633,20 +1687,21 @@ class FaceBench:
 
     def _look_rest_for_camera(self) -> None:
         """Set Rest's webcam pupils are only right for the camera they were
-        taken on: on another the same look sits elsewhere in the eye. Drop
-        them there (this session learns its own). A rest saved before the
-        camera was recorded is taken as this one's."""
+        taken on: on another the same look sits elsewhere in the eye. Skip
+        them there for this session (it learns its own) but keep them on
+        disk: a listing that failed once must not cost the performer their
+        Set Rest. A rest saved before the camera was recorded is taken as
+        this one's; with only a stand-in name, nothing is compared."""
         key = self._camera_key()
         with self._lock:
+            self._look_rest_other = False
             has_cam = isinstance(self._look_rest.get("r"), dict) or isinstance(self._look_rest.get("l"), dict)
-            if not has_cam or self._look_rest_cam == key:
+            if not has_cam or not key or self._look_rest_cam == key:
                 return
             if self._look_rest_cam:
-                self._look_rest.pop("r", None)
-                self._look_rest.pop("l", None)
-                self._look_rest_cam = ""
-            else:
-                self._look_rest_cam = key
+                self._look_rest_other = True
+                return
+            self._look_rest_cam = key
         self._save_parts()
 
     def _learn_rest_look(self, frame: OsfFrame, blink: dict[str, float]) -> None:
@@ -1696,33 +1751,57 @@ class FaceBench:
                 if got is not None:
                     self._look_auto[side] = {"nx": round(got[0], 4), "ny": round(got[1], 4)}
 
-    def _capture_rest_look(self, frame: OsfFrame) -> None:
-        """Set Rest: this frame's gaze is the zero, saved; webcam pupils with
-        the camera they were taken on."""
+    def _hold_rest_look(self, frame: OsfFrame, blink: dict[str, float]) -> None:
+        """Set Rest's gaze: every frame of its capture window past the
+        warm-up, blinks skipped, and the median kept once the capture
+        succeeds. It used to be the one frame at the click (a blink there
+        was the zero), saved even when the capture then failed and the mouth
+        and head kept their old zero."""
+        if calibrator.capturing == "rest":
+            now = time.perf_counter()
+            if self._rest_look_hold is None:
+                self._rest_look_hold = []
+                self._rest_look_hold_t = now
+                self._rest_look_before = calibrator.rest_snapshot()
+            if now - self._rest_look_hold_t < WARMUP_SEC:
+                return
+            if max(float(blink.get("l") or 0.0), float(blink.get("r") or 0.0)) > _REST_LOOK_BLINK:
+                return
+            sample = _rest_look_sample(frame)
+            if sample:
+                self._rest_look_hold.append(sample)
+            return
+        rows = self._rest_look_hold
+        if rows is None:
+            return
+        self._rest_look_hold = None
+        # Only a capture that stored a new mouth rest: not one that failed,
+        # was cleared, or was replaced by another pose.
+        after = calibrator.rest_snapshot()
+        if not rows or after is None or after == self._rest_look_before:
+            return
+        self._set_rest_look(_median_rest_look(rows))
+
+    def _set_rest_look(self, sample: dict[str, object]) -> None:
+        """Set Rest's gaze zero, saved; webcam pupils with the camera they
+        were taken on."""
         changed = False
-        look = getattr(frame, "look", None)
         with self._lock:
-            if isinstance(look, dict):
-                try:
-                    self._look_rest["x"] = float(look.get("x") or 0.0)
-                    self._look_rest["y"] = float(look.get("y") or 0.0)
-                    changed = True
-                except (TypeError, ValueError):
-                    pass
-            lms = getattr(frame, "lms_xy", None)
-            iris = getattr(frame, "iris_cam", None)
-            if lms is not None and iris:
-                right, left = payload_to_hits(iris)
-                snap = rest_look_from_cam(lms, right, left)
-                if snap:
-                    key = self._camera_key()
-                    if key != self._look_rest_cam:
-                        # A side not seen now was another camera's.
-                        self._look_rest.pop("r", None)
-                        self._look_rest.pop("l", None)
-                    self._look_rest.update(snap)
-                    self._look_rest_cam = key
-                    changed = True
+            if "x" in sample and "y" in sample:
+                self._look_rest["x"] = float(sample["x"])
+                self._look_rest["y"] = float(sample["y"])
+                changed = True
+            snap = {side: sample[side] for side in ("r", "l") if isinstance(sample.get(side), dict)}
+            if snap:
+                key = self._camera_key()
+                if key != self._look_rest_cam or self._look_rest_other:
+                    # A side not seen now was another camera's.
+                    self._look_rest.pop("r", None)
+                    self._look_rest.pop("l", None)
+                self._look_rest.update(snap)
+                self._look_rest_cam = key
+                self._look_rest_other = False
+                changed = True
         if changed:
             self._save_parts()
 
@@ -1855,7 +1934,8 @@ class FaceBench:
                 # Missing in files saved before it was recorded: "" is taken
                 # as the first camera used (_look_rest_for_camera).
                 camera = look_rest.get("camera")
-                self._look_rest_cam = camera if isinstance(camera, str) else ""
+                camera = camera if isinstance(camera, str) else ""
+                self._look_rest_cam = "" if _stand_in_camera(camera) else camera
         if not self._point_offsets:
             self._point_offsets = parse_offsets(data.get("point_offsets"))
 

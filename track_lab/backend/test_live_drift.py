@@ -276,24 +276,103 @@ def test_learnt_gaze_rest_lasts_one_session(monkeypatch, tmp_path) -> None:
         assert bench._rest_look() == {}
 
 
-def test_set_rest_gaze_is_dropped_on_another_camera(monkeypatch, tmp_path) -> None:
+def test_set_rest_gaze_is_skipped_not_lost_on_another_camera(monkeypatch, tmp_path) -> None:
     bench = _bench(monkeypatch, tmp_path)
+    pupils = {"r": {"nx": 0.08, "ny": 0.1}, "l": {"nx": 0.07, "ny": 0.1}}
     bench.start_live(camera=0)
-    _pupils(monkeypatch, [(0.08, 0.1)])
-    bench._capture_rest_look(_cam_frame())
+    bench._set_rest_look(pupils)
     saved = _saved(tmp_path)["look_rest"]
     assert saved["camera"] == "Desk Cam"
-    assert saved["r"] == {"nx": 0.08, "ny": 0.1}
+    assert saved["r"] == pupils["r"]
     bench.stop_live()
     # Back on the same camera: Set Rest's zero stays.
     bench.start_live(camera=0)
-    assert bench._look_rest["r"] == {"nx": 0.08, "ny": 0.1}
+    with bench._lock:
+        assert bench._rest_look()["r"] == pupils["r"]
     bench.stop_live()
-    # Another camera sees the same look elsewhere in the eye: dropped.
+    # Another camera sees the same look elsewhere in the eye: not used there...
     bench.start_live(camera=1)
-    assert "r" not in bench._look_rest and "l" not in bench._look_rest
+    with bench._lock:
+        rest = bench._rest_look()
+    assert "r" not in rest and "l" not in rest
+    # ...but kept for when the first camera is back.
     saved = _saved(tmp_path)["look_rest"]
-    assert "r" not in saved and "camera" not in saved
+    assert saved["camera"] == "Desk Cam" and saved["r"] == pupils["r"]
+    bench.stop_live()
+    bench.start_live(camera=0)
+    with bench._lock:
+        assert bench._rest_look()["r"] == pupils["r"]
+
+
+def test_a_failed_camera_listing_keeps_set_rest_gaze(monkeypatch, tmp_path) -> None:
+    """A listing that fails names the same webcam "Camera 0" (or nothing):
+    that says nothing about which camera it is, so Set Rest's pupils stay."""
+    bench = _bench(monkeypatch, tmp_path)
+    pupils = {"r": {"nx": 0.08, "ny": 0.1}, "l": {"nx": 0.07, "ny": 0.1}}
+    bench.start_live(camera=0)
+    bench._set_rest_look(pupils)
+    bench.stop_live()
+    for listing in ([{"index": 0, "name": "Camera 0"}], []):
+        monkeypatch.setattr(face_mod, "list_cameras", lambda listing=listing: [dict(c) for c in listing])
+        bench.start_live(camera=0)
+        with bench._lock:
+            assert bench._rest_look()["r"] == pupils["r"]
+        bench.stop_live()
+    saved = _saved(tmp_path)["look_rest"]
+    assert saved["camera"] == "Desk Cam" and saved["r"] == pupils["r"]
+
+
+def test_set_rest_gaze_is_the_median_of_its_capture_window(monkeypatch, tmp_path) -> None:
+    """Set Rest took the gaze from the one frame at the click (a blink there
+    was the zero) and kept it even when the capture then failed."""
+    bench = _bench(monkeypatch, tmp_path)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        face_mod, "time", SimpleNamespace(perf_counter=lambda: clock["t"], time=lambda: clock["t"])
+    )
+    calib = SimpleNamespace(capturing="", rest={"open": 0.1})
+    calib.rest_snapshot = lambda: dict(calib.rest) if calib.rest else None
+    monkeypatch.setattr(face_mod, "calibrator", calib)
+    frame = _cam_frame()
+    open_eyes, shut = {"l": 0.0, "r": 0.0}, {"l": 0.9, "r": 0.9}
+
+    def capture(reads: list[tuple[float, float]], blinks: list[dict], stored: bool) -> None:
+        _pupils(monkeypatch, [r for r, b in zip(reads, blinks) if b is open_eyes])
+        calib.capturing = "rest"
+        clock["t"] = 0.0
+        bench._hold_rest_look(frame, open_eyes)  # the click: inside the warm-up
+        for i, blink in enumerate(blinks):
+            clock["t"] = 0.2 + 0.1 * i
+            bench._hold_rest_look(frame, blink)
+        calib.capturing = ""
+        if stored:
+            calib.rest = {"open": calib.rest["open"] + 0.01}
+        bench._hold_rest_look(frame, open_eyes)
+
+    reads = [(0.10, 0.10), (0.12, 0.11), (0.40, 0.40), (0.11, 0.10), (0.30, 0.20)]
+    blinks = [open_eyes, open_eyes, shut, open_eyes, open_eyes]
+    capture(reads, blinks, stored=True)
+    assert bench._look_rest["r"] == {"nx": 0.115, "ny": 0.105}
+    saved = _saved(tmp_path)["look_rest"]
+    assert saved["r"] == {"nx": 0.115, "ny": 0.105}
+    # A capture that stored no new mouth rest ("No face while calibrating")
+    # leaves the gaze zero as it was, like the mouth and head.
+    capture([(0.3, 0.3)] * 3, [open_eyes] * 3, stored=False)
+    assert bench._look_rest["r"] == {"nx": 0.115, "ny": 0.105}
+
+
+def test_set_point_answers_when_there_is_no_point(monkeypatch, tmp_path) -> None:
+    """status() takes the bench lock: answering from inside it hung the lab."""
+    bench = _bench(monkeypatch, tmp_path)
+    monkeypatch.setattr(bench, "_unoffset_xy", lambda idx, seq=None: None)
+    done: list[dict] = []
+    worker = threading.Thread(
+        target=lambda: done.append(bench.set_point({"id": 33, "x": 1.0, "y": 2.0})), daemon=True
+    )
+    worker.start()
+    worker.join(5.0)
+    assert not worker.is_alive(), "set_point deadlocked on its own lock"
+    assert bench.last_error == "No overlay point to nudge"
 
 
 def test_gaze_rest_saved_before_cameras_were_recorded_still_loads(monkeypatch, tmp_path) -> None:
@@ -313,9 +392,10 @@ def test_gaze_rest_saved_before_cameras_were_recorded_still_loads(monkeypatch, t
         assert bench._rest_look() == old["look_rest"]
     assert _saved(tmp_path)["look_rest"]["camera"] == "Desk Cam"
     bench.stop_live()
-    # ...so a switch drops its pupils; the iPhone's look zero is not a camera's.
+    # ...so another camera skips its pupils; the iPhone's look zero is not a camera's.
     bench.start_live(camera=1)
-    assert bench._look_rest == {"x": 0.05, "y": -0.02}
+    with bench._lock:
+        assert bench._rest_look() == {"x": 0.05, "y": -0.02}
 
 
 # --- C: hair with no rig ----------------------------------------------------
