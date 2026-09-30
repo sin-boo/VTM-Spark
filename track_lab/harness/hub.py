@@ -15,6 +15,17 @@ Handler = Callable[[dict[str, Any]], dict[str, Any]]
 Listener = Callable[[dict[str, Any] | None], None]
 
 
+def packet_order(packet: dict[str, Any]) -> tuple[str, int] | None:
+    """(session, seq) of a frame, or None when it carries no order."""
+    session = str(packet.get("session") or "")
+    if not session:
+        return None
+    try:
+        return session, int(packet.get("seq"))
+    except (TypeError, ValueError):
+        return None
+
+
 class LatestSlot:
     """One mailbox. ``put`` overwrites; ``take`` returns the newest item.
 
@@ -48,12 +59,16 @@ class PacketMailbox:
     Live frames collapse to the newest packet so a slow reader never replays
     stale motion. A frame must not erase an unsent status — that is how the
     desk lost iFacialMocap and snapped the input tab back to camera.
+
+    The camera and command threads both pack frames, outside any lock. The
+    one packed first can arrive last; its lower seq keeps it out.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._status: dict[str, Any] | None = None
         self._frame: dict[str, Any] | None = None
+        self._frame_order: tuple[str, int] | None = None
         self._has = threading.Event()
 
     def put(self, item: dict[str, Any]) -> None:
@@ -63,6 +78,12 @@ class PacketMailbox:
             if kind == "status":
                 self._status = item
             else:
+                order = packet_order(inner)
+                last = self._frame_order
+                if order is not None and last is not None and order[0] == last[0] and order[1] < last[1]:
+                    return
+                if order is not None:
+                    self._frame_order = order
                 self._frame = item
             self._has.set()
 
