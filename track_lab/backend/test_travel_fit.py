@@ -165,6 +165,38 @@ def test_turn_is_centred_on_a_turned_still() -> None:
     assert box["turn_left"] == pytest.approx(22 + pose["yaw"], abs=0.1)
 
 
+def test_fitting_again_does_not_ratchet_a_side() -> None:
+    """Each Fit press re-averaged the box the last one clamped: tilt 22 / 12
+    on a still tilted 14 deg went 31 / 5, 32 / 5, 32.5 / 5, 33 / 5 ..."""
+    k = _rotate(_bust(), 14.0)
+    first = fit_travel_box(k, SIZE, SIZE, base=DEFAULT_TRAVEL_BOX)
+    assert first["tilt_right"] == pytest.approx(5.0)
+    box = first
+    for _ in range(5):
+        box = fit_travel_box(k, SIZE, SIZE, base=box)
+        for key in ("turn_left", "turn_right", "tilt_left", "tilt_right"):
+            assert box[key] == first[key], key
+    # A turned still whose far side is held at the minimum stays put too.
+    turned = _bust()
+    span = float(turned[4, 0] - turned[0, 0])
+    for slot in (2, *range(20, 28)):
+        turned[slot, 0] += 0.5 * span * math.sin(math.radians(20.0))
+    base = {**DEFAULT_TRAVEL_BOX, "turn_left": 20.0, "turn_right": 20.0}
+    once = fit_travel_box(turned, SIZE, SIZE, base=base)
+    assert once["turn_right"] == pytest.approx(5.0)
+    assert fit_travel_box(turned, SIZE, SIZE, base=once) == once
+
+
+def test_a_hand_set_box_is_still_recentred() -> None:
+    """A side is read back only when the drawn pose explains it sitting at the
+    minimum; a box set by hand otherwise is centred from its mean, as before."""
+    k = _rotate(_bust(), 14.0)
+    roll = drawn_pose(k)["roll"]
+    box = fit_travel_box(k, SIZE, SIZE, base={**DEFAULT_TRAVEL_BOX, "tilt_left": 35.0, "tilt_right": 5.0})
+    assert box["tilt_left"] == pytest.approx(20.0 + roll, abs=0.1)
+    assert box["tilt_right"] == pytest.approx(20.0 - roll, abs=0.1)
+
+
 def test_look_eyes_size_and_on_come_from_base() -> None:
     base = {**DEFAULT_TRAVEL_BOX, "pitch_up": 30.0, "pitch_down": 9.0, "eye": 0.3, "size": 0.2, "enabled": False}
     box = fit_travel_box(_bust(), SIZE, SIZE, base=base)

@@ -175,6 +175,16 @@ def pack_stream_batch(
     hairs = [lerp_stream_hair(prev_hair, hair, (i + 1) / n) for i in range(n - 1)] + [hair]
     return np.stack(poses, axis=0), np.stack(hairs, axis=0)
 
+
+def _place_rest_point(keypoints: np.ndarray, slot: int, x: float, y: float) -> np.ndarray:
+    """A copy of ``keypoints`` with ``slot`` placed at normalised (x, y) and shown."""
+    out = np.asarray(keypoints, dtype=np.float32).copy()
+    out[slot, 0] = x
+    out[slot, 1] = y
+    out[slot, 2] = max(float(out[slot, 2]), 0.85)
+    out[slot, 3] = 1.0
+    return out
+
 Listener = Callable[[dict[str, Any]], None]
 
 # Start stream's one bar: moving weights back to the GPU, then warmup, then
@@ -199,6 +209,9 @@ _LAB_SKELETON_NAMES = {
     35: "left_elbow",
     36: "chest",
 }
+# Rest points closer than this (character pixels) are the same point. Track Lab
+# sends points rounded to 0.01 px; a drag moves them whole pixels.
+REST_MATCH_PX = 0.05
 
 
 def _process_rss_bytes() -> int:
@@ -447,6 +460,9 @@ class StreamRuntime:
 
         save_ui_session(checkpoint=display_path(default_ckpt))
         self._last_overlay_kps: np.ndarray | None = None
+        # The character's rest mesh, nudges off (see _rest_keypoints). The
+        # overlay above is whatever was drawn last: live or generated poses.
+        self._rest_kps: np.ndarray | None = None
         self._travel_preview_kps: np.ndarray | None = None
         # After a desk edit, live frames must not put the old box back on the slider.
         self._travel_from_desk = False
@@ -956,7 +972,8 @@ class StreamRuntime:
             self._accept_lab_overlay(probe)
             packet = self._lab_packet_from_ack({"status": probe})
             self._adopt_lab_hair(packet)
-            self.adopt_lab_overlay(packet, emit=True)
+            adopted = self.adopt_lab_overlay(packet, emit=True)
+            self._note_lab_rest(packet, adopted)
             return
         path = self._write_lab_source()
         if path is None:
@@ -982,16 +999,18 @@ class StreamRuntime:
         packet = self._lab_packet_from_ack(track_ack)
         self._accept_lab_overlay(packet or track_ack)
         got_hair = self._adopt_lab_hair(packet)
-        self.adopt_lab_overlay(packet, emit=True)
+        adopted = self.adopt_lab_overlay(packet, emit=True)
         if rest is not None and "hair" not in rest and got_hair:
             # First load of a pack without hair: keep what the lab found so
             # the next load is fully packaged too.
             self._store_pack_hair()
-        overlay = self._last_overlay_kps
-        if overlay is not None:
+        # The model draws the still as Track Lab shows it: its rest with the
+        # nudges on. Never the overlay, which a GET /frame may have made live.
+        lab_rest = self._note_lab_rest(packet, adopted)
+        if lab_rest is not None:
             try:
                 self.engine.adopt_ref_keypoints(
-                    overlay, persist=False, pose_source="lab"
+                    self._with_nudges(lab_rest, packet), persist=False, pose_source="lab"
                 )
             except Exception:
                 pass
@@ -1015,9 +1034,12 @@ class StreamRuntime:
         if isinstance(commands, list) and "set_rest" not in commands:
             return None
         image = getattr(self, "_still_image", None)
-        # The pack's rest is the model's reference pose. The overlay is only
-        # the same thing until a stream or live tracking moves it.
-        kps = getattr(self.engine, "_ref_keypoints", None)
+        # The pack's rest, without nudges: they go along as point_offsets and
+        # Track Lab puts them on. The model's reference has them on already,
+        # and the overlay is only the rest until a stream or tracking moves it.
+        kps = getattr(self, "_rest_kps", None)
+        if kps is None:
+            kps = getattr(self.engine, "_ref_keypoints", None)
         if kps is None and image is not None and self._last_image is image:
             kps = self._last_overlay_kps
         if image is None or kps is None:
@@ -1213,6 +1235,7 @@ class StreamRuntime:
         self._last_image = None
         self._still_image = None
         self._last_overlay_kps = None
+        self._rest_kps = None
         self._driven_keypoints = None
         self._last_good_keypoints = None
         self._mesh_edited = False
@@ -1680,6 +1703,7 @@ class StreamRuntime:
             kps = getattr(self.engine, "_ref_keypoints", None)
             if kps is not None:
                 self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+                self._rest_kps = self._last_overlay_kps.copy()
                 self._driven_keypoints = self._last_overlay_kps.copy()
                 self._last_good_keypoints = self._last_overlay_kps.copy()
             self._mesh_edited = False
@@ -1852,6 +1876,8 @@ class StreamRuntime:
 
     def _install_loaded_reference(self, preview: Image.Image, kps: np.ndarray) -> dict[str, Any]:
         self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+        # The pack's own mesh: its rest, with no nudges on it.
+        self._rest_kps = self._last_overlay_kps.copy()
         self._driven_keypoints = self._last_overlay_kps.copy()
         self._last_good_keypoints = self._last_overlay_kps.copy()
         self._mesh_edited = False
@@ -3026,8 +3052,19 @@ class StreamRuntime:
             self.engine._last_driven_body = None
         except Exception:
             pass
+        # The pose jumps here; the next key must not continue the last one.
+        self._drop_hold()
         if reason:
             print(f"[pose-diag] live origin reset ({reason})")
+
+    def _drop_hold(self) -> None:
+        """Start the next DiT call from noise, not from the last generated frame."""
+        clear = getattr(getattr(self, "engine", None), "clear_last_gen_latent", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
 
     @staticmethod
     def _snapshot_coord_key(snap: Any) -> tuple[Any, ...] | None:
@@ -3668,6 +3705,7 @@ class StreamRuntime:
             self._set_status(busy=True, message="Calibrating reference…")
             kps = self.engine.calibrate_reference(self._ref_path, flip_tta=True)
             self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+            self._rest_kps = self._last_overlay_kps.copy()
             self._driven_keypoints = self._last_overlay_kps.copy()
             self._last_good_keypoints = self._last_overlay_kps.copy()
             self._mesh_edited = False
@@ -3693,6 +3731,8 @@ class StreamRuntime:
         with self._lock:
             self._pose_frozen = False
             self._mesh_edited = False
+        # Recenter moves the whole pose; do not carry the last frame across it.
+        self._drop_hold()
         nested = ack.get("status") if isinstance(ack, dict) and isinstance(ack.get("status"), dict) else {}
         packet = nested if nested.get("keypoints") else None
         self.adopt_lab_overlay(packet, emit=True)
@@ -4088,6 +4128,8 @@ class StreamRuntime:
         self._frame_in_flight = False
         self._last_gen_start = 0.0
         self._gen_hold_pending = False
+        # A new stream opens on a fresh key, not on the last stream's frame.
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4140,6 +4182,7 @@ class StreamRuntime:
                         pass
                     break
         self._frame_in_flight = False
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4196,6 +4239,11 @@ class StreamRuntime:
         self._paused = False
         # The paused gap is not a key interval.
         self._last_call_done_t = 0.0
+        # Nor a step of motion: the first key after it neither continues the
+        # pre-pause frame nor tweens its batch from the pre-pause pose.
+        self._drop_hold()
+        self._prev_stream_kps = None
+        self._prev_stream_hair = None
         self._set_status(paused=False, message="Streaming")
         if not self._frame_in_flight:
             self._schedule_next_frame()
@@ -5016,7 +5064,7 @@ class StreamRuntime:
         from .character_fit import SKELETON_LABELS, update_character_fit
 
         image = self._last_image
-        kps = self._last_overlay_kps
+        kps = self._rest_keypoints()
         if image is None or kps is None:
             raise RuntimeError("Create a character before moving the skeleton")
         slot = int(idx)
@@ -5024,38 +5072,30 @@ class StreamRuntime:
             raise ValueError("Only the neck, shoulders, elbows, and chest can be moved here")
         width, height = image.size
         nx, ny = pixels_to_normalized(float(x), float(y), width, height)
-        edited = np.asarray(kps, dtype=np.float32).copy()
-        edited[slot, 0] = nx
-        edited[slot, 1] = ny
-        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
-        edited[slot, 3] = 1.0
+        edited = _place_rest_point(kps, slot, nx, ny)
         self._install_fit_keypoints(edited)
         try:
             px, py = self._desk_px_to_lab(float(x), float(y))
             ack = self._lab_ack("set_skeleton_point", {"id": slot, "x": float(px), "y": float(py)})
             packet = self._lab_packet_from_ack(ack)
-            self.adopt_lab_overlay(packet, emit=False)
-            merged = (
-                np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
-                if self._last_overlay_kps is not None
-                else edited
-            )
-            merged[slot, 0] = nx
-            merged[slot, 1] = ny
-            merged[slot, 2] = max(float(merged[slot, 2]), 0.85)
-            merged[slot, 3] = 1.0
-            self._install_fit_keypoints(merged)
+            adopted = self.adopt_lab_overlay(packet, emit=False)
+            lab_rest = self._lab_rest(packet, adopted)
+            merged = _place_rest_point(edited if lab_rest is None else lab_rest, slot, nx, ny)
+            self._install_fit_keypoints(merged, self._with_nudges(merged, packet))
         except Exception as exc:
             print(f"Skeleton move kept on the desk; Track Lab did not store it: {exc}")
         ident = str(self._status.get("character_id") or "")
-        if ident and self._last_overlay_kps is not None:
+        rest = self._rest_keypoints()
+        if ident and rest is not None:
+            # From the rest: the overlay has the nudges on (or a live pose), and
+            # a restore sends these to Track Lab as rest joints.
             body = []
             for joint in SKELETON_LABELS:
                 body.append(
                     {
                         "id": joint,
-                        "x": round(float(self._last_overlay_kps[joint, 0]), 5),
-                        "y": round(float(self._last_overlay_kps[joint, 1]), 5),
+                        "x": round(float(rest[joint, 0]), 5),
+                        "y": round(float(rest[joint, 1]), 5),
                     }
                 )
             update_character_fit(ident, {"skeleton": body})
@@ -5082,32 +5122,30 @@ class StreamRuntime:
         if slot in SKELETON_LABELS:
             return self.move_character_skeleton(slot, x, y)
         image = self._last_image
-        kps = self._last_overlay_kps
-        if image is None or kps is None:
+        rest = self._rest_keypoints()
+        if image is None or rest is None:
             raise RuntimeError("Create a character before moving its points")
         if slot not in POINT_SLOTS:
             raise ValueError(f"Point {slot} cannot be moved here")
         width, height = image.size
         nx, ny = pixels_to_normalized(float(x), float(y), width, height)
-        rest = np.asarray(kps, dtype=np.float32)
+        packet = None
         try:
             px, py = self._desk_px_to_lab(float(x), float(y))
             ack = self._lab_ack("set_rest_point", {"id": slot, "x": float(px), "y": float(py)})
             # Save Track Lab's whole rest as it stands after this move, like the
             # skeleton path, so the pack never misses an earlier edit.
-            self.adopt_lab_overlay(self._lab_packet_from_ack(ack), emit=False)
+            packet = self._lab_packet_from_ack(ack)
+            adopted = self.adopt_lab_overlay(packet, emit=False)
             # The move dropped any nudge on this point.
             self._save_lab_offsets(ack)
-            if self._last_overlay_kps is not None:
-                rest = np.asarray(self._last_overlay_kps, dtype=np.float32)
+            lab_rest = self._lab_rest(packet, adopted)
+            if lab_rest is not None:
+                rest = lab_rest
         except Exception as exc:
             print(f"Point move kept on the desk; Track Lab did not store it: {exc}")
-        edited = rest.copy()
-        edited[slot, 0] = nx
-        edited[slot, 1] = ny
-        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
-        edited[slot, 3] = 1.0
-        self._install_fit_keypoints(edited)
+        edited = _place_rest_point(rest, slot, nx, ny)
+        self._install_fit_keypoints(edited, self._with_nudges(edited, packet))
         self._save_user_points([slot], edited)
         if self._last_image is not None:
             self._emit(
@@ -5158,15 +5196,22 @@ class StreamRuntime:
         except Exception as exc:
             print(f"Nudge not remembered in the character: {exc}")
 
-    def _install_fit_keypoints(self, keypoints: np.ndarray) -> None:
+    def _install_fit_keypoints(self, keypoints: np.ndarray, shown: np.ndarray | None = None) -> None:
+        """Make ``keypoints`` the character's rest: the .vtm's mesh and the Reset base.
+
+        ``shown`` is that rest as Track Lab draws it (nudges on); the overlay
+        and the model's reference take it. Without it they take the rest.
+        """
         from .character_fit import replace_pack_keypoints
 
         kps = np.asarray(keypoints, dtype=np.float32).copy()
-        self._last_overlay_kps = kps
-        self._driven_keypoints = kps.copy()
-        self._last_good_keypoints = kps.copy()
+        view = kps if shown is None else np.asarray(shown, dtype=np.float32).copy()
+        self._rest_kps = kps.copy()
+        self._last_overlay_kps = view
+        self._driven_keypoints = view.copy()
+        self._last_good_keypoints = view.copy()
         try:
-            self.engine.adopt_ref_keypoints(kps, persist=False, pose_source="fit")
+            self.engine.adopt_ref_keypoints(view, persist=False, pose_source="fit")
             # The fitted rest is the new base: a mesh reset must not put the pre-fit pose back.
             self.engine._ref_keypoints_session_base = kps.copy()
         except Exception as exc:
@@ -5177,6 +5222,102 @@ class StreamRuntime:
                 replace_pack_keypoints(path, kps)
             except Exception as exc:
                 print(f"Fit pose did not save into the character: {exc}")
+
+    def _rest_keypoints(self) -> np.ndarray | None:
+        """The character's rest mesh, nudges off: fit edits start here and the .vtm keeps it.
+
+        Only rest sources set it: a load, Track Lab's rest (see _lab_rest) and
+        the user's own rest edits. The overlay is whatever was drawn last, the
+        live or generated pose while tracking or streaming, and saving that
+        made a pose (or the nudges, twice) the character's rest.
+        """
+        rest = getattr(self, "_rest_kps", None)
+        if rest is None:
+            # Nothing came through a rest source yet.
+            rest = getattr(getattr(self, "engine", None), "_ref_keypoints", None)
+        if rest is None:
+            rest = getattr(self, "_last_overlay_kps", None)
+        return None if rest is None else np.asarray(rest, dtype=np.float32).copy()
+
+    def _lab_canvas(self, packet: dict[str, Any] | None = None) -> tuple[float, float]:
+        """Track Lab's character-pixel canvas (width, height)."""
+        from .lab_harness import frame_image_wh
+
+        wh = frame_image_wh(packet) or getattr(self, "_lab_image_wh", None)
+        if not wh:
+            image = getattr(self, "_last_image", None)
+            wh = image.size if image is not None else (768, 768)
+        return max(float(wh[0]), 1.0), max(float(wh[1]), 1.0)
+
+    def _with_nudges(self, rest: np.ndarray, packet: dict[str, Any] | None, *, sign: float = 1.0) -> np.ndarray:
+        """``rest`` with a Track Lab reply's overlay nudges on (``sign`` -1: taken off)."""
+        out = np.asarray(rest, dtype=np.float32).copy()
+        rows = packet.get("point_offsets") if isinstance(packet, dict) else None
+        if not isinstance(rows, list):
+            return out
+        w, h = self._lab_canvas(packet)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                idx = int(row.get("id", -1))
+                dx = float(row.get("dx", 0.0))
+                dy = float(row.get("dy", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(out):
+                out[idx, 0] += sign * dx * 2.0 / w
+                out[idx, 1] += sign * dy * 2.0 / h
+        return out
+
+    def _lab_rest(self, packet: dict[str, Any] | None, adopted: Any = False) -> np.ndarray | None:
+        """Track Lab's rest mesh from a command reply, nudges off.
+
+        ``adopted``: adopt_lab_overlay took this reply (it is current and the
+        desk is not frozen). Its frame counts only when the reply carries one
+        and Track Lab is not live: a GET /frame stand-in, or a live frame, is
+        the performer's pose. Face points come from the status ``rest`` (no
+        nudges) when sent. Points within REST_MATCH_PX of the rest held keep
+        the held value, so Track Lab's rounding never reads as a move.
+        """
+        held = self._rest_keypoints()
+        own = isinstance(packet, dict) and "keypoints" in packet and not packet.get("live")
+        # Read the reply itself, not _last_overlay_kps: the stream thread
+        # writes generated poses there at any moment.
+        frame = self._lab_overlay_keypoints(packet) if adopted and own else None
+        if frame is not None:
+            rest = self._with_nudges(frame, packet, sign=-1.0)
+        elif held is not None:
+            rest = held.copy()
+        else:
+            return None
+        if rest.ndim != 2 or rest.shape[0] < 28:
+            return None
+        rows = packet.get("rest") if isinstance(packet, dict) else None
+        if isinstance(rows, list) and len(rows) >= 28:
+            w, h = self._lab_canvas(packet)
+            for i, row in enumerate(rows[:28]):
+                try:
+                    rest[i, 0] = float(row[0]) / w * 2.0 - 1.0
+                    rest[i, 1] = float(row[1]) / h * 2.0 - 1.0
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if held is not None and held.shape == rest.shape:
+            w, h = self._lab_canvas(packet)
+            same = (
+                (np.abs(rest[:, 0] - held[:, 0]) <= REST_MATCH_PX * 2.0 / w)
+                & (np.abs(rest[:, 1] - held[:, 1]) <= REST_MATCH_PX * 2.0 / h)
+                & ((rest[:, 3] >= 0.5) == (held[:, 3] >= 0.5))
+            )
+            rest[same] = held[same]
+        return rest
+
+    def _note_lab_rest(self, packet: dict[str, Any] | None, adopted: Any = False) -> np.ndarray | None:
+        """Keep Track Lab's rest (after set_rest / track / a load) as the character's."""
+        rest = self._lab_rest(packet, adopted)
+        if rest is not None:
+            self._rest_kps = rest.copy()
+        return rest
 
     def _apply_character_fit(self) -> bool:
         """Put the user's saved edits back after Track Lab re-detects.
@@ -5218,30 +5359,31 @@ class StreamRuntime:
             for e in edits
             if (0 <= e[0] < 30 and e[3] == "set_rest_point") or (31 <= e[0] <= 36 and e[3] == "set_skeleton_point")
         ]
-        if edits and self._last_overlay_kps is not None:
-            kps = np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
+        offsets = saved.get("point_offsets")
+        # The rest, not the overlay: that has the nudges on, or a live pose.
+        rest = self._rest_keypoints() if edits else None
+        if rest is not None:
+            kps = rest
+            w, h = self._lab_canvas()
             moved = False
             for slot, nx, ny, op in edits:
                 if (
-                    abs(float(kps[slot, 0]) - nx) <= 1e-5
-                    and abs(float(kps[slot, 1]) - ny) <= 1e-5
+                    abs(float(kps[slot, 0]) - nx) <= REST_MATCH_PX * 2.0 / w
+                    and abs(float(kps[slot, 1]) - ny) <= REST_MATCH_PX * 2.0 / h
                     and float(kps[slot, 3]) >= 0.5
                 ):
                     continue  # already where the user put it
                 moved = True
-                kps[slot, 0] = nx
-                kps[slot, 1] = ny
-                kps[slot, 2] = max(float(kps[slot, 2]), 0.85)
-                kps[slot, 3] = 1.0
+                kps = _place_rest_point(kps, slot, nx, ny)
                 try:
                     px, py = self._norm_to_lab_px(nx, ny)
                     self._lab_ack(op, {"id": slot, "x": px, "y": py})
                 except Exception:
                     pass
             if moved:
-                self._install_fit_keypoints(kps)
+                nudges = {"point_offsets": offsets} if isinstance(offsets, list) else None
+                self._install_fit_keypoints(kps, self._with_nudges(kps, nudges))
                 changed = True
-        offsets = saved.get("point_offsets")
         if isinstance(offsets, list):
             # After the points: moving a rest point drops its nudge in the lab.
             try:
@@ -5532,8 +5674,15 @@ class StreamRuntime:
                     self._mesh_edited = False
                 return
             new_rest = apply_overlay_drag_to_rest(rest, base, edited, slots)
-            saved = self.engine.adopt_ref_keypoints(new_rest, persist=True)
-            self._save_user_points(slots, new_rest)
+            # The model's reference has Track Lab's nudges on; the saved rest
+            # must not, or the next load puts them on twice.
+            held = getattr(self, "_rest_kps", None)
+            kept = new_rest if held is None else apply_overlay_drag_to_rest(held, base, edited, slots)
+            saved = self.engine.adopt_ref_keypoints(kept, persist=True)
+            if held is not None:
+                self.engine.adopt_ref_keypoints(new_rest, persist=False)
+                self._rest_kps = np.asarray(kept, dtype=np.float32).copy()
+            self._save_user_points(slots, kept)
             driven = None
             if self._tracking:
                 try:
@@ -5621,6 +5770,7 @@ class StreamRuntime:
             with self._lock:
                 self._mesh_edited = False
                 self._last_overlay_kps = np.asarray(rest, dtype=np.float32).copy()
+                self._rest_kps = self._last_overlay_kps.copy()
                 self._driven_keypoints = self._last_overlay_kps.copy()
                 image = self._last_image
                 overlay = self._last_overlay_kps
