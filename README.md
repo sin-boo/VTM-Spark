@@ -158,7 +158,7 @@ Models download automatically into:
 | Anime face box + landmarks (`face_yolov8n.pt`, `mmpose_anime-face_hrnetv2.pth`) | `models/trackers/` |
 | OpenSeeFace face stack | `vendor/tools/openseeface/models/` |
 
-Source weights: [sinBoo1/VTM-Elf-0.01](https://huggingface.co/sinBoo1/VTM-Elf-0.01). Anime face weights come from [Bingsu/adetailer](https://huggingface.co/Bingsu/adetailer) and [hysts/anime-face-detector](https://github.com/hysts/anime-face-detector/releases/tag/v0.0.1).
+Source weights: [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). Anime face weights come from [Bingsu/adetailer](https://huggingface.co/Bingsu/adetailer) and [hysts/anime-face-detector](https://github.com/hysts/anime-face-detector/releases/tag/v0.0.1).
 
 Hair tracking (`animeseg_hair3.pt`) is built on Mask2Former weights licensed CC BY-NC 4.0: **non-commercial use only** (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 

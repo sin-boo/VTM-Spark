@@ -8,7 +8,7 @@ This file lists the weights we actually load, the official license from the elig
 
 ## Ours (Apache-2.0)
 
-Eligible publisher: this project / [sinBoo1/VTM-Elf-0.01](https://huggingface.co/sinBoo1/VTM-Elf-0.01) (`license: apache-2.0` on that card).
+Eligible publisher: this project / [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark) (`license: apache-2.0` on that card).
 
 | File | What it is |
 |------|------------|
@@ -43,7 +43,7 @@ AnimeSeg ([suzukimain/AnimeSeg](https://github.com/suzukimain/AnimeSeg)) has **n
 1. **YOLO fine-tunes** — Apache on our training does not replace AGPL on Ultralytics pretrained starts. Shipping `iris_pose.pt` or `dwpose_v2.pt` inside a closed app is the case Ultralytics says needs AGPL source-offer or an Enterprise license.
 2. **Hair Mask2Former** — CC BY-NC 4.0 on the Facebook zoo weights is the opposite of a commercial Apache grant. Keep `animeseg_hair3.pt` out of a paid/redistributed build unless Meta (or a later official relicense) says otherwise.
 3. **TinyVAE** — no official weight license from cqyan. Runtime download is convenient; redistributing those bytes needs a statement from that publisher.
-4. **Hugging Face pack** `sinBoo1/VTM-Elf-0.01` is tagged Apache-2.0 for the **repo**, but the uploaded zip also contains OpenSeeFace (BSD) and MediaPipe (Apache) files. That tag does not rewrite those licenses. Keep this notices file next to any redistributed pack.
+4. **Hugging Face pack** `sinBoo1/VTM-Spark` is tagged Apache-2.0 for the **repo**, but the uploaded zip also contains OpenSeeFace (BSD) and MediaPipe (Apache) files. That tag does not rewrite those licenses. Keep this notices file next to any redistributed pack.
 5. **Future models** — add a row here with the publisher’s own LICENSE / Hugging Face `license:` field. Do not assume Apache.
 
 ## Runtime vs git

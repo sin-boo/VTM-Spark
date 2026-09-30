@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "message": "Downloads DiT + trackers + OpenSeeFace from Hugging Face on setup.",
-  "hf_repo": "sinBoo1/VTM-Elf-0.01",
+  "hf_repo": "sinBoo1/VTM-Spark",
   "hf_revision": "main",
   "files": [
     "VTM-1.5.1.pt"

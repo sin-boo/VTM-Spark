@@ -7,7 +7,7 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 ROOT = Path(__file__).resolve().parents[2]
-REPO = "sinBoo1/VTM-Elf-0.01"
+REPO = "sinBoo1/VTM-Spark"
 
 
 def main() -> int:
