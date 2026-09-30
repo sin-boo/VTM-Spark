@@ -564,3 +564,137 @@ def test_rebase_carries_eye_shapes_with_the_eyes(tmp_path, monkeypatch) -> None:
     book.rebase(moved)
     assert abs(float(book.shapes["eye_closed"][12, 0]) - 130.0) < 1e-3
     assert abs(float(book.shapes["eye_closed"][12, 1]) - 100.0) < 1e-3
+
+
+def _char_rest(dx: float, dy: float, mouth_w: float, eye_w: float) -> np.ndarray:
+    """A character rest: jaw / brows / nose, both eyes, and a lip ring."""
+    from .presets import EYE_L, EYE_R
+
+    pts = np.zeros((28, 3), dtype=np.float32)
+    pts[:, 2] = 0.9137
+    for i in range(20):
+        pts[i, 0] = 400.0 + dx + 17.3 * i
+        pts[i, 1] = 300.0 + dy + 2.9 * i
+    for (a, lid, b), x0 in ((EYE_L, 480.0), (EYE_R, 590.0)):
+        pts[a, :2] = [x0 + dx, 350.0 + dy]
+        pts[lid, :2] = [x0 + dx + 0.5 * eye_w, 336.0 + dy]
+        pts[b, :2] = [x0 + dx + eye_w, 351.0 + dy]
+    ring = {
+        23: (-1.0, 0.0),
+        20: (-0.5, -0.3),
+        21: (0.0, -0.35),
+        22: (0.5, -0.3),
+        26: (1.0, 0.02),
+        27: (0.5, 0.3),
+        25: (0.0, 0.4),
+        24: (-0.5, 0.3),
+    }
+    for slot, (u, v) in ring.items():
+        pts[slot, 0] = 560.0 + dx + u * 0.5 * mouth_w
+        pts[slot, 1] = 450.0 + dy + v * 0.5 * mouth_w
+    return pts
+
+
+def _lips(rest: np.ndarray, moves: dict[int, tuple[float, float]]) -> dict[str, list[float]]:
+    return {
+        str(s): [
+            float(rest[s, 0]) + moves.get(s, (0.0, 0.0))[0],
+            float(rest[s, 1]) + moves.get(s, (0.0, 0.0))[1],
+            1.0,
+        ]
+        for s in range(20, 28)
+    }
+
+
+def _author_plan(book: MouthBook, rest: np.ndarray) -> None:
+    book.seed_rest(rest)
+    book.set_mouth("smile", _lips(rest, {23: (-6.1, -5.3), 26: (6.1, -5.3)}), rest)
+    book.set_mouth("A", _lips(rest, {21: (0.0, -7.7), 25: (0.0, 11.3), 24: (0.4, 9.1)}), rest)
+    book.set_mouth("rest+smile@300", _lips(rest, {23: (-1.9, -1.7), 26: (1.9, -1.7)}), rest)
+    closed = {
+        "12": [float(rest[12, 0]), float(rest[12, 1]) + 13.9],
+        "18": [float(rest[18, 0]), float(rest[18, 1]) + 14.2],
+    }
+    book.set_mouth("eye_closed", closed, rest)
+
+
+def test_rebase_back_to_the_authored_rest_is_exact(tmp_path, monkeypatch) -> None:
+    from .presets import json_to_pts, pts_to_json
+
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    home = _char_rest(0.123, 0.456, 96.7, 42.1)
+    narrow = _char_rest(31.789, -17.25, 41.3, 30.7)
+    wide = _char_rest(-12.5, 8.75, 130.2, 51.9)
+    book = MouthBook()
+    _author_plan(book, home)
+    authored = {name: pts.copy() for name, pts in book.shapes.items()}
+    for _ in range(10):
+        for other in (narrow, wide):
+            book.rebase(other)
+            book.rebase(home)
+    assert set(book.shapes) == set(authored)
+    for name, pts in authored.items():
+        assert np.array_equal(book.shapes[name], pts), name
+    # Across restarts (0.001 px save rounding) the shapes never walk off either.
+    stored = {name: json_to_pts(pts_to_json(pts)) for name, pts in authored.items()}
+    for _ in range(10):
+        for other in (narrow, wide):
+            book.rebase(other)
+            book = MouthBook()
+            book.rebase(home)
+            book = MouthBook()
+    for name, pts in stored.items():
+        assert np.array_equal(book.shapes[name], pts), name
+
+
+def test_rebase_skips_an_unchanged_rest(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", tmp_path / "mouth_presets.json")
+    home = _char_rest(0.123, 0.456, 96.7, 42.1)
+    book = MouthBook()
+    _author_plan(book, home)
+    book.apply("rest", home)
+    before = {name: pts.copy() for name, pts in book.shapes.items()}
+    writes: list[int] = []
+    monkeypatch.setattr(MouthBook, "save", lambda self: writes.append(1))
+    # The same face at another precision (a .vtm rest, a re-push).
+    again = home.copy()
+    again[:, :2] = np.round(home[:, :2].astype(np.float64) + 0.003, 2)
+    book.rebase(again)
+    assert not writes
+    assert book.active == "rest"
+    for name, pts in before.items():
+        assert np.array_equal(book.shapes[name], pts), name
+
+
+def test_preset_file_without_authored_copy_loads_as_before(tmp_path, monkeypatch) -> None:
+    import json
+
+    from .presets import json_to_pts, pts_to_json, retarget_mouth
+
+    path = tmp_path / "mouth_presets.json"
+    monkeypatch.setattr(presets_mod, "PRESET_PATH", path)
+    home = _char_rest(0.123, 0.456, 96.7, 42.1)
+    other = _char_rest(31.789, -17.25, 41.3, 30.7)
+    smile = home.copy()
+    smile[23, :2] += (-6.1, -5.3)
+    smile[26, :2] += (6.1, -5.3)
+    old_file = {"active": "smile", "shapes": {"rest": pts_to_json(home), "smile": pts_to_json(smile)}}
+    path.write_text(json.dumps(old_file), encoding="utf-8")
+    book = MouthBook()
+    loaded = {"rest": json_to_pts(pts_to_json(home)), "smile": json_to_pts(pts_to_json(smile))}
+    assert book.active == "smile"
+    for name, pts in loaded.items():
+        assert np.array_equal(book.shapes[name], pts)
+    book.rebase(other)
+    assert np.array_equal(book.shapes["smile"], retarget_mouth(loaded["smile"], loaded["rest"], other))
+    # The desk reads absolute points, rest included, in the same rows.
+    shapes = book.payload(other)["shapes"]
+    assert shapes["rest"] == pts_to_json(other)
+    assert shapes["smile"] == pts_to_json(book.shapes["smile"])
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["active"] == "rest"
+    assert saved["shapes"] == shapes
+    again = MouthBook()
+    again.rebase(home)
+    for name, pts in loaded.items():
+        assert np.array_equal(again.shapes[name], pts)
