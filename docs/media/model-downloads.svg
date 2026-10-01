@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="472" viewBox="0 0 760 472" role="img" aria-label="What install.bat downloads: AI models">
+<style>
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.grid{stroke:#e4e3df}.s1{fill:#2a78d6}.s2{fill:#eb6834}
+.box{fill:#f3f2ef;stroke:#d6d5d0}.arrow{stroke:#8a8984;fill:none}.ah{fill:#8a8984}.hl{fill:#e3eefb;stroke:#2a78d6}
+@media (prefers-color-scheme: dark){.bg{fill:#1a1a19}.t1{fill:#ffffff}.t2{fill:#c3c2b7}.grid{stroke:#383835}.s1{fill:#3987e5}.s2{fill:#d95926}
+.box{fill:#262624;stroke:#45443f}.arrow{stroke:#9a9993}.ah{fill:#9a9993}.hl{fill:#16273d;stroke:#3987e5}}
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+</style>
+<rect class="bg" width="760" height="472" rx="8"/>
+<text class="t1" x="20" y="32" font-size="17" font-weight="600">What install.bat downloads: AI models</text>
+<text class="t2" x="20" y="54" font-size="13">About 1.24 GB of model files on first setup (Python and PyTorch are extra)</text>
+<rect class="s1" x="20" y="66" width="12" height="12" rx="2"/>
+<text class="t2" x="38" y="77" font-size="13">From sinBoo1/VTM-Spark</text>
+<rect class="s2" x="208.4" y="66" width="12" height="12" rx="2"/>
+<text class="t2" x="226.4" y="77" font-size="13">From the original publisher</text>
+<line class="grid" x1="290.0" y1="86" x2="290.0" y2="424" stroke-width="1"/>
+<text class="t2" x="290.0" y="440" font-size="12" text-anchor="middle">0</text>
+<line class="grid" x1="378.8888888888889" y1="86" x2="378.8888888888889" y2="424" stroke-width="1"/>
+<text class="t2" x="378.8888888888889" y="440" font-size="12" text-anchor="middle">100</text>
+<line class="grid" x1="467.77777777777777" y1="86" x2="467.77777777777777" y2="424" stroke-width="1"/>
+<text class="t2" x="467.77777777777777" y="440" font-size="12" text-anchor="middle">200</text>
+<line class="grid" x1="556.6666666666667" y1="86" x2="556.6666666666667" y2="424" stroke-width="1"/>
+<text class="t2" x="556.6666666666667" y="440" font-size="12" text-anchor="middle">300</text>
+<line class="grid" x1="645.5555555555555" y1="86" x2="645.5555555555555" y2="424" stroke-width="1"/>
+<text class="t2" x="645.5555555555555" y="440" font-size="12" text-anchor="middle">400</text>
+<g><title>Hair segmentation · animeseg_hair3.pt: 432 MB</title>
+<text class="t1" x="278" y="107.0" font-size="13" text-anchor="end">Hair segmentation · animeseg_hair3.pt</text>
+<path class="s1" d="M290,92 H669.911111111111 Q673.911111111111,92 673.911111111111,96 V108 Q673.911111111111,112 669.911111111111,112 H290 Z"/>
+<text class="t2" x="681.911111111111" y="107.0" font-size="13">432 MB</text></g>
+<g><title>Generator · VTM-1.5.1.pt: 360 MB</title>
+<text class="t1" x="278" y="141.0" font-size="13" text-anchor="end">Generator · VTM-1.5.1.pt</text>
+<path class="s1" d="M290,126 H605.5555555555555 Q609.5555555555555,126 609.5555555555555,130 V142 Q609.5555555555555,146 605.5555555555555,146 H290 Z"/>
+<text class="t2" x="617.5555555555555" y="141.0" font-size="13">360 MB</text></g>
+<g><title>SD VAE · stabilityai/sd-vae-ft-mse: 335 MB</title>
+<text class="t1" x="278" y="175.0" font-size="13" text-anchor="end">SD VAE · stabilityai/sd-vae-ft-mse</text>
+<path class="s2" d="M290,160 H583.4222222222222 Q587.4222222222222,160 587.4222222222222,164 V176 Q587.4222222222222,180 583.4222222222222,180 H290 Z"/>
+<text class="t2" x="595.4222222222222" y="175.0" font-size="13">335 MB</text></g>
+<g><title>Anime face landmarks · hrnetv2.pth: 39 MB</title>
+<text class="t1" x="278" y="209.0" font-size="13" text-anchor="end">Anime face landmarks · hrnetv2.pth</text>
+<path class="s2" d="M290,194 H320.93333333333334 Q324.93333333333334,194 324.93333333333334,198 V210 Q324.93333333333334,214 320.93333333333334,214 H290 Z"/>
+<text class="t2" x="332.93333333333334" y="209.0" font-size="13">39 MB</text></g>
+<g><title>Body keypoints · dwpose_v2.pt: 23 MB</title>
+<text class="t1" x="278" y="243.0" font-size="13" text-anchor="end">Body keypoints · dwpose_v2.pt</text>
+<path class="s1" d="M290,228 H306.53333333333336 Q310.53333333333336,228 310.53333333333336,232 V244 Q310.53333333333336,248 306.53333333333336,248 H290 Z"/>
+<text class="t2" x="318.53333333333336" y="243.0" font-size="13">23 MB</text></g>
+<g><title>Webcam face · OpenSeeFace (5 files): 21 MB</title>
+<text class="t1" x="278" y="277.0" font-size="13" text-anchor="end">Webcam face · OpenSeeFace (5 files)</text>
+<path class="s1" d="M290,262 H304.6666666666667 Q308.6666666666667,262 308.6666666666667,266 V278 Q308.6666666666667,282 304.6666666666667,282 H290 Z"/>
+<text class="t2" x="316.6666666666667" y="277.0" font-size="13">21 MB</text></g>
+<g><title>Tiny VAE · cqyan/hybrid-sd-tinyvae: 9.8 MB</title>
+<text class="t1" x="278" y="311.0" font-size="13" text-anchor="end">Tiny VAE · cqyan/hybrid-sd-tinyvae</text>
+<path class="s2" d="M290,296 H294.7111111111111 Q298.7111111111111,296 298.7111111111111,300 V312 Q298.7111111111111,316 294.7111111111111,316 H290 Z"/>
+<text class="t2" x="306.7111111111111" y="311.0" font-size="13">9.8 MB</text></g>
+<g><title>Iris · iris_pose.pt: 6.4 MB</title>
+<text class="t1" x="278" y="345.0" font-size="13" text-anchor="end">Iris · iris_pose.pt</text>
+<path class="s1" d="M290,330 H291.68888888888887 Q295.68888888888887,330 295.68888888888887,334 V346 Q295.68888888888887,350 291.68888888888887,350 H290 Z"/>
+<text class="t2" x="303.68888888888887" y="345.0" font-size="13">6.4 MB</text></g>
+<g><title>Anime face box · face_yolov8n.pt: 6.2 MB</title>
+<text class="t1" x="278" y="379.0" font-size="13" text-anchor="end">Anime face box · face_yolov8n.pt</text>
+<path class="s2" d="M290,364 H291.5111111111111 Q295.5111111111111,364 295.5111111111111,368 V380 Q295.5111111111111,384 291.5111111111111,384 H290 Z"/>
+<text class="t2" x="303.5111111111111" y="379.0" font-size="13">6.2 MB</text></g>
+<g><title>Body tracking · pose_landmarker_lite: 5.8 MB</title>
+<text class="t1" x="278" y="413.0" font-size="13" text-anchor="end">Body tracking · pose_landmarker_lite</text>
+<path class="s1" d="M290,398 H291.15555555555557 Q295.15555555555557,398 295.15555555555557,402 V414 Q295.15555555555557,418 291.15555555555557,418 H290 Z"/>
+<text class="t2" x="303.15555555555557" y="413.0" font-size="13">5.8 MB</text></g>
+<text class="t2" x="490.0" y="458" font-size="12" text-anchor="middle">MB</text>
+</svg>

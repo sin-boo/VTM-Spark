@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="240" viewBox="0 0 1000 240" role="img" aria-label="VTM Spark pipeline">
+<style>
+.bg{fill:#fcfcfb}.t1{fill:#0b0b0b}.t2{fill:#52514e}.grid{stroke:#e4e3df}.s1{fill:#2a78d6}.s2{fill:#eb6834}
+.box{fill:#f3f2ef;stroke:#d6d5d0}.arrow{stroke:#8a8984;fill:none}.ah{fill:#8a8984}.hl{fill:#e3eefb;stroke:#2a78d6}
+@media (prefers-color-scheme: dark){.bg{fill:#1a1a19}.t1{fill:#ffffff}.t2{fill:#c3c2b7}.grid{stroke:#383835}.s1{fill:#3987e5}.s2{fill:#d95926}
+.box{fill:#262624;stroke:#45443f}.arrow{stroke:#9a9993}.ah{fill:#9a9993}.hl{fill:#16273d;stroke:#3987e5}}
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+</style>
+<rect class="bg" width="1000" height="240" rx="8"/>
+<text class="t1" x="20" y="32" font-size="17" font-weight="600">How a frame is made</text>
+<text class="t2" x="20" y="54" font-size="13">Your face moves the keypoints; the model redraws your character from its one reference picture</text>
+<rect class="box" x="6.0" y="90" width="148" height="70" rx="8" stroke-width="1"/>
+<text class="t1" x="80.0" y="120" font-size="13" font-weight="600" text-anchor="middle">Webcam or iPhone</text>
+<text class="t2" x="80.0" y="140" font-size="11.5" text-anchor="middle">OpenSeeFace, iFacialMocap</text>
+<line class="arrow" x1="157.0" y1="125.0" x2="167.0" y2="125.0" stroke-width="2"/>
+<path class="ah" d="M173.0,125.0 l-7,-5 v10 z"/>
+<rect class="box" x="174.0" y="90" width="148" height="70" rx="8" stroke-width="1"/>
+<text class="t1" x="248.0" y="120" font-size="13" font-weight="600" text-anchor="middle">Track Lab</text>
+<text class="t2" x="248.0" y="140" font-size="11.5" text-anchor="middle">head, eyes, mouth, brows</text>
+<line class="arrow" x1="325.0" y1="125.0" x2="335.0" y2="125.0" stroke-width="2"/>
+<path class="ah" d="M341.0,125.0 l-7,-5 v10 z"/>
+<rect class="box" x="342.0" y="90" width="148" height="70" rx="8" stroke-width="1"/>
+<text class="t1" x="416.0" y="120" font-size="13" font-weight="600" text-anchor="middle">37 keypoints</text>
+<text class="t2" x="416.0" y="140" font-size="11.5" text-anchor="middle">face + upper body</text>
+<line class="arrow" x1="493.0" y1="125.0" x2="503.0" y2="125.0" stroke-width="2"/>
+<path class="ah" d="M509.0,125.0 l-7,-5 v10 z"/>
+<rect class="hl" x="510.0" y="90" width="148" height="70" rx="8" stroke-width="2"/>
+<text class="t1" x="584.0" y="120" font-size="13" font-weight="600" text-anchor="middle">VTM-1.5.1 DiT</text>
+<text class="t2" x="584.0" y="140" font-size="11.5" text-anchor="middle">1 step, 30M params, GPU</text>
+<line class="arrow" x1="661.0" y1="125.0" x2="671.0" y2="125.0" stroke-width="2"/>
+<path class="ah" d="M677.0,125.0 l-7,-5 v10 z"/>
+<rect class="box" x="678.0" y="90" width="148" height="70" rx="8" stroke-width="1"/>
+<text class="t1" x="752.0" y="120" font-size="13" font-weight="600" text-anchor="middle">SD VAE</text>
+<text class="t2" x="752.0" y="140" font-size="11.5" text-anchor="middle">768 × 768 picture</text>
+<line class="arrow" x1="829.0" y1="125.0" x2="839.0" y2="125.0" stroke-width="2"/>
+<path class="ah" d="M845.0,125.0 l-7,-5 v10 z"/>
+<rect class="box" x="846.0" y="90" width="148" height="70" rx="8" stroke-width="1"/>
+<text class="t1" x="920.0" y="120" font-size="13" font-weight="600" text-anchor="middle">&quot;VTM Spark&quot; camera</text>
+<text class="t2" x="920.0" y="140" font-size="11.5" text-anchor="middle">OBS / Discord / Zoom</text>
+<text class="t2" x="584.0" y="202" font-size="12" text-anchor="middle">your character picture (.vtm)</text>
+<line class="arrow" x1="584.0" y1="188" x2="584.0" y2="168" stroke-width="2"/>
+<path class="ah" d="M584.0,163 l-5,7 h10 z"/>
+</svg>
