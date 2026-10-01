@@ -4575,8 +4575,8 @@ class StreamRuntime:
                 # queued job was dropped), not from the raw last key.
                 prev, prev_kps = shown
             else:
+                prev = job.get("prev")
                 prev_kps = job.get("prev_kps")
-                prev = self._bend_body(job.get("prev"), prev_kps)
             interval = float(job.get("key_interval") or 0.0)
             rate = (1.0 / interval) if interval > 0.0 else 0.0
             wanted = int(job.get("count") or 0)
@@ -4602,7 +4602,6 @@ class StreamRuntime:
                 # turns them off for the whole stream.
                 self._last_interp_s = float(self._last_interp_s or 0.0) * 0.8
             for image, keypoints in keys:
-                image = self._bend_body(image, keypoints)
                 if job.get("blend"):
                     image = self._blend_display_frame(image, keypoints)
                 behind = self._display_behind(interval)
@@ -4634,24 +4633,6 @@ class StreamRuntime:
                 self._shown_key = (image, keypoints)
         finally:
             self._display_busy = False
-
-    def _bend_body(self, image: Image.Image | None, keypoints: np.ndarray | None) -> Image.Image | None:
-        """The model draws the body where the still has it, whatever the torso
-        points say: bend it to the torso Track Lab posed (body_warp). Run on
-        the display thread, so it never holds up the next DiT call. A failure
-        shows the frame as drawn."""
-        if image is None or keypoints is None:
-            return image
-        from .body_warp import warp_body
-
-        rest = getattr(self.engine, "_ref_keypoints", None)
-        try:
-            return warp_body(image, keypoints, rest, getattr(self, "_last_lab_hair", None))
-        except Exception as exc:
-            if not getattr(self, "_bend_failed", False):
-                self._bend_failed = True
-                print(f"[body-warp] frame shown as drawn: {exc}", flush=True)
-            return image
 
     def _display_behind(self, key_interval: float) -> bool:
         """True when playout is really late, not just when the next call is in.
@@ -4954,7 +4935,6 @@ class StreamRuntime:
             return
         timing = self._note_timing(elapsed, timings, streaming=False)
         dit_fps = (1.0 / elapsed) if elapsed > 0 else 0.0
-        image = self._bend_body(image, keypoints)
         self._last_image = image
         if keypoints is not None:
             self._last_overlay_kps = np.asarray(keypoints, dtype=np.float32)
