@@ -8,6 +8,8 @@ import threading
 from .paths import OUTPUT
 
 FEEL_PATH = OUTPUT / "tracking_feel.json"
+# 2: head_sway drives the webcam too and defaults to 0.35; body_turn added.
+FEEL_VERSION = 2
 
 DEFAULTS = {
     "response": 0.65,
@@ -31,13 +33,15 @@ DEFAULTS = {
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
     "gaze_smooth": 0.28,
-    "head_sway": 1.0,
+    "head_sway": 0.35,
+    "body_turn": 1.5,
 }
 _LIMITS = {key: 1.0 for key in DEFAULTS}
 _LIMITS["mouth"] = 2.0
 _LIMITS["gaze_gain"] = 2.0
 _LIMITS["hair_width"] = 2.0
 _LIMITS["head_sway"] = 2.0
+_LIMITS["body_turn"] = 3.0
 # One number used to cap both sides of a turn / tilt; it still sets both.
 _BOTH_SIDES = {
     "max_yaw": ("max_yaw_left", "max_yaw_right"),
@@ -75,6 +79,10 @@ class Feel:
         if not isinstance(data, dict):
             return
         data = _sided(data)
+        if int(data.get("version") or 1) < FEEL_VERSION and data.get("head_sway") == 1.0:
+            # 1.0 was the old default, and it only reached the iPhone. Swung
+            # that far, a webcam head slid off the neck the model draws.
+            data["head_sway"] = DEFAULTS["head_sway"]
         for key in DEFAULTS:
             if key in data:
                 try:
@@ -84,7 +92,9 @@ class Feel:
 
     def save(self) -> None:
         FEEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FEEL_PATH.write_text(json.dumps(self.values, indent=2), encoding="utf-8")
+        FEEL_PATH.write_text(
+            json.dumps({**self.values, "version": FEEL_VERSION}, indent=2), encoding="utf-8"
+        )
 
     def payload(self) -> dict[str, float | bool]:
         with self._lock:
@@ -180,9 +190,16 @@ class Feel:
         return 0.72 - 0.56 * self._get("gaze_smooth")
 
     def head_sway(self) -> float:
-        """iPhone only: how far a turn / nod / tilt carries the head round the
-        neck. 0 = rotate in place, 1 = about what a webcam sees, 2 = double."""
+        """How far a turn / nod / tilt carries the drawn head round the neck,
+        webcam and iPhone. 0 = rotate in place, 1 = about what a webcam sees,
+        2 = double. The model draws the neck where the still has it, so a
+        head swung the full way slid off it; 0.35 keeps the chin over it."""
         return self._get("head_sway")
+
+    def body_turn(self) -> float:
+        """Share of the head's turn / nod / tilt the torso takes, in 3D round
+        the neck base. 0 = the torso only walks and sizes with the body."""
+        return self._get("body_turn")
 
 
 feel = Feel()

@@ -228,7 +228,8 @@ _FEEL_FALLBACK = {
     "max_look_y": 1.0,
     "gaze_gain": 1.0,
     "gaze_smooth": 0.28,
-    "head_sway": 1.0,
+    "head_sway": 0.35,
+    "body_turn": 1.5,
 }
 
 

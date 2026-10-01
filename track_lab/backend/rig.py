@@ -141,6 +141,15 @@ _SILHOUETTE = ((0, 11), (1, 23), (4, 19), (3, 26))
 _SILHOUETTE_KEEP = 0.3
 
 
+def _seen_part(seen: float, swing: float) -> float:
+    """How much of ``swing`` the camera saw along one axis: none of it when
+    the eyes stayed or moved the other way, all of it at most."""
+    if swing == 0.0:
+        return 0.0
+    side = 1.0 if swing > 0.0 else -1.0
+    return side * min(abs(swing), max(0.0, side * seen))
+
+
 def neck_offset(yaw_r: float, pitch_r: float, roll_r: float) -> tuple[float, float]:
     """Screen (x right, y down) move of the eyes, in face widths, for the
     drawn turn (radians, relative to rest): a turn swings them sideways
@@ -780,9 +789,18 @@ class FaceRig:
                 self._torso_walk_y += (self._walk[1] - self._torso_walk_y) * (1.0 - hold)
             # A bad solve holds the last turn, so its swing cannot be taken
             # out of the eyes: the last walk holds with it.
-            swing = (nx * ms, ny * ms)
             walk = self._walk
             torso_walk = (walk[0], self._torso_walk_y)
+            # The drawn head swings head_sway of the way, as the iPhone's
+            # does. Only the swing the camera saw is cut: what the neck model
+            # expects but the eyes did not do would draw the head running
+            # against the turn. The walk above, and so tracking, is unchanged.
+            sway = feel.head_sway()
+            seen = (walk[0] + nx * ms, walk[1] + ny * ms)
+            swing = (
+                seen[0] - walk[0] - (1.0 - sway) * _seen_part(seen[0], nx * ms),
+                seen[1] - walk[1] - (1.0 - sway) * _seen_part(seen[1], ny * ms),
+            )
         self._dx = _clip(walk[0] + swing[0], -ms * 2.2, ms * 2.2)
         self._dy = _clip(walk[1] + swing[1], -ms * 1.6, ms * 1.6)
         torso_x, torso_y = _dead(torso_walk[0], torso_walk[1], _WALK_DEADBAND * ms)
@@ -887,12 +905,25 @@ class FaceRig:
         depth = face_depth(len(xs), radius) if face_rows else None
         return face_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s, depth=depth)
 
-    def _plane(
+    def map_hair(
         self,
         xs: np.ndarray,
         ys: np.ndarray,
         max_turn: float | None = None,
+        *,
+        wide: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Rest-centered hair: same place as the face, a card turned with it.
+
+        Through the face's portrait lens, so the hair turns with the eyes
+        under it: through the hair's own wide lens the bangs stayed centred
+        while the eyes swung under them and a turn read as the face sliding
+        across the head; it also pushed the outline past the hair the model
+        draws, which drew a second edge. ``wide``: that wide lens, for a
+        pinned part's anchor, whose silhouette it holds on a big turn.
+        """
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
         radius = max(self._rest_ms * 1.05 * self._s, 1.0)
         yaw = self._yaw_r
         pitch = self._pitch_r
@@ -900,20 +931,8 @@ class FaceRig:
             cap = math.radians(float(max_turn))
             yaw = _clip(yaw, -cap, cap)
             pitch = _clip(pitch, -cap, cap)
-        return plane_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
-
-    def map_plane(
-        self,
-        xs: np.ndarray,
-        ys: np.ndarray,
-        max_turn: float | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Rest-centered overlay shapes: same place as the face, planar turn."""
-        x2, y2 = self._plane(
-            np.asarray(xs, dtype=np.float64),
-            np.asarray(ys, dtype=np.float64),
-            max_turn=max_turn,
-        )
+        lens = plane_xy if wide else face_xy
+        x2, y2 = lens(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
         return self._rest_cx + self._dx + x2, self._rest_cy + self._dy + y2
 
     def map_flat(self, xs: np.ndarray, ys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

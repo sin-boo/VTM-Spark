@@ -58,7 +58,7 @@ from .offsets import dump as dump_offsets
 from .offsets import nudge as nudge_offset
 from .offsets import parse as parse_offsets
 from .osf_cam import OsfCam, OsfFrame
-from .skeleton import follow_skeleton, skeleton_from_still
+from .skeleton import ArmEase, follow_skeleton, skeleton_from_still
 from .travel_box import (
     apply_limits,
     default_travel_box,
@@ -313,6 +313,8 @@ class FaceBench:
         self._hair_rig = None
         self._skeleton: list[dict[str, object]] = []
         self._skeleton_rest: list[dict[str, object]] = []
+        # Elbows ease back toward hanging (soft gravity) across frames.
+        self._arms = ArmEase()
         self._weights = empty_weights()
         self._head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
         self._blink = {"l": 0.0, "r": 0.0}
@@ -725,6 +727,7 @@ class FaceBench:
             skeleton = skeleton_from_still(pts, frame)
         self._skeleton = skeleton
         self._skeleton_rest = [dict(j) for j in skeleton]
+        self._arms.reset()
         self._save_parts()
         self.last_ms = (time.perf_counter() - started) * 1000.0
         vis = draw_label28(frame, pts)
@@ -1253,6 +1256,7 @@ class FaceBench:
         self._rig.reset()
         self._expr.reset()
         self._lids.reset()
+        self._arms.reset()
         with self._lock:
             self._live_pose = None
             self._live_pts = None
@@ -1472,6 +1476,8 @@ class FaceBench:
                         },
                         place=self._rig.place(),
                         rig=self._rig,
+                        share=feel.body_turn(),
+                        arms=self._arms,
                     )
             if iris_rows:
                 # Timed like the mesh: a slower frame rate does not drag the
