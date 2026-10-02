@@ -107,6 +107,14 @@ def test_throws_say_what_to_do_next() -> None:
         assert re.search(r"re-run|install\.bat|-BasePython|PATH|delete", msg, re.I), msg
 
 
+def test_build_checks_the_bundled_fast_decoder_without_failing() -> None:
+    text = _text()
+    assert r'Join-Path $Root "models\decoder\vtm-fast-decoder.pt"' in text
+    # A missing decoder only warns: the stream falls back to the TinyVAE.
+    assert not [m for m in re.findall(r'throw "([^"]*)"', text) if "decoder" in m]
+    assert "WARNING: models\\decoder\\vtm-fast-decoder.pt is missing" in text
+
+
 def test_build_retries_instead_of_asking_the_user() -> None:
     text = _text()
     # npm: a broken node_modules is cleared and reinstalled automatically.

@@ -22,6 +22,8 @@ def new_boot_state() -> dict[str, Any]:
         "error": "",
         "awaiting": "",
         "suggested": "",
+        # backend.gpu_check problem: the card cannot run the AI, so the launch stops here.
+        "gpu_problem": None,
         "stages": {
             key: {"state": "idle", "progress": 0.0, "label": _STAGE_LABELS[key]}
             for key in BOOT_STAGE_KEYS
@@ -74,6 +76,7 @@ def snapshot_boot(state: dict[str, Any]) -> dict[str, Any]:
         "error": str(state.get("error") or ""),
         "awaiting": str(state.get("awaiting") or ""),
         "suggested": str(state.get("suggested") or ""),
+        "gpu_problem": dict(state["gpu_problem"]) if isinstance(state.get("gpu_problem"), dict) else None,
         "stages": stages,
         "progress": frac,
         "progress_label": label,

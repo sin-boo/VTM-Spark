@@ -13,6 +13,7 @@ from backend.engine import (
     gen_cap,
     gen_hold_s,
     interpolate_on,
+    show_fps_max,
 )
 
 
@@ -98,8 +99,16 @@ def test_max_fps_clip() -> None:
     assert _clip_max_fps(None) == 0
     assert _clip_max_fps(-5) == 0
     assert _clip_max_fps("14") == 14
-    # Past the 20 fps display every extra key is thrown away.
-    assert _clip_max_fps(999) == 20
+    assert _clip_max_fps(60) == 60
+    assert _clip_max_fps(999) == 100
+
+
+def test_show_fps_follows_cap_above_20() -> None:
+    # Auto and low caps keep the 20 fps display; a higher cap speeds it up.
+    assert show_fps_max(0) == 20.0
+    assert show_fps_max(12) == 20.0
+    assert show_fps_max(60) == 60.0
+    assert show_fps_max(999) == 100.0
 
 
 def test_gen_hold_keeps_keys_under_cap() -> None:
@@ -127,11 +136,12 @@ def test_auto_cap_fills_the_display_with_mids() -> None:
     assert abs(gen_hold_s(20.0 / 3.0, 10.0, 10.0) - 0.15) < 1e-9
 
 
-def test_gen_cap_limit_matches_display() -> None:
-    from backend.engine import STREAM_MAX_GEN_FPS_LIMIT
+def test_auto_show_fps_matches_display() -> None:
+    from backend.engine import STREAM_MAX_GEN_FPS_LIMIT, STREAM_SHOW_FPS
     from backend.frame_interp import SHOW_FPS_MAX
 
-    assert STREAM_MAX_GEN_FPS_LIMIT == SHOW_FPS_MAX
+    assert STREAM_SHOW_FPS == SHOW_FPS_MAX
+    assert STREAM_MAX_GEN_FPS_LIMIT >= SHOW_FPS_MAX
 
 
 def test_snap_alpha_eases_off_with_motion() -> None:

@@ -288,11 +288,46 @@ ready = {
     },
 }
 
+# MOCK_GPU_PROBLEM=no_nvidia|card_too_old|driver_old|wrong_build|cuda_error: the launch
+# stops on the splash with backend.gpu_check's story, as on a PC whose card cannot run the AI.
+_GPU_PROBLEM_KIND = os.environ.get("MOCK_GPU_PROBLEM", "").strip()
+if _GPU_PROBLEM_KIND:
+    _no_kernel = "CUDA error: no kernel image is available for execution on the device"
+    ready = {
+        **ready,
+        "ready": False,
+        "progress": 0,
+        "progress_label": "Loading resources…",
+        "gpu_problem": {
+            "kind": _GPU_PROBLEM_KIND,
+            "gpu": "" if _GPU_PROBLEM_KIND == "no_nvidia" else "NVIDIA GeForce GTX 1080",
+            "driver": "472.12" if _GPU_PROBLEM_KIND == "driver_old" else "560.94",
+            "cap": "3.5" if _GPU_PROBLEM_KIND == "card_too_old" else "6.1",
+            "build": "CUDA 12.8",
+            "error": (
+                "The NVIDIA driver on your system is too old (found version 11040)."
+                if _GPU_PROBLEM_KIND == "driver_old"
+                else "" if _GPU_PROBLEM_KIND == "no_nvidia" else _no_kernel
+            ),
+            "tried": (
+                []
+                if _GPU_PROBLEM_KIND in ("no_nvidia", "wrong_build")
+                else [
+                    {"what": "build", "build": "cu128", "ok": False, "error": _no_kernel},
+                    {"what": "build", "build": "cu126", "ok": False, "error": _no_kernel},
+                ]
+            )
+            + [{"what": "start_check", "ok": False, "error": _no_kernel}],
+            "repair": _GPU_PROBLEM_KIND == "wrong_build",
+        },
+    }
 
 _settings: dict = {
     "interpolate": True,
     "hold_last": True,
     "compile_model": False,
+    "speed_mode_active": "ultra",
+    "ultra_available": True,
     "show_mesh": False,
     "show_hair": False,
     "show_outline": False,
@@ -351,6 +386,8 @@ def status() -> dict:
         "use_body": True,
         "fast_mode": True,
         "compile_model": False,
+        "speed_mode_active": "ultra",
+        "ultra_available": True,
         "batch2": False,
         "auto_sync_track": True,
         "gen_fps": 0,
@@ -622,6 +659,9 @@ class H(BaseHTTPRequestHandler):
             return
         if p == "/api/reload":
             self._send(200, {"ok": True, "reloading": False})
+            return
+        if p == "/api/gpu/repair":
+            self._send(200, {"ok": True})
             return
         self.do_GET()
 

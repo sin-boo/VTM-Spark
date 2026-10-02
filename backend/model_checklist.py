@@ -44,6 +44,16 @@ CHECKLIST: tuple[ChecklistItem, ...] = (
         auto_download=True,
     ),
     ChecklistItem(
+        id="fast_decoder",
+        label="vtm-fast-decoder.pt",
+        # Downloaded with the DiT. Optional: without it the stream decodes with the slower TinyVAE.
+        purpose="Ultra fast stream decoder",
+        required=False,
+        candidates=("models/decoder/vtm-fast-decoder.pt",),
+        min_bytes=_MIN_BYTES,
+        auto_download=True,
+    ),
+    ChecklistItem(
         id="iris",
         label="iris_pose.pt",
         purpose="Iris / pupil tracker (fine-tune)",
@@ -244,6 +254,7 @@ def scan_models() -> dict[str, Any]:
         "dit_files": extra_dit,
         "preferred_dirs": {
             "dit": "models/dit",
+            "decoder": "models/decoder",
             "trackers": "models/trackers",
             "openseeface": "vendor/tools/openseeface/models",
         },

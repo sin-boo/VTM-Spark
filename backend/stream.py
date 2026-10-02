@@ -58,6 +58,7 @@ from .engine import (
     _clip_cfg,
     _clip_inbetweens,
     _clip_max_fps,
+    show_fps_max,
     effective_inbetweens,
     face_pose_delta,
     gen_cap,
@@ -68,7 +69,6 @@ from .engine import (
 from .load_timing import StageClock, StageMeter
 from .frame_interp import (
     PLAYOUT_QUEUE_MAX,
-    SHOW_FPS_MAX,
     SLOT_SLACK,
     TWEEN_MAX_S,
     ema_blend,
@@ -763,7 +763,7 @@ class StreamRuntime:
         with self._boot_lock:
             if self._boot["ready"]:
                 return snapshot_boot(self._boot)
-            if self._boot["running"]:
+            if self._boot["running"] or self._boot.get("gpu_problem"):
                 return snapshot_boot(self._boot)
             self._boot["running"] = True
             self._boot["error"] = ""
@@ -775,6 +775,15 @@ class StreamRuntime:
         return self.boot_snapshot()
 
     def _run_boot(self) -> None:
+        problem = self._boot_gpu_problem()
+        if problem is not None:
+            # Streaming on the CPU takes seconds a frame: stop on the splash and say why,
+            # what install tried, and what is left (Repair when another build fits).
+            with self._boot_lock:
+                self._boot["gpu_problem"] = problem
+                self._boot["running"] = False
+            self._publish_boot(busy=False, message="This PC's graphics card cannot run VTM Spark")
+            return
         lab_thread = threading.Thread(target=self._boot_lab, name="vtm-boot-lab", daemon=True)
         lab_thread.start()
         try:
@@ -794,6 +803,19 @@ class StreamRuntime:
         self._publish_boot(
             busy=False, message="Ready", progress=0.0, progress_label="", progress_kind=""
         )
+
+    def _boot_gpu_problem(self) -> dict[str, Any] | None:
+        """backend.gpu_check at launch; a broken checker never blocks the desk."""
+        try:
+            from .gpu_check import desk_problem
+
+            problem = desk_problem()
+        except Exception as exc:
+            print(f"[gpu] check skipped: {exc}")
+            return None
+        if problem is not None:
+            _runtime_log(f"[gpu] {problem.get('kind')}: {problem.get('gpu')} ({problem.get('error')})")
+        return problem
 
     def _boot_model(self) -> None:
         self._set_boot_stage(
@@ -1156,10 +1178,19 @@ class StreamRuntime:
             batch_size = max(1, int(getattr(engine, "stream_batch_size", 1) or 1))
         except (TypeError, ValueError):
             batch_size = 1
+        # Read-only: what keys run on (ultra / normal frame graph, or eager)
+        # and whether the fast decoder is installed and healthy.
+        try:
+            speed_active = str(getattr(engine, "active_speed_mode", "eager") or "eager")
+            ultra_ok = bool(getattr(engine, "ultra_available", False))
+        except Exception:
+            speed_active, ultra_ok = "eager", False
         return {
             "compile_status": st,
             "compile_on": st == "on",
             "compile_model": wanted,
+            "speed_mode_active": speed_active,
+            "ultra_available": ultra_ok,
             "compile_detail": detail,
             "keypoint_layout": layout,
             "models_on_gpu": bool(getattr(engine, "_gpu_resident", False)),
@@ -2621,7 +2652,14 @@ class StreamRuntime:
         st = self.status()
         steps = int(st.get("steps") or STREAM_DEFAULT_STEPS)
         boost = bool(st.get("fast_mode")) and bool(getattr(engine, "compile_model", False))
-        return profile_key(gpu, checkpoint_label(engine.checkpoint), steps, boost)
+        graph_ok = getattr(engine, "_graph_ok", None)
+        graph = ""
+        if callable(graph_ok) and graph_ok(steps):
+            graph = str(getattr(engine, "graph_mode", "normal") or "normal")
+            graph_dtype = getattr(engine, "graph_dtype", None)
+            if callable(graph_dtype) and graph_dtype(graph) == "fp32":
+                graph += "-fp32"
+        return profile_key(gpu, checkpoint_label(engine.checkpoint), steps, boost, graph)
 
     def _auto_batch_plan(self) -> int:
         """Batch Auto would stream at, from what this PC measured before."""
@@ -4421,6 +4459,10 @@ class StreamRuntime:
             self._status.get("inbetweens"),
         )
 
+    def _show_fps_max(self) -> float:
+        """Display rate: 20 fps, raised to Max FPS when the cap is set above it."""
+        return show_fps_max((getattr(self, "_status", None) or {}).get("max_fps"))
+
     def _resume_after_gen_hold(self) -> None:
         self._gen_hold_pending = False
         self._schedule_next_frame()
@@ -4583,9 +4625,11 @@ class StreamRuntime:
             # A batch spreads its keys over the call; a lone key only waits
             # for its mids, and that wait is capped (TWEEN_MAX_S).
             span_max = TWEEN_MAX_S if len(keys) == 1 else None
+            show_max = self._show_fps_max()
             count, gap_s = inbetween_pacing(
                 rate,
                 wanted,
+                fps_max=show_max,
                 mid_cost_s=float(self._last_interp_s or 0.0),
                 span_max=span_max,
             )
@@ -4596,7 +4640,7 @@ class StreamRuntime:
             ahead = time.perf_counter() + gap_s
             if float(getattr(self, "_playout_next", 0.0) or 0.0) > ahead:
                 self._playout_next = ahead
-            if count < inbetween_pacing(rate, wanted, span_max=span_max)[0]:
+            if count < inbetween_pacing(rate, wanted, fps_max=show_max, span_max=span_max)[0]:
                 # Skipped for render cost: nothing re-measures it while mids
                 # are off, so let it decay or one slow first mid (cv2 warm-up)
                 # turns them off for the whole stream.
@@ -4606,8 +4650,8 @@ class StreamRuntime:
                     image = self._blend_display_frame(image, keypoints)
                 behind = self._display_behind(interval)
                 if behind:
-                    # A newer call is waiting: drop mids, catch up at 20 fps.
-                    count, gap_s = inbetween_pacing(0.0, 0)
+                    # A newer call is waiting: drop mids, catch up at display rate.
+                    count, gap_s = inbetween_pacing(0.0, 0, fps_max=show_max)
                 if prev is not None and count > 0:
                     make = inbetween_maker(prev, image)
                     for amount in inbetween_ts(count):
@@ -4655,20 +4699,21 @@ class StreamRuntime:
         queued_at = float(first.get("queued_at") or 0.0)
         if queued_at <= 0.0:
             return True
-        return time.perf_counter() - queued_at > max(float(key_interval), 0.05)
+        return time.perf_counter() - queued_at > max(float(key_interval), 1.0 / self._show_fps_max())
 
     def _pace_display(self, gap_s: float = 0.0) -> None:
         """Hold until the next shown picture is due: ``gap_s`` after the last one
-        (20 fps, or a touch over within SLOT_SLACK)."""
+        (20 fps or the Max FPS cap, or a touch over within SLOT_SLACK)."""
         now = time.perf_counter()
-        fps_max = (1.0 / gap_s) if gap_s > 0.0 else SHOW_FPS_MAX
+        show_max = self._show_fps_max()
+        fps_max = (1.0 / gap_s) if gap_s > 0.0 else show_max
         wait, nxt = playout_gap(
             now,
             float(getattr(self, "_playout_next", 0.0) or 0.0),
             # Flooring at 50 ms stretched the 45-47.5 ms gaps inbetween_pacing
             # plans, so a job filled its whole key interval and call jitter
             # piled up as display lag instead of landing in the 5 % margin.
-            fps_max=min(SHOW_FPS_MAX / SLOT_SLACK, fps_max),
+            fps_max=min(show_max / SLOT_SLACK, fps_max),
         )
         self._playout_next = nxt
         if wait <= 0:

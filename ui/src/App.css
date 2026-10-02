@@ -2370,6 +2370,66 @@ html[data-splash] #root {
   text-align: center;
 }
 
+/* The graphics card cannot run the AI: the splash panel widens to tell the story. */
+.krita-splash-panel.is-problem {
+  width: min(56vw, 500px);
+  flex-basis: min(56vw, 500px);
+  justify-content: flex-start;
+  overflow-y: auto;
+}
+
+.krita-splash-panel.is-problem .krita-splash-plate {
+  gap: 16px;
+}
+
+.gpu-problem {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: auto;
+  user-select: text;
+}
+
+.gpu-problem h2 {
+  margin: 0;
+  font-size: 15px;
+  color: #e6a0a0;
+}
+
+.gpu-problem h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mute);
+}
+
+.gpu-problem p,
+.gpu-problem ul {
+  margin: 0;
+}
+
+.gpu-problem ul {
+  padding-left: 18px;
+}
+
+.gpu-problem .gpu-problem-error {
+  margin-top: 4px;
+  color: var(--mute);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.gpu-problem-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 /* First-run language picker: the splash layout, with choices where the bar was. */
 .lang-pick {
   position: relative;

@@ -67,6 +67,87 @@ STREAM_COMPILE_MODE_LADDER = (STREAM_COMPILE_MODE, "default")
 STREAM_COMPILE_WARMUP_RUNS = 2
 # Fast decode: Hybrid TinyVAE (same SD latents). SD-VAE stays for ref encode.
 STREAM_FAST_TINY_VAE = True
+# Fast + 1 step + no CFG: run the whole frame (pose map, DiT, decode) as one
+# CUDA graph (backend.graph_frame). ~10x fewer ms per key on a 5060 Ti.
+# VTM_GRAPH_FRAME=0 falls back to the eager path.
+STREAM_GRAPH_FRAME = os.environ.get("VTM_GRAPH_FRAME", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+# Graph decode ("ultra"): a PixelShuffle decoder distilled from the Hybrid
+# TinyVAE (backend.pixel_decoder, shipped in models/decoder) skips the 768^2
+# conv stage, ~11 ms a key instead of ~17 on a 5060 Ti. Without the file, or
+# once it fails, the graph decodes with the TinyVAE itself ("normal", the
+# eager picture); after that, keys run eager. VTM_FAST_DECODER=0 forces the
+# TinyVAE.
+STREAM_FAST_DECODER_NAME = "vtm-fast-decoder.pt"
+STREAM_FAST_DECODER = os.environ.get("VTM_FAST_DECODER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+# Graph precision: fp16 from Volta (sm_70) on; Pascal and older run fp16 at a
+# fraction of their fp32 rate, so they get an fp32 graph.
+# VTM_GRAPH_DTYPE=fp16|fp32 overrides.
+GRAPH_DTYPES = {"fp16": torch.float16, "fp32": torch.float32}
+STREAM_GRAPH_DTYPE = os.environ.get("VTM_GRAPH_DTYPE", "").strip().lower()
+
+
+def fast_decoder_path() -> Path:
+    from .paths import models_root
+
+    return models_root() / "decoder" / STREAM_FAST_DECODER_NAME
+
+
+def graph_dtype_name(capability: tuple[int, int] | None, override: str = "") -> str:
+    """'fp16' | 'fp32' for the frame graph on a GPU of this compute capability."""
+    if override in GRAPH_DTYPES:
+        return override
+    return "fp16" if capability is not None and tuple(capability) >= (7, 0) else "fp32"
+
+
+def nonfinite_frame_plan(dtype: str, mode: str = "normal") -> str:
+    """Next step after a frame graph returned NaN/Inf.
+
+    'fp32':   fp16 overflowed -- rebuild that mode's graph in fp32 and re-run the frame.
+    'normal': Ultra is bad in fp32 too, so suspect the fast decoder -- drop it for the
+              session and re-run on the TinyVAE graph (~17 ms/key, not eager's ~130).
+    'eager':  the Normal graph is bad in fp32 too -- keys leave the graph for the session.
+    """
+    if dtype == "fp16":
+        return "fp32"
+    return "normal" if mode == "ultra" else "eager"
+
+
+def finite_stream_inputs(
+    kps: np.ndarray, hair: np.ndarray | torch.Tensor | None
+) -> tuple[np.ndarray, np.ndarray | torch.Tensor | None]:
+    """Hide NaN/Inf keypoints and zero NaN/Inf hair before a key enters the frame graph.
+
+    A bad tracker frame would otherwise come out of the graph non-finite and be taken
+    for an fp16 overflow or a broken decoder, costing graph rebuilds and Ultra fast.
+    """
+    k = np.asarray(kps, dtype=np.float32)
+    if not np.isfinite(k).all():
+        k = k.copy()
+        k[~np.isfinite(k).all(axis=-1)] = 0.0  # (x, y, score, visible) = 0: point hidden
+    if hair is None:
+        return k, None
+    if isinstance(hair, torch.Tensor):
+        return k, torch.nan_to_num(hair, nan=0.0, posinf=0.0, neginf=0.0)
+    h = np.asarray(hair, dtype=np.float32)
+    if not np.isfinite(h).all():
+        h = np.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
+    return k, h
+
+
+def _is_oom(exc: BaseException) -> bool:
+    return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
+
+
 STREAM_FIXED_SEED = 42
 # Poses denoised per DiT call (better GPU occupancy, more keys/s, more lag).
 # Past 4 a 5060 Ti gains ~10% keys/s for 50% more VRAM, and the display
@@ -85,9 +166,12 @@ STREAM_INTERPOLATE = True
 # Cap on generated keys per second (0 = Auto). Idle time between keys is real
 # idle time, so a cap leaves GPU for other apps.
 STREAM_MAX_GEN_FPS = 0
-# = frame_interp.SHOW_FPS_MAX. The preview / virtual cam show at most this many
-# pictures a second, so any key past it is drawn and then thrown away.
-STREAM_MAX_GEN_FPS_LIMIT = 20
+# = frame_interp.SHOW_FPS_MAX. Auto fills this many shown pictures a second.
+STREAM_SHOW_FPS = 20.0
+# Highest Max FPS the slider allows. Above STREAM_SHOW_FPS the display speeds
+# up to the cap (show_fps_max), so the extra keys are shown, not thrown away.
+# The graph + Ultra decoder reaches ~70-80 keys/s on a 5060 Ti.
+STREAM_MAX_GEN_FPS_LIMIT = 100
 STREAM_MIN_BLEND = 0.05
 STREAM_MAX_BLEND = 1.0
 # Start the next DiT sample from the last generated latent (img2img hold).
@@ -205,13 +289,18 @@ def auto_gen_fps(enabled: object, count: object) -> float:
     """
     if interpolate_on(enabled) and _clip_inbetweens(count) < 0:
         return STREAM_AUTO_KEY_FPS
-    return float(STREAM_MAX_GEN_FPS_LIMIT) / float(effective_inbetweens(enabled, count) + 1)
+    return STREAM_SHOW_FPS / float(effective_inbetweens(enabled, count) + 1)
 
 
 def gen_cap(max_fps: object, enabled: object, count: object) -> float:
     """The key rate the stream is held to: the user's cap, else Auto."""
     cap = _clip_max_fps(max_fps)
     return float(cap) if cap > 0 else auto_gen_fps(enabled, count)
+
+
+def show_fps_max(max_fps: object) -> float:
+    """Pictures a second the display may show: 20, or the Max FPS cap above that."""
+    return max(STREAM_SHOW_FPS, float(_clip_max_fps(max_fps)))
 
 
 # Face travel in norm_crop. Below tight = full hold. Above loose = drop hold
@@ -1312,6 +1401,18 @@ class StreamEngine:
         self._decode_lock = threading.Lock()
         self._decode_stream: "torch.cuda.Stream | None" = None
         self.image_size = IMAGE_SIZE
+        # Whole-frame CUDA graph (Fast, 1 step, no CFG), one per graph mode.
+        # Built at warmup or on the first eligible key; dropped whenever
+        # weights move or change.
+        self._graph_frames: dict[str, Any] = {}
+        # Whether models/decoder/vtm-fast-decoder.pt exists; read once per load, not per key.
+        self._fast_decoder_present: bool | None = None
+        self._graph_failed = False
+        self._ultra_failed = False
+        # A compiled graph failed: build the rest of this session's graphs uncompiled.
+        self._graph_skip_compile = False
+        # Modes whose fp16 graph gave a NaN/Inf frame: rebuilt in fp32.
+        self._graph_fp32_modes: set[str] = set()
 
     def set_stream_batch_size(self, batch_size: int) -> None:
         """Poses per DiT forward (1..STREAM_BATCH_MAX)."""
@@ -1364,6 +1465,11 @@ class StreamEngine:
         else:
             parts.append("cpu")
         parts.append(f"compile:{self.compile_status}")
+        gf = self._graph_frame
+        if gf is not None:
+            parts.append(f"graph:{getattr(gf, 'decoder_name', 'tinyvae')}/{getattr(gf, 'dtype_name', 'fp16')}")
+        elif self._graph_failed:
+            parts.append("graph-fail")
         if self.vae_tiny is not None:
             label = (self._tiny_vae_id or "tiny").split("/")[-1]
             parts.append(f"tinyvae:{label}")
@@ -1387,6 +1493,8 @@ class StreamEngine:
         if not _triton_available():
             return "fail"
         if self._model_compiled and self._compile_verified:
+            return "on"
+        if self._graph_frame is not None and self._graph_frame.compiled:
             return "on"
         return "pending"
 
@@ -1416,6 +1524,8 @@ class StreamEngine:
                 self._restore_eager_model()
             except Exception:
                 pass
+            with self._cuda_lock:  # not mid-capture on the stream thread
+                self._drop_graph_frame()
             self._compile_failed = False
             self._compile_verified = False
 
@@ -1429,6 +1539,12 @@ class StreamEngine:
             self._restore_eager_model()
         except Exception:
             pass
+        with self._cuda_lock:  # not mid-capture on the stream thread
+            self._drop_graph_frame()
+            # A compile failure may be what turned the graph or Ultra off: retry both.
+            self._graph_failed = False
+            self._ultra_failed = False
+            self._graph_skip_compile = False
         self._compile_failed = False
         self._compile_verified = False
 
@@ -1527,6 +1643,244 @@ class StreamEngine:
         if self.fast_mode and self._ensure_tiny_vae():
             return decode_tiny_vae(self.vae_tiny, latents), "tiny"
         return decode_sd_vae(self.vae, latents), "sd"
+
+    def _graph_ok(
+        self,
+        steps: int | None = None,
+        pose_cfg: float | None = None,
+        id_cfg: float | None = None,
+    ) -> bool:
+        """Whether keys go through the whole-frame CUDA graph (see graph_frame)."""
+        if not (STREAM_GRAPH_FRAME and self.fast_mode and self.device.type == "cuda"):
+            return False
+        if self._graph_failed or not STREAM_FAST_TINY_VAE:
+            return False
+        if self._tiny_vae_failed and not self.ultra_available:
+            # Normal decodes with the TinyVAE; Ultra has its own local decoder, so an
+            # offline PC whose TinyVAE download failed still gets the graph.
+            return False
+        if int(steps if steps is not None else self.num_steps) != 1:
+            return False
+        if STREAM_FAST_DISABLE_CFG:
+            pose_cfg = id_cfg = 1.0
+        pose = float(pose_cfg if pose_cfg is not None else self.pose_cfg_scale)
+        ident = float(id_cfg if id_cfg is not None else self.id_cfg_scale)
+        return abs(pose - 1.0) < 1e-6 and abs(ident - 1.0) < 1e-6
+
+    @property
+    def ultra_available(self) -> bool:
+        """The distilled fast decoder is installed and has not failed this session."""
+        if self._fast_decoder_present is None:
+            self._fast_decoder_present = fast_decoder_path().is_file()
+        return bool(STREAM_FAST_DECODER and not self._ultra_failed and self._fast_decoder_present)
+
+    @property
+    def graph_mode(self) -> str:
+        """Decoder the frame graph runs: 'ultra' (fast decoder) or 'normal' (TinyVAE fallback)."""
+        return "ultra" if self.ultra_available else "normal"
+
+    @property
+    def active_speed_mode(self) -> str:
+        """What keys run on right now: the graph mode, or 'eager' when they skip the graph."""
+        return self.graph_mode if self._graph_ok() else "eager"
+
+    def graph_dtype(self, mode: str) -> str:
+        """'fp16' | 'fp32' for this mode's frame graph."""
+        if mode in self._graph_fp32_modes:
+            return "fp32"
+        cap = None
+        if self.device.type == "cuda":
+            try:
+                cap = torch.cuda.get_device_capability(self.device)
+            except Exception:
+                cap = None
+        return graph_dtype_name(cap, STREAM_GRAPH_DTYPE)
+
+    @property
+    def _graph_frame(self):
+        return self._graph_frames.get(self.graph_mode)
+
+    def _graph_decoder(self, mode: str):
+        """(decoder module, label) for a graph mode."""
+        from .graph_frame import TinyVaeDecode
+
+        if mode == "ultra":
+            from .pixel_decoder import PixelShuffleDecoder
+
+            path = fast_decoder_path()
+            return PixelShuffleDecoder.load(path).to(self.device), path.name
+        return TinyVaeDecode(self.vae_tiny), "tinyvae"
+
+    def _graph_compile_mode(self) -> str | None:
+        """torch.compile mode for the frame graph, or None to capture it uncompiled."""
+        if self._graph_skip_compile or not self.compile_model or not hasattr(torch, "compile"):
+            return None
+        if self.device.type != "cuda":
+            return None
+        if not _triton_available():
+            return None
+        try:
+            if torch.cuda.get_device_capability(self.device) < (7, 0):
+                return None
+        except Exception:
+            return None
+        return STREAM_COMPILE_MODE
+
+    def _build_graph_frame(self, mode: str, dtype: str):
+        from .graph_frame import GraphedFrame
+
+        compile_mode = self._graph_compile_mode()
+        decoder, decoder_name = self._graph_decoder(mode)
+        print(f"[graph] building {mode} frame graph ({dtype}, decoder={decoder_name}, "
+              f"compile={compile_mode or 'off'}) ...")
+        gf = GraphedFrame(
+            self._eager_model if self._eager_model is not None else self.model,
+            decoder,
+            seed=STREAM_FIXED_SEED,
+            dtype=GRAPH_DTYPES[dtype],
+            compile_mode=compile_mode,
+        )
+        gf.mode, gf.dtype_name, gf.decoder_name = mode, dtype, decoder_name
+        return gf
+
+    def _ensure_graph_frame(self, batch_size: int | None = None):
+        """Build (and capture ``batch_size``) the frame graph for the current graph mode.
+
+        None if it cannot run. Ultra that fails drops to Normal; Normal that fails
+        drops to the eager path.
+        """
+        if self._graph_failed:
+            return None
+        mode = self.graph_mode
+        gf = self._graph_frames.get(mode)
+        failure: BaseException | None = None
+        if gf is None:
+            if self.model is None or (mode == "normal" and not self._ensure_tiny_vae()):
+                return None
+            try:
+                gf = self._build_graph_frame(mode, self.graph_dtype(mode))
+                self._graph_frames[mode] = gf
+            except Exception as exc:
+                failure = exc.with_traceback(None)
+        if failure is None and batch_size is not None:
+            try:
+                t0 = time.perf_counter()
+                with torch.inference_mode():
+                    gf.prepare(int(batch_size))
+                print(f"[graph] {mode} batch={int(batch_size)} captured in {time.perf_counter() - t0:.1f}s")
+            except Exception as exc:
+                failure = exc.with_traceback(None)
+        if failure is None:
+            return gf
+        # Out of the `except` (and its traceback) so the failed graph's pool can be freed.
+        gf = None
+        return self._graph_mode_failed(mode, failure, batch_size)
+
+    def _graph_mode_failed(self, mode: str, exc: BaseException, batch_size: int | None):
+        self._drop_graph_frame(mode)
+        if _is_oom(exc):
+            if batch_size is not None and int(batch_size) > 1:
+                # Not a broken mode: let the batch tuner / OOM recovery step the batch down.
+                raise exc
+            # Batch 1 cannot step down: the graph's own fp16 copies do not fit next to
+            # the eager model (small GPU, or OBS / a game holding VRAM). Rebuilding on
+            # every key would fail every key, so keys run eager for the session.
+            self._graph_fallback(f"out of GPU memory at batch 1: {exc}")
+            return None
+        if self._graph_compile_mode() is not None:
+            # Inductor / Triton break with some drivers and toolchains; that is not the
+            # decoder's or the graph's fault, so rebuild uncompiled before blaming them.
+            self._graph_skip_compile = True
+            _clear_cuda_errors()
+            print(f"[graph] compiled {mode} graph failed, rebuilding without compile: {exc}")
+            return self._ensure_graph_frame(batch_size)
+        if mode == "ultra":
+            self._ultra_failed = True
+            _clear_cuda_errors()
+            print(f"[graph] fast decoder unavailable, using the TinyVAE graph: {exc}")
+            return self._ensure_graph_frame(batch_size)
+        self._graph_fallback(exc)
+        return None
+
+    def _graph_fallback(self, reason: BaseException | str) -> None:
+        """Stay on the eager path for this session after a graph build/replay error."""
+        self._graph_failed = True
+        self._drop_graph_frame()
+        _clear_cuda_errors()
+        print(f"[graph] disabled, using the eager path: {reason}")
+
+    def _run_graph_frame(
+        self,
+        kps_model: np.ndarray,
+        hair_maps: np.ndarray | torch.Tensor | None,
+        prev: torch.Tensor | None,
+        start_t: float,
+    ) -> tuple[torch.Tensor, np.ndarray, float] | None:
+        """One key through the frame graph: (latents, uint8 images, seconds), or None.
+
+        None means run this key eager. A NaN/Inf frame goes by ``nonfinite_frame_plan``:
+        an fp16 graph is rebuilt in fp32 and the key re-run; a bad fp32 Ultra graph hands
+        over to Normal; a bad fp32 Normal graph turns the graph off.
+        """
+        kps_model, hair_maps = finite_stream_inputs(kps_model, hair_maps)
+        gf = self._ensure_graph_frame()
+        if gf is None:
+            return None
+        mode, dtype = gf.mode, gf.dtype_name
+        failure: BaseException | None = None
+        try:
+            t0 = time.perf_counter()
+            latents, images, finite = gf.run(
+                kps_target=kps_model,
+                kps_ref=self._ref_keypoints_model,
+                ref_latent=self._ref_latent,
+                ref_face_latent=self._ref_face_latent,
+                hair_maps=hair_maps,
+                last_latent=prev,
+                start_t=start_t,
+            )
+            seconds = time.perf_counter() - t0
+        except Exception as exc:
+            failure = exc.with_traceback(None)
+        if failure is not None:
+            gf = None  # outside `except`, so the drop below can free its memory pool
+            # A new batch size is captured inside run(), so compile and OOM failures land
+            # here too; _graph_mode_failed sorts them out.
+            bsz = int(kps_model.shape[0]) if np.ndim(kps_model) == 3 else 1
+            if self._graph_mode_failed(mode, failure, bsz) is None:
+                return None
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+        if finite:
+            return latents, images, seconds
+        del gf
+        plan = nonfinite_frame_plan(dtype, mode)
+        if plan == "fp32":
+            print(f"[graph] {mode} frame came out NaN/Inf in fp16, rebuilding that graph in fp32")
+            self._graph_fp32_modes.add(mode)
+            self._drop_graph_frame(mode)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+        if plan == "normal":
+            print("[graph] Ultra frame came out NaN/Inf in fp32, using the Normal decoder")
+            self._ultra_failed = True
+            self._drop_graph_frame(mode)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+        self._graph_fallback(f"{mode} frame came out NaN/Inf in {dtype}")
+        return None
+
+    def _drop_graph_frame(self, mode: str | None = None) -> None:
+        """Free one mode's frame graph, or all of them."""
+        if mode is None:
+            if not self._graph_frames:
+                return
+            self._graph_frames.clear()
+        elif self._graph_frames.pop(mode, None) is None:
+            return
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     def _restore_eager_model(self) -> None:
         eager = self._eager_model
@@ -1674,6 +2028,12 @@ class StreamEngine:
             self._restore_eager_model()
         except Exception:
             pass
+        self._drop_graph_frame()
+        self._graph_failed = False
+        self._ultra_failed = False
+        self._graph_skip_compile = False
+        self._fast_decoder_present = None
+        self._graph_fp32_modes.clear()
         self.model = None
         self._eager_model = None
         self._model_compiled = False
@@ -1716,6 +2076,7 @@ class StreamEngine:
                 self._restore_eager_model()
             except Exception:
                 pass
+            self._drop_graph_frame()
             cpu = torch.device("cpu")
             self.model = _mod_to(self.model, cpu)
             self._eager_model = self.model
@@ -2195,6 +2556,9 @@ class StreamEngine:
         keys: list[str] = []
         if self.fast_mode and STREAM_FAST_TINY_VAE and self.vae_tiny is None:
             keys.append("tiny_vae")
+        if self._graph_ok():
+            keys.append("graph")
+            return keys
         will_compile = (
             self.fast_mode
             and self.compile_model
@@ -2249,10 +2613,12 @@ class StreamEngine:
                 if "tiny_vae" in stages:
                     _stage("tiny_vae", "Loading fast decoder")
                 self._ensure_tiny_vae()
+            use_graph = self._graph_ok(*self._resolve_generate_settings(num_steps))
 
         # Compile outside the lock — inductor can take a long time and was
         # blocking Apply ref ("Encoding reference…") the whole time.
-        if self.fast_mode:
+        # The frame graph compiles its own fp16 copy, so skip the fp32 wrap.
+        if self.fast_mode and not use_graph:
             if "compile_wrap" in stages:
                 _stage("compile_wrap", "Compiling model")
             self._maybe_compile_model(STREAM_COMPILE_MODE)
@@ -2267,6 +2633,20 @@ class StreamEngine:
             self.ensure_gpu()
             steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
             warm_steps = max(1, min(steps, 4))
+
+            if use_graph and self._graph_ok(steps, pose_cfg, id_cfg):
+                _stage("graph", "Preparing fast path")
+                if self._ensure_graph_frame(warm_batch) is not None:
+                    # One key now, so a NaN/Inf (fp16 overflow, bad decoder) is rebuilt
+                    # here rather than freezing the first streamed key.
+                    probe = self._ref_keypoints_model
+                    if warm_batch > 1:
+                        probe = np.stack([probe] * warm_batch, axis=0)
+                    with torch.inference_mode():
+                        ok = self._run_graph_frame(probe, None, None, 0.0) is not None
+                    if ok:
+                        _stage("done", "Ready")
+                        return
 
             def _run_denoise_warmups(
                 runs: int, *, batch_size: int = 1
@@ -2483,10 +2863,14 @@ class StreamEngine:
         )
 
         t1 = time.perf_counter()
-        with torch.inference_mode():
-            images_arr, decode_kind = self._decode_latents(result["latents"])
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
+        if result.get("images_u8") is not None:
+            # Frame graph decoded inside the same replay; its time is in denoise_s.
+            images_arr, decode_kind = result["images_u8"], "tiny-graph"
+        else:
+            with torch.inference_mode():
+                images_arr, decode_kind = self._decode_latents(result["latents"])
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
         decode_s = time.perf_counter() - t1
 
         elapsed = time.perf_counter() - result["start"]
@@ -2687,6 +3071,25 @@ class StreamEngine:
                 start_t = 0.0
             else:
                 prev = anchor_hold_latent(prev, self._ref_latent, pull=pull)
+        if self._graph_ok(steps, pose_cfg, id_cfg):
+            graphed = self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+            if graphed is not None:
+                latents, images_u8, denoise_s = graphed
+                self._last_gen_latent = latents[-1:].detach().clone()
+                self._last_hold_kps = now_kps.copy()
+                self._hold_chain = chain + 1 if prev is not None else 0
+                return {
+                    "latents": latents,
+                    "images_u8": images_u8,
+                    "denoise_s": denoise_s,
+                    "start": start,
+                    "steps": steps,
+                    "pose_cfg": pose_cfg,
+                    "id_cfg": id_cfg,
+                    "keypoints_used": kps_batch,
+                    "batch": int(kps_batch.shape[0]),
+                    "hold_last": bool(prev is not None),
+                }
         with torch.inference_mode():
             t0 = time.perf_counter()
             latents = denoise_keypoint(
@@ -2710,8 +3113,10 @@ class StreamEngine:
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
             denoise_s = time.perf_counter() - t0
-        # Clone so decode (side CUDA stream) does not race the next mix.
-        self._last_gen_latent = latents[-1:].detach().clone()
+        # Clone so decode (side CUDA stream) does not race the next mix. A NaN/Inf key
+        # is not held, or every later hold-last key would inherit it.
+        last = latents[-1:].detach()
+        self._last_gen_latent = last.clone() if bool(torch.isfinite(last).all()) else None
         self._last_hold_kps = now_kps.copy()
         self._hold_chain = chain + 1 if prev is not None else 0
 

@@ -225,6 +225,15 @@ export function ControlRail(props: Props) {
   const batchTitle = batchRates.length
     ? `${t('perf.batchTitle')}\n${t('perf.batchRates', { list: batchRates.join(' · ') })}`
     : t('perf.batchTitle')
+  // Which decoder is really running (read-only; shown on the Compile light).
+  const decoderNote =
+    s?.speed_mode_active === 'ultra'
+      ? t('perf.decoderUltra')
+      : s?.speed_mode_active === 'normal'
+        ? t('perf.decoderNormal')
+        : s?.speed_mode_active === 'eager'
+          ? t('perf.decoderEager')
+          : ''
   const ifm = props.lab?.ifm
   const destIp = ifm?.primary || ''
   const ifmLine = ifmListenLine(t, ifm)
@@ -795,7 +804,7 @@ export function ControlRail(props: Props) {
                   <input
                     type="range"
                     min={0}
-                    max={20}
+                    max={100}
                     step={1}
                     value={s?.max_fps ?? STREAM_DEFAULTS.max_fps}
                     title={t('perf.maxFpsTitle')}
@@ -894,7 +903,7 @@ export function ControlRail(props: Props) {
                             : 'off'
                   }
                   lightTitle={
-                    s?.compile_detail
+                    (s?.compile_detail
                       ? tr(s.compile_detail)
                       : s?.fast_warming && !s?.compile_on
                         ? t('perf.boostBuilding')
@@ -908,7 +917,7 @@ export function ControlRail(props: Props) {
                                   : s?.compile_model
                                     ? 'Speed boost builds when the stream starts'
                                     : 'Speed boost off',
-                          )
+                          )) + (decoderNote ? ` · ${decoderNote}` : '')
                   }
                 />
               </div>

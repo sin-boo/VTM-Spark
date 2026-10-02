@@ -43,8 +43,12 @@ def profile_path() -> Path:
     return data_dir() / PROFILE_NAME
 
 
-def profile_key(gpu: str, checkpoint: str, steps: int, compiled: bool) -> str:
-    return f"{gpu or 'cpu'}|{checkpoint}|steps={int(steps)}|{'boost' if compiled else 'eager'}"
+def profile_key(gpu: str, checkpoint: str, steps: int, compiled: bool, graph: str = "") -> str:
+    """``graph``: frame-graph mode ("ultra" / "normal", "-fp32" added for an fp32 graph) when
+    keys run as one CUDA graph (engine.graph_frame), which is ~10x cheaper per call than the
+    eager path; each keeps its own timings."""
+    key = f"{gpu or 'cpu'}|{checkpoint}|steps={int(steps)}|{'boost' if compiled else 'eager'}"
+    return f"{key}|graph-{graph}" if graph else key
 
 
 def _read(path: Path) -> dict[str, Any]:

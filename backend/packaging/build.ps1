@@ -1,4 +1,4 @@
-﻿# VTM Spark setup: builds the UI and ensures .venv-build has deps (CUDA torch cu128 last).
+﻿# VTM Spark setup: builds the UI and ensures .venv-build has deps (CUDA torch for this GPU last).
 # run.exe runs the desk from source with that venv.
 # DiT weights download into models/dit on install.bat / first launch.
 param(
@@ -351,8 +351,31 @@ function Invoke-Pip {
   return [int]$code
 }
 
+# torch build tag (cu128 / cu126) of the installed wheel matches $Build.
+function Test-TorchBuild {
+  param([string]$Build)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $ver = (& $Py -c "import torch; print(torch.__version__)" 2>$null | Select-Object -Last 1)
+  $ErrorActionPreference = $prev
+  return ("$ver".Trim() -match ("\+" + [regex]::Escape($Build) + "$"))
+}
+
+# backend.gpu_check (stdlib only, so it runs before torch exists): which torch build
+# fits this graphics card, and whether the card really runs the installed one.
+function Invoke-GpuCheck {
+  param([string[]]$CliArgs)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $out = & $Py -c "import sys; sys.path.insert(0, sys.argv.pop(1)); from backend.gpu_check import main; raise SystemExit(main(sys.argv[1:]))" $Root @CliArgs 2>&1
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $prev
+  return @{ Code = $code; Out = @($out | ForEach-Object { "$_" }) }
+}
+
 function Install-CudaTorch {
-  Write-Host "==> Ensuring CUDA torch (cu128)"
+  param([string]$Build = "cu128")
+  Write-Host "==> Ensuring CUDA torch ($Build)"
   Write-LongStepHint "CUDA wheels are large (often 2+ GB). Downloads can take several minutes."
   Write-LongStepHint "uv shows download progress below."
   # Remove an old (e.g. CPU-only) torch first, but only what is really there:
@@ -365,11 +388,11 @@ function Install-CudaTorch {
       -Activity "removing the previous torch ($($oldTorch -join ', '))" `
       -HeartbeatSeconds 8
   }
-  # Avoid -q so failures and download progress stay visible. Index-only from pytorch cu128.
+  # Avoid -q so failures and download progress stay visible. Index-only from pytorch.
   $code = Invoke-Pip -PipArgs @(
     "install", "torch", "torchvision",
-    "--index-url", "https://download.pytorch.org/whl/cu128"
-  ) -Activity "CUDA torch cu128 download/install" -HeartbeatSeconds 10
+    "--index-url", "https://download.pytorch.org/whl/$Build"
+  ) -Activity "CUDA torch $Build download/install" -HeartbeatSeconds 10
   if ($code -ne 0) {
     throw "CUDA torch install failed (uv pip exit $code) - see uv output above. Check your internet connection and free disk space (2+ GB), then re-run install.bat."
   }
@@ -378,11 +401,19 @@ function Install-CudaTorch {
   }
 }
 
+# CUDA 12.8 builds run RTX 20 and newer (Blackwell too) but dropped GTX 900 / 10;
+# CUDA 12.6 builds still run those. Pick by the card nvidia-smi reports.
+$TorchBuild = "cu128"
+$want = Invoke-GpuCheck @("want-build")
+$wantLine = ($want.Out | Where-Object { $_ -match '^cu\d+$' } | Select-Object -Last 1)
+if ($want.Code -eq 0 -and $wantLine) { $TorchBuild = "$wantLine".Trim() }
+Write-Host "==> torch build for this graphics card: $TorchBuild"
+
 $NeedDeps = -not $SkipDeps
 $DidInstallDeps = $false
 if (-not $NeedDeps) {
   Write-Host "==> -SkipDeps set - checking imports only"
-  if (-not (Test-RuntimeImports) -or -not (Test-CudaTorch)) {
+  if (-not (Test-RuntimeImports) -or -not (Test-CudaTorch) -or -not (Test-TorchBuild $TorchBuild)) {
     Write-Host "    imports/CUDA incomplete - installing deps anyway (includes pyvirtualcam)"
     $NeedDeps = $true
   } else {
@@ -394,13 +425,13 @@ if ($NeedDeps) {
   $DidInstallDeps = $true
   # Install CUDA torch FIRST so transformers/diffusers/ultralytics see it as satisfied
   # and do not pull a CPU torch from PyPI.
-  if (-not (Test-CudaTorch)) {
-    Install-CudaTorch
+  if (-not (Test-CudaTorch) -or -not (Test-TorchBuild $TorchBuild)) {
+    Install-CudaTorch -Build $TorchBuild
   } else {
-    Write-Host "==> CUDA torch wheel already present"
+    Write-Host "==> CUDA torch wheel ($TorchBuild) already present"
   }
 
-  Write-Host "==> Installing requirements (torch already provided by cu128 wheel)"
+  Write-Host "==> Installing requirements (torch already provided by the $TorchBuild wheel)"
   Write-LongStepHint "Installing Python deps from requirements.txt (can take a few minutes)..."
   $code = Invoke-Pip -PipArgs @(
     "install", "-r", "$Root\requirements.txt"
@@ -408,9 +439,9 @@ if ($NeedDeps) {
   if ($code -ne 0) { throw "uv pip install -r requirements.txt failed (exit $code) - see uv output above. Check your internet connection and re-run install.bat; if it keeps failing, delete .venv-build and re-run." }
 
   # If anything clobbered the CUDA wheel, put it back.
-  if (-not (Test-CudaTorch)) {
-    Write-Host "==> torch was replaced by a CPU wheel - reinstalling cu128"
-    Install-CudaTorch
+  if (-not (Test-CudaTorch) -or -not (Test-TorchBuild $TorchBuild)) {
+    Write-Host "==> torch was replaced by another wheel - reinstalling $TorchBuild"
+    Install-CudaTorch -Build $TorchBuild
   }
 
   # Windows: official PyPI triton has no wheels; torch.compile needs triton-windows.
@@ -427,8 +458,35 @@ if ($NeedDeps) {
 }
 
 if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages - re-run install.bat without -SkipDeps; if it persists, delete .venv-build and re-run install.bat." }
-if (-not (Test-CudaTorch)) { throw "Build venv must have torch+cu128 - delete .venv-build and re-run install.bat." }
+if (-not (Test-CudaTorch)) { throw "Build venv must have CUDA torch - delete .venv-build and re-run install.bat." }
 Write-Host "    runtime imports OK (CUDA torch)"
+
+# A CUDA wheel is not a working card: make it run real work. If it fails and the
+# other torch build supports the card, put that one in and test again. What was
+# tried goes to models\gpu_check.json; the desk shows the same story at start.
+Write-Host "==> Testing the graphics card"
+$gpu = Invoke-GpuCheck @("verify")
+$retryLine = ($gpu.Out | Where-Object { $_ -match '^retry:cu\d+$' } | Select-Object -Last 1)
+$gpu.Out | Where-Object { $_ -notmatch '^retry:' } | ForEach-Object { Write-Host $_ }
+if ($gpu.Code -eq 3 -and $retryLine) {
+  $retry = "$retryLine".Trim() -replace '^retry:', ''
+  Write-Host "==> Trying the $retry torch build for this graphics card"
+  Install-CudaTorch -Build $retry
+  $gpu = Invoke-GpuCheck @("verify")
+  $gpu.Out | Where-Object { $_ -notmatch '^retry:' } | ForEach-Object { Write-Host $_ }
+}
+if ($gpu.Code -ne 0) {
+  Write-Host "    The desk will show this when it starts. The rest of the install continues."
+}
+
+# The Ultra fast stream decoder comes down from the Hub with the DiT.
+# Without it the stream still runs, decoding with the slower TinyVAE.
+$FastDecoder = Join-Path $Root "models\decoder\vtm-fast-decoder.pt"
+if ((Test-Path -LiteralPath $FastDecoder) -and (Get-Item -LiteralPath $FastDecoder).Length -ge 1000000) {
+  Write-Host "    fast decoder OK (models\decoder\vtm-fast-decoder.pt)"
+} else {
+  Write-Host "    WARNING: models\decoder\vtm-fast-decoder.pt is missing - VTM Spark downloads it on its next start; until then the stream decodes with the slower TinyVAE."
+}
 
 Write-Host ""
 Write-Host "==> Done - use run.exe to open the operator desk."
