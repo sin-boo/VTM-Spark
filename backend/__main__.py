@@ -53,6 +53,46 @@ def _file_log(msg: str) -> None:
         pass
 
 
+def desk_thread_env(cpu_count: int | None) -> dict[str, str]:
+    """CPU thread caps for torch / BLAS in the desk and Track Lab (which inherits them).
+
+    Half the logical CPUs (about one per core), at most 4: a game wants the cores too, and
+    a flat 4 per pool in two processes is more threads than a 4-core PC has. OpenCV ignores
+    these; see ``opencv_threads``.
+    """
+    n = str(max(1, min(4, int(cpu_count or 4) // 2)))
+    keys = (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "TORCH_NUM_THREADS",
+    )
+    env = {key: n for key in keys}
+    # torch's Intel OpenMP spins each worker 200 ms after every parallel op: a small CPU op
+    # 30 times a second kept ~3 cores busy (25% of one with 0).
+    env["KMP_BLOCKTIME"] = "0"
+    return env
+
+
+def opencv_threads(cpu_count: int | None) -> int:
+    """OpenCV pool size for the desk (in-betweens: Farneback flow + remaps at 768^2).
+
+    Its default is one thread per logical CPU. On 6 CPUs, 4+ threads took a mid from 28 ms
+    to 22 ms but cost 35-70 ms of CPU instead of 28: CPU a game needs, for 6 ms.
+    """
+    return max(1, min(2, int(cpu_count or 4) // 4))
+
+
+def _cap_opencv_threads() -> None:
+    try:
+        import cv2
+
+        cv2.setNumThreads(opencv_threads(os.cpu_count()))  # process-wide
+    except Exception:
+        pass
+
+
 def _port_in_use(host: str, port: int) -> bool:
     """True if something already accepts connections on host:port."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -194,6 +234,7 @@ def _run_uvicorn(host: str, port: int, *, mount_ui: bool) -> None:
         from backend.api import app, configure_runtime, mount_frontend
 
         _file_log("imported backend.api")
+        _cap_opencv_threads()
         configure_runtime()
         _file_log("runtime configured")
         if mount_ui:
@@ -298,15 +339,12 @@ def main(argv: list[str] | None = None) -> int:
     _file_log(f"starting ui={args.ui}")
 
     # Cap CPU thread oversubscription before torch/onnx import (helps RAM/CPU thrash).
-    for key, val in (
-        ("OMP_NUM_THREADS", "4"),
-        ("MKL_NUM_THREADS", "4"),
-        ("OPENBLAS_NUM_THREADS", "4"),
-        ("NUMEXPR_NUM_THREADS", "4"),
-        ("TORCH_NUM_THREADS", "4"),
-    ):
+    # Track Lab inherits this environment.
+    for key, val in desk_thread_env(os.cpu_count()).items():
         os.environ.setdefault(key, val)
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if os.name != "nt":
+        # Windows torch has no expandable segments; there it only printed a warning.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if os.name == "nt":
         os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
     # GPU pick (Settings → GPU) has to land before anything initialises CUDA.

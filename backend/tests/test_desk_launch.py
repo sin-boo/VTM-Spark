@@ -101,3 +101,19 @@ def test_fast_kill_clears_mock_boot() -> None:
     assert "_mock_boot" in fast
     assert "LocalPort 8765" in fast
     assert r"-m\s+backend" in fast
+
+
+def test_thread_caps_leave_cores_for_a_game() -> None:
+    def pools(cpus: int | None) -> set[str]:
+        env = main.desk_thread_env(cpus)
+        return {v for k, v in env.items() if k.endswith("_NUM_THREADS")}
+
+    assert pools(4) == {"2"}
+    assert pools(12) == {"4"}
+    assert pools(32) == {"4"}
+    assert pools(1) == {"1"}
+    assert pools(None) == {"2"}
+    env = main.desk_thread_env(8)
+    assert {"OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS"} <= set(env)
+    assert env["KMP_BLOCKTIME"] == "0"
+    assert [main.opencv_threads(n) for n in (1, 4, 8, 32, None)] == [1, 1, 2, 2, 1]
