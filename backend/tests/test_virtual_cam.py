@@ -215,6 +215,7 @@ def test_stale_registration_is_not_ready(monkeypatch, tmp_path) -> None:
     live.write_bytes(b"")
     gone = tmp_path / "moved" / "UnityCaptureFilter32.dll"
     monkeypatch.setattr(vcam_device.sys, "platform", "win32")
+    monkeypatch.setattr(vcam_device, "installed_dir", lambda: tmp_path)
     monkeypatch.setattr(vcam_device, "device_available", lambda: True)
     monkeypatch.setattr(vcam_device, "registered_filters", lambda: [live, gone])
     assert vcam_device.registration_ok() is False
@@ -225,6 +226,34 @@ def test_stale_registration_is_not_ready(monkeypatch, tmp_path) -> None:
     assert vcam_device.registration_ok() is False
     monkeypatch.setattr(vcam_device, "registered_filters", lambda: [live])
     assert vcam_device.device_ready() is True
+
+
+def test_camera_registered_from_an_app_folder_is_not_ready(monkeypatch, tmp_path) -> None:
+    """Registered from the vendor folder, every program that lists webcams held
+    the DLL open and the app folder could not be deleted."""
+    from backend import vcam_device
+
+    installed = tmp_path / "Program Files" / "VTM Spark" / "Camera"
+    vendor = tmp_path / "VTM" / "vendor" / "tools" / "vtm_spark_cam"
+    for d in (installed, vendor):
+        d.mkdir(parents=True)
+        (d / "UnityCaptureFilter64.dll").write_bytes(b"")
+    monkeypatch.setattr(vcam_device.sys, "platform", "win32")
+    monkeypatch.setattr(vcam_device, "installed_dir", lambda: installed)
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [vendor / "UnityCaptureFilter64.dll"])
+    assert vcam_device.registration_ok() is False
+    upper = Path(str(installed).upper()) / "UnityCaptureFilter64.dll"
+    monkeypatch.setattr(vcam_device, "registered_filters", lambda: [upper])
+    assert vcam_device.registration_ok() is True
+
+
+def test_camera_setup_registers_a_copy_outside_the_app() -> None:
+    src = (Path(__file__).resolve().parents[1] / "packaging" / "cam-setup.cs").read_text(encoding="utf-8")
+    assert "ProgramW6432" in src and '"VTM Spark"), "Camera")' in src
+    assert "dll64 = Place(dll64, dir);" in src
+    # A copy some program already holds moves out of the app folder, so the
+    # folder deletes without a restart.
+    assert "Release(old, dir);" in src and "MoveFileDelayUntilReboot" in src
 
 
 def test_stale_registration_reinstalls_even_when_the_device_opens(monkeypatch, tmp_path) -> None:

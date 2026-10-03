@@ -10,12 +10,21 @@
 // back that run's exit code, so a plain CreateProcess caller can wait on it.
 // Exit codes: 0 done, 1223 prompt declined, 2 a filter is missing,
 // 3 registering failed.
+//
+// It registers a copy under Program Files, not the filters next to it. Every
+// program that lists webcams (browsers, OBS, Discord) loads the registered DLL
+// and holds it open; registered from vendor\ that locked the app folder, which
+// then could not be deleted or replaced. A copy already held that way moves out
+// of its app folder (see Release), so the folder deletes without a restart.
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
+using Microsoft.Win32;
 
 [assembly: AssemblyTitle("VTM Spark Camera Setup")]
 [assembly: AssemblyDescription("Adds the VTM Spark virtual camera")]
@@ -33,6 +42,8 @@ internal static class Program
     private const int Declined = 1223; // ERROR_CANCELLED
     private const int Missing = 2;
     private const int Failed = 3;
+    // DirectShow "Video Input Device" category: where Windows lists webcams.
+    private const string VideoInput = @"SOFTWARE\Classes\CLSID\{860BB310-5D01-11d0-BD3B-00A0C911CE86}\Instance";
 
     private static int Main(string[] args)
     {
@@ -49,6 +60,28 @@ internal static class Program
         {
             return Missing;
         }
+        string dir;
+        // Copies programs may still hold: what the camera was registered from
+        // until now, and the filters next to this exe.
+        HashSet<string> before = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            dir = InstallDir();
+            Directory.CreateDirectory(dir);
+            ClearOld(dir);
+            foreach (string old in RegisteredFilters())
+            {
+                before.Add(old);
+            }
+            before.Add(dll32);
+            before.Add(dll64);
+            dll32 = Place(dll32, dir);
+            dll64 = Place(dll64, dir);
+        }
+        catch (Exception)
+        {
+            return Failed;
+        }
         // Each filter with its own bitness of regsvr32 (SysWOW64 holds the
         // 32-bit one on 64-bit Windows).
         string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -61,8 +94,191 @@ internal static class Program
         {
             return Failed;
         }
+        foreach (string old in before)
+        {
+            Release(old, dir);
+        }
         return 0;
     }
+
+    // Filter DLLs the VTM Spark camera is registered from, 64- and 32-bit
+    // (backend/vcam_device.py registered_filters reads the same keys).
+    private static List<string> RegisteredFilters()
+    {
+        List<string> found = new List<string>();
+        foreach (RegistryView view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using (RegistryKey hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
+            using (RegistryKey devices = hklm.OpenSubKey(VideoInput))
+            {
+                if (devices == null)
+                {
+                    continue;
+                }
+                foreach (string sub in devices.GetSubKeyNames())
+                {
+                    using (RegistryKey key = devices.OpenSubKey(sub))
+                    {
+                        if (key == null || !DeviceName.Equals(key.GetValue("FriendlyName") as string))
+                        {
+                            continue;
+                        }
+                        string clsid = key.GetValue("CLSID") as string;
+                        if (string.IsNullOrEmpty(clsid))
+                        {
+                            continue;
+                        }
+                        using (RegistryKey server = hklm.OpenSubKey(@"SOFTWARE\Classes\CLSID\" + clsid + @"\InprocServer32"))
+                        {
+                            string dll = server == null ? null : server.GetValue("") as string;
+                            if (!string.IsNullOrEmpty(dll))
+                            {
+                                found.Add(dll.Trim('"'));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return found;
+    }
+
+    // A copy outside dir that some program still has loaded keeps its app
+    // folder from being deleted until that program closes. A loaded DLL cannot
+    // be deleted but can be moved within its drive: it moves out of the app
+    // folder (gone at the next restart) and a copy nothing holds takes its
+    // place, so the app still finds its filters there.
+    private static void Release(string path, string dir)
+    {
+        try
+        {
+            string fresh = Path.Combine(dir, Path.GetFileName(path));
+            if (!File.Exists(path) || !File.Exists(fresh) || SameFolder(Path.GetDirectoryName(path), dir))
+            {
+                return;
+            }
+            try
+            {
+                File.Delete(path);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                MoveAside(path, dir);
+            }
+            catch (IOException)
+            {
+                MoveAside(path, dir);
+            }
+            File.Copy(fresh, path);
+        }
+        catch (Exception)
+        {
+            // The camera is registered either way; the old folder only stays
+            // locked until the programs holding it close.
+        }
+    }
+
+    // Into dir when it is on the same drive, else a hidden folder at the root
+    // of that drive. Both empty at the next restart.
+    private static void MoveAside(string path, string dir)
+    {
+        string root = Path.GetPathRoot(Path.GetFullPath(path));
+        string aside = dir;
+        bool leftovers = !string.Equals(root, Path.GetPathRoot(dir), StringComparison.OrdinalIgnoreCase);
+        if (leftovers)
+        {
+            aside = Path.Combine(root, "VTM Spark leftovers");
+            DirectoryInfo info = Directory.CreateDirectory(aside);
+            info.Attributes |= FileAttributes.Hidden;
+            ClearOld(aside);
+        }
+        string moved = Path.Combine(aside, Path.GetFileName(path) + "." + DateTime.Now.Ticks + ".old");
+        File.Move(path, moved);
+        MoveFileEx(moved, null, MoveFileDelayUntilReboot);
+        if (leftovers)
+        {
+            // After the file it holds; removes only an empty folder.
+            MoveFileEx(aside, null, MoveFileDelayUntilReboot);
+        }
+    }
+
+    private static bool SameFolder(string a, string b)
+    {
+        return string.Equals(
+            Path.GetFullPath(a).TrimEnd('\\'),
+            Path.GetFullPath(b).TrimEnd('\\'),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    // backend/vcam_device.py installed_dir() reads the same place. ProgramW6432
+    // is the 64-bit Program Files even when this runs as a 32-bit process.
+    private static string InstallDir()
+    {
+        string root = Environment.GetEnvironmentVariable("ProgramW6432");
+        if (string.IsNullOrEmpty(root))
+        {
+            root = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        }
+        return Path.Combine(Path.Combine(root, "VTM Spark"), "Camera");
+    }
+
+    // Copies a filter into dir and returns the copy. A copy some program still
+    // has loaded cannot be overwritten or deleted, only renamed: it moves aside
+    // and goes at the next restart.
+    private static string Place(string src, string dir)
+    {
+        string dest = Path.Combine(dir, Path.GetFileName(src));
+        if (File.Exists(dest))
+        {
+            if (SameBytes(src, dest))
+            {
+                return dest;
+            }
+            string old = dest + "." + DateTime.Now.Ticks + ".old";
+            File.Move(dest, old);
+            MoveFileEx(old, null, MoveFileDelayUntilReboot);
+        }
+        File.Copy(src, dest);
+        return dest;
+    }
+
+    // Copies moved aside by an earlier run, once nothing holds them any more.
+    private static void ClearOld(string dir)
+    {
+        foreach (string old in Directory.GetFiles(dir, "*.old"))
+        {
+            try
+            {
+                File.Delete(old);
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
+    private static bool SameBytes(string a, string b)
+    {
+        byte[] x = File.ReadAllBytes(a);
+        byte[] y = File.ReadAllBytes(b);
+        if (x.Length != y.Length)
+        {
+            return false;
+        }
+        for (int i = 0; i < x.Length; i++)
+        {
+            if (x[i] != y[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private const int MoveFileDelayUntilReboot = 0x4;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFileEx(string existing, string replacement, int flags);
 
     private static bool IsAdmin()
     {

@@ -249,7 +249,9 @@ function Invoke-EnsureModel {
 
 function Invoke-EnsureVtmSparkCam {
   # Register bundled DirectShow filter as 'VTM Spark' (UAC once). Also re-registers
-  # a camera left pointing at a copy of the app that was moved or deleted.
+  # a camera left pointing at a copy of the app that was moved or deleted, or at
+  # an app folder at all: the setup exe registers a copy under Program Files, so
+  # programs that list webcams do not hold vendor\ open.
   # The setup exe (cam-setup.cs) carries the VTM Spark name and logo, which the
   # admin prompt shows; elevating a .bat showed cmd.exe's name and icon.
   $setupExe = Join-Path $Root "vendor\tools\vtm_spark_cam\VTM Spark Camera Setup.exe"
