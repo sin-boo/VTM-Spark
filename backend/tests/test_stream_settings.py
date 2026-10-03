@@ -3,6 +3,7 @@ from backend.engine import (
     STREAM_DEFAULT_POSE_CFG,
     STREAM_DEFAULT_STEPS,
     STREAM_INBETWEENS,
+    STREAM_MAX_GEN_FPS,
     STREAM_TEMPORAL_EMA,
     StreamEngine,
     _clip_blend,
@@ -96,7 +97,7 @@ def test_compile_toggle_on_cpu_skips() -> None:
 
 
 def test_max_fps_clip() -> None:
-    assert _clip_max_fps(None) == 0
+    assert _clip_max_fps(None) == STREAM_MAX_GEN_FPS
     assert _clip_max_fps(-5) == 0
     assert _clip_max_fps("14") == 14
     assert _clip_max_fps(60) == 60
@@ -161,3 +162,14 @@ def test_auto_inbetweens_ask_for_the_max_and_aim_keys_at_ten() -> None:
     # Real keys up to 10/s, mids fill the rest of the 20 fps display.
     assert gen_cap(0, True, -1) == 10.0
     assert gen_cap(0, False, -1) == 20.0
+
+
+def test_out_of_the_box_speed() -> None:
+    """Out of the box: 30 keys/s cap, one in-between, batch 3. Auto held keys
+    to 10/s, and a game beside it pushed the in-betweens out: ~9 fps."""
+    from backend.engine import STREAM_BATCH_DEFAULT
+
+    assert STREAM_MAX_GEN_FPS == 30
+    assert STREAM_INBETWEENS == 1
+    assert STREAM_BATCH_DEFAULT == 3
+    assert gen_cap(STREAM_MAX_GEN_FPS, True, STREAM_INBETWEENS) == 30.0

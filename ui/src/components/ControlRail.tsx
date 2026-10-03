@@ -90,10 +90,10 @@ const TUNE_DEFAULTS = {
 
 /** How fast it runs and how much GPU it takes. Compile is left alone: turning it on recompiles. */
 const PERF_DEFAULTS = {
-  max_fps: 0,
-  batch: 0,
+  max_fps: 30,
+  batch: 3,
   interpolate: true,
-  inbetweens: -1,
+  inbetweens: 1,
 }
 
 const STREAM_DEFAULTS = { ...TUNE_DEFAULTS, ...PERF_DEFAULTS }

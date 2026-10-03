@@ -98,3 +98,37 @@ def test_default_checkpoint_uses_last_session(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("backend.ui_session.models_root", lambda: tmp_path)
     save_ui_session(checkpoint=str(ckpt))
     assert default_stream_checkpoint() == ckpt.resolve()
+
+
+def _write_raw(tmp_path, raw: dict) -> None:
+    import json
+
+    (tmp_path / "session.json").write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_old_defaults_give_way_to_new_ones(tmp_path, monkeypatch) -> None:
+    """A file from before the 30 fps defaults saved Auto as values (any tune
+    change wrote them all). After an update they pick up the new defaults."""
+    monkeypatch.setattr("backend.ui_session.models_root", lambda: tmp_path)
+    _write_raw(tmp_path, {"max_fps": 0, "inbetweens": -1, "batch": 0, "steps": 1})
+    st = load_ui_session()
+    assert st["max_fps"] is None
+    assert st["inbetweens"] is None
+    assert st["batch"] is None
+    assert st["steps"] == 1
+
+
+def test_chosen_settings_survive_the_defaults_change(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("backend.ui_session.models_root", lambda: tmp_path)
+    _write_raw(tmp_path, {"max_fps": 37, "inbetweens": 2, "batch": 4})
+    st = load_ui_session()
+    assert (st["max_fps"], st["inbetweens"], st["batch"]) == (37, 2, 4)
+
+
+def test_auto_chosen_after_the_change_stays_auto(tmp_path, monkeypatch) -> None:
+    """Migrated once: Auto picked under the new defaults is kept."""
+    monkeypatch.setattr("backend.ui_session.models_root", lambda: tmp_path)
+    _write_raw(tmp_path, {"max_fps": 0, "inbetweens": -1, "batch": 0})
+    save_ui_session(max_fps=0, inbetweens=-1, batch=0)
+    st = load_ui_session()
+    assert (st["max_fps"], st["inbetweens"], st["batch"]) == (0, -1, 0)

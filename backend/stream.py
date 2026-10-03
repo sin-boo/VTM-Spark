@@ -39,6 +39,7 @@ from .engine import (
     STREAM_DEFAULT_POSE_CFG,
     STREAM_DEFAULT_STEPS,
     STREAM_HOLD_LAST,
+    STREAM_BATCH_DEFAULT,
     STREAM_BATCH_MAX,
     STREAM_INBETWEENS,
     STREAM_INTERPOLATE,
@@ -427,7 +428,7 @@ class StreamRuntime:
             "use_body": True,
             "fast_mode": True,
             "compile_model": bool(getattr(self.engine, "compile_model", STREAM_COMPILE_MODEL)),
-            "batch": 0,
+            "batch": STREAM_BATCH_DEFAULT,
             "auto_sync_track": True,
             "gen_fps": 0.0,
             "show_fps": 0.0,
@@ -626,7 +627,8 @@ class StreamRuntime:
         )
         raw_cap = session.get("max_fps")
         self._status["max_fps"] = STREAM_MAX_GEN_FPS if raw_cap is None else _clip_max_fps(raw_cap)
-        self._status["batch"] = _clip_batch(session.get("batch"))
+        raw_batch = session.get("batch")
+        self._status["batch"] = STREAM_BATCH_DEFAULT if raw_batch is None else _clip_batch(raw_batch)
         self.engine.set_hold_last(hold_last)
         self.engine.num_steps = steps
         self.engine.set_guidance(pose_cfg=pose_cfg, id_cfg=id_cfg)

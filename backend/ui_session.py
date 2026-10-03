@@ -11,6 +11,33 @@ from .paths import models_root
 
 _LOCK = threading.Lock()
 
+# Bumped when stream defaults change. Older files saved the old defaults as
+# values (changing any one tune setting wrote them all), so on load those go
+# back to "unset" and pick up the new defaults; a setting someone chose stays.
+DEFAULTS_VERSION = 2
+# Version 1 out-of-the-box values: Max FPS Auto (10 keys/s), Auto in-betweens, Auto batch.
+_V1_DEFAULTS = {"max_fps": 0, "inbetweens": -1, "batch": 0}
+
+
+def _migrate_defaults(raw: dict[str, Any]) -> dict[str, Any]:
+    """``raw`` with version-1 default values cleared, so today's defaults apply."""
+    try:
+        version = int(raw.get("defaults_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version >= DEFAULTS_VERSION:
+        return raw
+    out = dict(raw)
+    for key, old in _V1_DEFAULTS.items():
+        value = out.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        # Any negative in-betweens count is Auto.
+        if value == old or (key == "inbetweens" and value < 0):
+            out[key] = None
+    out["defaults_version"] = DEFAULTS_VERSION
+    return out
+
 
 def session_path() -> Path:
     return models_root() / "session.json"
@@ -35,6 +62,7 @@ def load_ui_session() -> dict[str, Any]:
         "hold_last": None,
         "compile_model": None,
         "travel_box": {},
+        "defaults_version": DEFAULTS_VERSION,
     }
     if not path.is_file():
         return dict(empty)
@@ -44,6 +72,7 @@ def load_ui_session() -> dict[str, Any]:
         return dict(empty)
     if not isinstance(raw, dict):
         return dict(empty)
+    raw = _migrate_defaults(raw)
     hub = raw.get("hub_files") or []
     mouth_osf = raw.get("mouth_osf") if isinstance(raw.get("mouth_osf"), dict) else {}
     travel_box = raw.get("travel_box") if isinstance(raw.get("travel_box"), dict) else {}
@@ -64,6 +93,7 @@ def load_ui_session() -> dict[str, Any]:
         "batch": raw.get("batch"),
         "hold_last": raw.get("hold_last"),
         "compile_model": raw.get("compile_model"),
+        "defaults_version": raw.get("defaults_version"),
     }
 
 

@@ -153,19 +153,22 @@ STREAM_FIXED_SEED = 42
 # Past 4 a 5060 Ti gains ~10% keys/s for 50% more VRAM, and the display
 # already tops out at 20 fps.
 STREAM_BATCH_MAX = 4
+# Out of the box: three poses a call (0 = Auto). Auto aimed at 10 keys/s.
+STREAM_BATCH_DEFAULT = 3
 # How strongly each new frame blends over the previous display (1 = no smooth).
 # Lower = less Batch×2 flicker / sample pop, more leftover hair after a turn.
 STREAM_TEMPORAL_EMA = 0.58
 # Extra pictures drawn between two DiT frames (0 = keys only, -1 = Auto:
 # as many as fit the display at this PC's key rate, up to the max).
 STREAM_INBETWEENS_AUTO = -1
-STREAM_INBETWEENS = STREAM_INBETWEENS_AUTO
+STREAM_INBETWEENS = 1
 STREAM_MAX_INBETWEENS = 3
 # Master switch for print / inbetween. Slider still picks the count.
 STREAM_INTERPOLATE = True
 # Cap on generated keys per second (0 = Auto). Idle time between keys is real
-# idle time, so a cap leaves GPU for other apps.
-STREAM_MAX_GEN_FPS = 0
+# idle time, so a cap leaves GPU for other apps. Out of the box 30: Auto held
+# keys to 10/s and showed ~9 fps once a game pushed the in-betweens out.
+STREAM_MAX_GEN_FPS = 30
 # = frame_interp.SHOW_FPS_MAX. Auto fills this many shown pictures a second.
 STREAM_SHOW_FPS = 20.0
 # Highest Max FPS the slider allows. Above STREAM_SHOW_FPS the display speeds
