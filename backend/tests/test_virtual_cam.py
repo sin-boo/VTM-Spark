@@ -10,9 +10,10 @@ from PIL import Image
 from backend.stream import StreamRuntime
 from backend.virtual_cam import (
     VirtualCameraOut,
-    cover_rgb,
+    fit_rgb,
     trim_solid_edges,
     vcam_even_size,
+    vcam_wide_size,
 )
 
 
@@ -22,12 +23,33 @@ def test_vcam_even_size_steps_of_four() -> None:
     assert vcam_even_size(770, 771) == (768, 770)
 
 
-def test_cover_fills_square_from_widescreen() -> None:
-    src = np.full((108, 192, 3), (200, 10, 10), dtype=np.uint8)
-    out = cover_rgb(src, 64, 64)
-    assert out.shape == (64, 64, 3)
+def test_wide_size_is_exact_16_by_9_around_the_square() -> None:
+    assert vcam_wide_size(768) == (1376, 774)
+    assert vcam_wide_size(512) == (928, 522)
+    for side in (64, 500, 768, 1024):
+        w, h = vcam_wide_size(side)
+        assert h >= side and w * 9 == h * 16
+        assert vcam_even_size(w, h) == (w, h)
+
+
+def test_fit_pads_square_with_its_background_not_black() -> None:
+    src = np.full((768, 768, 3), (40, 200, 50), dtype=np.uint8)
+    src[300:500, 300:500] = (250, 220, 200)  # the character
+    out = fit_rgb(src, 1376, 774)
+    assert out.shape == (774, 1376, 3)
+    np.testing.assert_array_equal(out[0, 0], (40, 200, 50))
+    np.testing.assert_array_equal(out[400, 10], (40, 200, 50))
+    np.testing.assert_array_equal(out[773, 1375], (40, 200, 50))
+    # Unscaled and centered: the square starts at x=304, y=3.
+    np.testing.assert_array_equal(out[3:771, 304:1072], src)
+
+
+def test_fit_scales_widescreen_into_frame() -> None:
+    src = np.full((1080, 1920, 3), (200, 10, 10), dtype=np.uint8)
+    out = fit_rgb(src, 1376, 774)
+    assert out.shape == (774, 1376, 3)
     np.testing.assert_array_equal(out[0, 0], (200, 10, 10))
-    np.testing.assert_array_equal(out[32, 32], (200, 10, 10))
+    np.testing.assert_array_equal(out[387, 688], (200, 10, 10))
 
 
 def test_trim_drops_black_letterbox() -> None:
@@ -38,14 +60,14 @@ def test_trim_drops_black_letterbox() -> None:
     np.testing.assert_array_equal(cropped[0, 0], (40, 200, 50))
 
 
-def test_as_rgb_trims_then_covers_to_square() -> None:
+def test_as_rgb_trims_letterbox_then_fills_wide_frame() -> None:
     arr = np.zeros((1080, 1920, 3), dtype=np.uint8)
     arr[180:900, :, :] = (30, 190, 40)
-    out = VirtualCameraOut._as_rgb(arr, 768, 768)
-    assert out.shape == (768, 768, 3)
-    assert int(out.mean()) > 40
-    # Interior is the green field, not the black bars.
-    np.testing.assert_array_equal(out[384, 384], (30, 190, 40))
+    out = VirtualCameraOut._as_rgb(arr, 1376, 774)
+    assert out.shape == (774, 1376, 3)
+    # Green edge to edge, none of the black bars.
+    assert int(out.max(axis=2).min()) > 16
+    np.testing.assert_array_equal(out[387, 688], (30, 190, 40))
 
 
 def test_as_rgb_keeps_matching_square() -> None:
@@ -59,14 +81,14 @@ def test_vcam_frame_size_ignores_widescreen_still() -> None:
     rt = StreamRuntime.__new__(StreamRuntime)
     rt.engine = SimpleNamespace(image_size=768)
     rt._last_image = Image.new("RGB", (1920, 1080), (0, 0, 0))
-    assert StreamRuntime._vcam_frame_size(rt) == (768, 768)
+    assert StreamRuntime._vcam_frame_size(rt) == (1376, 774)
 
 
 def test_vcam_frame_size_uses_square_generated() -> None:
     rt = StreamRuntime.__new__(StreamRuntime)
     rt.engine = SimpleNamespace(image_size=512)
     rt._last_image = Image.new("RGB", (768, 768), (1, 2, 3))
-    assert StreamRuntime._vcam_frame_size(rt) == (768, 768)
+    assert StreamRuntime._vcam_frame_size(rt) == (1376, 774)
 
 
 def test_pump_resends_reference_still() -> None:

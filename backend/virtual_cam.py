@@ -24,6 +24,14 @@ def vcam_even_size(width: int, height: int) -> tuple[int, int]:
     return max(16, w), max(16, h)
 
 
+def vcam_wide_size(side: int) -> tuple[int, int]:
+    """Exact 16:9 frame at least ``side`` tall. OBS / Discord / Zoom show the
+    camera as 16:9 and fit our picture in it, so a square came out with black
+    side bars. Height in steps of 18 keeps it even and the width a multiple of 4."""
+    k = max(1, -(-int(side) // 18))
+    return 32 * k, 18 * k
+
+
 def trim_solid_edges(arr: np.ndarray, *, limit: int = 16) -> np.ndarray:
     """Drop uniform near-black letterbox rows/cols. Leaves chroma / content alone."""
     if arr.ndim != 3 or arr.shape[0] < 8 or arr.shape[1] < 8:
@@ -50,28 +58,40 @@ def trim_solid_edges(arr: np.ndarray, *, limit: int = 16) -> np.ndarray:
     return arr[y0:y1, x0:x1]
 
 
-def cover_rgb(arr: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Scale uniformly and center-crop so the frame is filled (no black bars)."""
+def fit_rgb(arr: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Whole picture centered in the frame, the rest in its own background
+    colour (the green screen stays green edge to edge, nothing is cropped)."""
     src = np.asarray(arr)
     if src.ndim != 3:
-        raise ValueError("cover_rgb expects HxWxC")
+        raise ValueError("fit_rgb expects HxWxC")
     src = src[..., :3]
+    if src.dtype != np.uint8:
+        src = np.clip(src, 0, 255).astype(np.uint8)
     sh, sw = int(src.shape[0]), int(src.shape[1])
     if sh == height and sw == width:
         out = src
     else:
-        scale = max(width / max(sw, 1), height / max(sh, 1))
-        nw = max(1, int(round(sw * scale)))
-        nh = max(1, int(round(sh * scale)))
-        img = Image.fromarray(np.ascontiguousarray(src), mode="RGB").resize(
-            (nw, nh), Image.Resampling.BILINEAR
-        )
-        x0 = max(0, (nw - width) // 2)
-        y0 = max(0, (nh - height) // 2)
-        img = img.crop((x0, y0, x0 + width, y0 + height))
-        if img.size != (width, height):
-            img = img.resize((width, height), Image.Resampling.BILINEAR)
-        out = np.asarray(img, dtype=np.uint8)
+        scale = min(width / max(sw, 1), height / max(sh, 1))
+        # A 768 square in a 774-tall frame: pad, don't resample for 6 px.
+        if sw <= width and sh <= height and scale < 1.1:
+            scale = 1.0
+        if scale != 1.0:
+            nw = max(1, min(width, int(round(sw * scale))))
+            nh = max(1, min(height, int(round(sh * scale))))
+            src = np.asarray(
+                Image.fromarray(np.ascontiguousarray(src), mode="RGB").resize(
+                    (nw, nh), Image.Resampling.BILINEAR
+                ),
+                dtype=np.uint8,
+            )
+            sh, sw = nh, nw
+        border = np.concatenate((src[0], src[-1], src[:, 0], src[:, -1]))
+        fill = np.median(border, axis=0).astype(np.uint8)
+        out = np.empty((height, width, 3), dtype=np.uint8)
+        out[...] = fill
+        y0 = (height - sh) // 2
+        x0 = (width - sw) // 2
+        out[y0 : y0 + sh, x0 : x0 + sw] = src
     if out.dtype != np.uint8:
         out = np.clip(out, 0, 255).astype(np.uint8)
     if not out.flags["C_CONTIGUOUS"]:
@@ -339,7 +359,7 @@ class VirtualCameraOut:
             if arr.dtype != np.uint8:
                 arr = np.clip(arr, 0, 255).astype(np.uint8)
         arr = trim_solid_edges(arr)
-        return cover_rgb(arr, int(width), int(height))
+        return fit_rgb(arr, int(width), int(height))
 
 
 _shared: VirtualCameraOut | None = None

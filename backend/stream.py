@@ -4239,8 +4239,9 @@ class StreamRuntime:
         )
 
     def _vcam_frame_size(self) -> tuple[int, int]:
-        """Square DiT canvas — never a widescreen still or the desktop."""
-        from .virtual_cam import vcam_even_size
+        """16:9 around the square DiT canvas — sized from the canvas, never a
+        widescreen still or the desktop."""
+        from .virtual_cam import vcam_wide_size
 
         size = int(getattr(self.engine, "image_size", 768) or 768)
         image = self._last_image
@@ -4248,8 +4249,7 @@ class StreamRuntime:
             w, h = image.size
             if w == h and w >= 64:
                 size = int(w)
-        w, h = vcam_even_size(size, size)
-        return w, h
+        return vcam_wide_size(size)
 
     def _vcam_source(self) -> Image.Image | None:
         return self._last_image
