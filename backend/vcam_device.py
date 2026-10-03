@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -29,6 +30,14 @@ SETUP_DECLINED = 1223
 
 def vcam_bundle_dir() -> Path:
     return package_root() / "vendor" / "tools" / "vtm_spark_cam"
+
+
+def installed_dir() -> Path:
+    """Where the setup exe copies the filters and registers them from
+    (cam-setup.cs InstallDir). Registered from the vendor folder, every program
+    that lists webcams held the DLL open and the app folder could not be deleted."""
+    root = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or r"C:\Program Files"
+    return Path(root) / "VTM Spark" / "Camera"
 
 
 def filter_dlls() -> list[Path]:
@@ -119,11 +128,19 @@ def registered_filters() -> list[Path | None]:
     return out
 
 
+def _installed(dll: Path | None) -> bool:
+    if dll is None or not dll.is_file():
+        return False
+    return os.path.normcase(str(dll.parent)) == os.path.normcase(str(installed_dir()))
+
+
 def registration_ok() -> bool:
-    """True when every registration of our camera points at a DLL that exists.
+    """True when every registration of our camera points at the installed copy.
 
     A camera registered from a copy of the app that was moved or deleted still
-    opens for sending, but OBS / Discord cannot load it and show nothing.
+    opens for sending, but OBS / Discord cannot load it and show nothing. One
+    registered straight from an app folder (older installs) keeps that folder
+    locked while any program that lists webcams is open.
     """
     if not sys.platform.startswith("win"):
         return True
@@ -131,7 +148,7 @@ def registration_ok() -> bool:
         dlls = registered_filters()
     except Exception:
         return True
-    return bool(dlls) and all(dll is not None and dll.is_file() for dll in dlls)
+    return bool(dlls) and all(_installed(dll) for dll in dlls)
 
 
 def device_ready() -> bool:
