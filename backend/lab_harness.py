@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -167,6 +168,20 @@ def _http_body(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
+_status_pool_obj: ThreadPoolExecutor | None = None
+_status_pool_lock = threading.Lock()
+
+
+def _status_pool() -> ThreadPoolExecutor:
+    """Threads that fetch /frame beside /status. The desk polls status 4×/s
+    while live; a new pool (two new threads) per poll was pure churn."""
+    global _status_pool_obj
+    with _status_pool_lock:
+        if _status_pool_obj is None:
+            _status_pool_obj = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lab-status")
+        return _status_pool_obj
+
+
 class LabHarness:
     def __init__(self, base: str = DEFAULT_BASE, timeout: float = 0.6) -> None:
         self.base = str(base).rstrip("/")
@@ -232,12 +247,8 @@ class LabHarness:
         """Pull /status and /frame together so live meters do not wait twice."""
         if not merge_frame:
             return self._get("/status"), None
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            status_job = pool.submit(self._get, "/status")
-            frame_job = pool.submit(self.frame)
-            return status_job.result(), frame_job.result()
+        frame_job = _status_pool().submit(self.frame)
+        return self._get("/status"), frame_job.result()
 
     def frame(self) -> dict[str, Any] | None:
         try:

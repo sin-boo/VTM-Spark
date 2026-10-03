@@ -791,6 +791,18 @@ export function openAppSocket(onEvent: (ev: WsEvent) => void): WebSocket {
   const ping = window.setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.send('ping')
   }, 15000)
-  ws.addEventListener('close', () => window.clearInterval(ping))
+  // Minimized, the page cannot show frames: the desk stops encoding them
+  // (CPU a game next to it wants) and sends the current one when we are back.
+  const visibility = () => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(document.hidden ? 'hidden' : 'visible')
+  }
+  ws.addEventListener('open', () => {
+    if (document.hidden) visibility()
+  })
+  document.addEventListener('visibilitychange', visibility)
+  ws.addEventListener('close', () => {
+    window.clearInterval(ping)
+    document.removeEventListener('visibilitychange', visibility)
+  })
   return ws
 }

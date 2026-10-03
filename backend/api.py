@@ -42,6 +42,8 @@ app.add_middleware(
 )
 
 _ws_clients: list[WebSocket] = []
+# Clients whose page is hidden (desk window minimized): they cannot show a frame.
+_ws_hidden: set[int] = set()
 _ws_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _frontend_mounted = False
@@ -212,6 +214,23 @@ class DownloadBody(BaseModel):
     names: list[str] | None = None
 
 
+def _drop_client(ws: WebSocket) -> None:
+    """Forget a socket. Caller holds ``_ws_lock``."""
+    if ws in _ws_clients:
+        _ws_clients.remove(ws)
+    _ws_hidden.discard(id(ws))
+
+
+def frames_wanted() -> bool:
+    """A live frame has somewhere to show: a connected page that is not hidden.
+
+    With none, the desk skips the JPEG for every picture (~4 ms each, ~20 a
+    second) — CPU a game running next to it wants.
+    """
+    with _ws_lock:
+        return any(id(ws) not in _ws_hidden for ws in _ws_clients)
+
+
 def _broadcast(event: dict[str, Any]) -> None:
     loop = _loop
     if loop is None:
@@ -229,8 +248,7 @@ def _broadcast(event: dict[str, Any]) -> None:
         if dead:
             with _ws_lock:
                 for ws in dead:
-                    if ws in _ws_clients:
-                        _ws_clients.remove(ws)
+                    _drop_client(ws)
 
     try:
         asyncio.run_coroutine_threadsafe(_send_all(), loop)
@@ -244,6 +262,7 @@ def configure_runtime() -> None:
         return
     rt = get_runtime()
     rt.add_listener(_broadcast)
+    rt.set_frame_demand(frames_wanted)
     threading.Thread(target=_boot_track_lab, daemon=True, name="track-lab").start()
     rt.start_boot()
     _runtime_configured = True
@@ -976,9 +995,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
             msg = await ws.receive_text()
             if msg == "ping":
                 await ws.send_json({"type": "pong"})
+            elif msg in ("hidden", "visible"):
+                await _note_visibility(ws, rt, hidden=msg == "hidden")
     except WebSocketDisconnect:
         pass
     finally:
         with _ws_lock:
-            if ws in _ws_clients:
-                _ws_clients.remove(ws)
+            _drop_client(ws)
+
+
+async def _note_visibility(ws: WebSocket, rt: Any, *, hidden: bool) -> None:
+    """The page says it was hidden / shown. Back in view it gets the picture
+    on the desk now, since frames were not encoded while it was away."""
+    with _ws_lock:
+        was_hidden = id(ws) in _ws_hidden
+        if hidden:
+            _ws_hidden.add(id(ws))
+        else:
+            _ws_hidden.discard(id(ws))
+    if hidden or not was_hidden:
+        return
+    frame = await asyncio.to_thread(rt.current_frame_event)
+    if frame is not None:
+        await ws.send_json(frame)
