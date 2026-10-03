@@ -302,8 +302,11 @@ def _runtime_log(msg: str) -> None:
 
 
 def _image_to_jpeg_b64(image: Image.Image, quality: int = 85) -> str:
+    # PIL's libjpeg-turbo beat cv2.imencode here (3.1 vs 5.3 ms at 768²).
+    # convert() on a picture that is already RGB is only a copy.
+    rgb = image if image.mode == "RGB" else image.convert("RGB")
     buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="JPEG", quality=quality)
+    rgb.save(buf, format="JPEG", quality=quality)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -543,6 +546,9 @@ class StreamRuntime:
         # How long each load / warmup stage took on this PC (drives the bars).
         self._stage_clock = StageClock()
         self._vcam_wanted: bool = False
+        # Whether anyone would see a live frame now (the API: a desk window
+        # connected and not minimized). None = always encode them.
+        self._frame_demand: Callable[[], bool] | None = None
         self._gen_queue: queue.Queue = queue.Queue(maxsize=1)
         self._display_queue: queue.Queue = queue.Queue()
         self._display_busy = False
@@ -668,6 +674,19 @@ class StreamRuntime:
                 cb(event)
             except Exception:
                 pass
+
+    def set_frame_demand(self, demand: Callable[[], bool] | None) -> None:
+        """``demand()`` False = nobody would see a live frame: skip its JPEG."""
+        self._frame_demand = demand
+
+    def _frames_wanted(self) -> bool:
+        demand = getattr(self, "_frame_demand", None)
+        if demand is None:
+            return True
+        try:
+            return bool(demand())
+        except Exception:
+            return True
 
     def _set_status(self, **kwargs: Any) -> None:
         with self._lock:
@@ -4533,7 +4552,7 @@ class StreamRuntime:
         head and hair on screen for 3–4 keys (hair trailing the face). Runs on
         the display thread; the held frame is uint8 for cv2.
         """
-        arr = np.asarray(image.convert("RGB"))
+        arr = np.asarray(image if image.mode == "RGB" else image.convert("RGB"))
         try:
             alpha = _clip_blend(float(self._status.get("frame_blend") or STREAM_TEMPORAL_EMA))
         except (TypeError, ValueError):
@@ -4815,9 +4834,12 @@ class StreamRuntime:
         if self._vcam_wanted:
             self._push_virtual_cam(image)
         show_fps = self._shown_fps(time.perf_counter())
-        frame = self._frame_payload(image, posed)
-        frame["fps"] = show_fps or float(self._status.get("gen_fps") or 0.0)
-        self._emit({"type": "frame", **frame})
+        if self._frames_wanted():
+            # ~4 ms of JPEG a picture, ~20 a second: skipped while the desk is
+            # minimized or closed (it gets the current picture when it is back).
+            frame = self._frame_payload(image, posed)
+            frame["fps"] = show_fps or float(self._status.get("gen_fps") or 0.0)
+            self._emit({"type": "frame", **frame})
         if key and self._first_frame_pending:
             self._end_first_frame_wait(message="Streaming")
         if key:
@@ -5638,7 +5660,10 @@ class StreamRuntime:
     def _frame_payload(
         self, image: Image.Image | None, keypoints: np.ndarray | None
     ) -> dict[str, Any]:
-        st = self.status()
+        # Only the overlay toggles are read here. status() also rebuilt the
+        # compile fields, boot snapshot, batch rates and an NVML read for every
+        # shown picture; the stream pushes those 4×/s on its own.
+        st = self._status
         show_mesh = bool(st.get("show_mesh"))
         show_hair = bool(st.get("show_hair", True))
         show_limiters = bool(st.get("show_limiters"))
@@ -6112,7 +6137,11 @@ class StreamRuntime:
                     if not self._streaming and not mesh_frozen:
                         self._last_live_preview_t = time.time()
                         driven = self._lab_overlay_keypoints()
-                        if driven is not None and self._last_image is not None:
+                        if (
+                            driven is not None
+                            and self._last_image is not None
+                            and self._frames_wanted()
+                        ):
                             self._emit(
                                 {
                                     "type": "frame",
@@ -6143,7 +6172,11 @@ class StreamRuntime:
                     if not self._streaming and not mesh_frozen:
                         self._last_live_preview_t = time.time()
                         driven = self._retarget_live_to_character()
-                        if driven is not None and self._last_image is not None:
+                        if (
+                            driven is not None
+                            and self._last_image is not None
+                            and self._frames_wanted()
+                        ):
                             self._emit(
                                 {
                                     "type": "frame",

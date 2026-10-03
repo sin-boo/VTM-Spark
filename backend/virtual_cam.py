@@ -28,8 +28,13 @@ def trim_solid_edges(arr: np.ndarray, *, limit: int = 16) -> np.ndarray:
     """Drop uniform near-black letterbox rows/cols. Leaves chroma / content alone."""
     if arr.ndim != 3 or arr.shape[0] < 8 or arr.shape[1] < 8:
         return arr
+    lim = int(limit)
+    # Any lit pixel on all four edges: nothing to trim. That is every generated
+    # frame, and it skips the full-frame max (~8 ms at 768²).
+    if all(bool((edge > lim).any()) for edge in (arr[0], arr[-1], arr[:, 0], arr[:, -1])):
+        return arr
     h, w = arr.shape[:2]
-    dark = arr.max(axis=2) <= int(limit)
+    dark = arr.max(axis=2) <= lim
     rows = ~dark.all(axis=1)
     cols = ~dark.all(axis=0)
     if not rows.any() or not cols.any():
@@ -94,6 +99,13 @@ class VirtualCameraOut:
         self._source: _FrameSource | None = None
         self._held: Image.Image | np.ndarray | None = None
         self._frame: np.ndarray | None = None
+        # The last picture made ready for the camera, and what it came from.
+        # The pump ticks at 30 Hz while pictures change ~20 times a second at
+        # most (the still: never); redoing the convert and edge trim each tick
+        # was ~19 ms of CPU, ~0.6 s a second, while OBS / a game wanted it.
+        self._prep_src: Image.Image | None = None
+        self._prep_size: tuple[int, int] = (0, 0)
+        self._prep_out: np.ndarray | None = None
         self._pump_stop = threading.Event()
         self._pump_thread: threading.Thread | None = None
 
@@ -161,6 +173,7 @@ class VirtualCameraOut:
             self._source = None
             self._held = None
             self._frame = None
+        self._forget_prepared()
 
     def send(self, image: Image.Image | np.ndarray) -> None:
         """Hold a picture; the pump thread is the only caller of cam.send."""
@@ -239,14 +252,9 @@ class VirtualCameraOut:
                     image = None
             if image is None:
                 image = held
-            if isinstance(image, Image.Image):
-                try:
-                    image = image.copy()
-                except Exception:
-                    image = None
             if image is not None:
                 try:
-                    frame = self._as_rgb(image, w, h)
+                    frame = self._prepared(image, w, h)
                     cam.send(frame)
                     with self._lock:
                         if self._cam is cam:
@@ -265,6 +273,35 @@ class VirtualCameraOut:
             except Exception:
                 if self._pump_stop.wait(1.0 / max(fps, 1.0)):
                     break
+
+    def _prepared(
+        self, image: Image.Image | np.ndarray, width: int, height: int
+    ) -> np.ndarray:
+        """Camera-ready RGB for ``image``, reused while the picture is the same.
+
+        Keyed on the picture object itself: the desk swaps in a new image for
+        every shown frame and never draws into one it has handed out. Arrays
+        can be written in place, so they are always redone.
+        """
+        size = (int(width), int(height))
+        if isinstance(image, Image.Image):
+            out = self._prep_out
+            if out is not None and image is self._prep_src and size == self._prep_size:
+                return out
+        frame = self._as_rgb(image, *size)
+        if isinstance(image, Image.Image):
+            # Holding the source keeps its id from being reused by a new frame.
+            self._prep_src = image
+            self._prep_size = size
+            self._prep_out = frame
+        else:
+            self._forget_prepared()
+        return frame
+
+    def _forget_prepared(self) -> None:
+        self._prep_src = None
+        self._prep_size = (0, 0)
+        self._prep_out = None
 
     def _fail(self, message: str) -> None:
         with self._lock:
@@ -291,7 +328,8 @@ class VirtualCameraOut:
         image: Image.Image | np.ndarray, width: int, height: int
     ) -> np.ndarray:
         if isinstance(image, Image.Image):
-            arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            rgb = image if image.mode == "RGB" else image.convert("RGB")
+            arr = np.asarray(rgb, dtype=np.uint8)
         else:
             arr = np.asarray(image)
             if arr.ndim == 2:

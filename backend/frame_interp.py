@@ -16,6 +16,11 @@ from PIL import Image
 _FLOW_SIZE = 192
 
 
+def _rgb_array(image: Image.Image) -> np.ndarray:
+    """uint8 RGB pixels. ``convert("RGB")`` on an RGB picture is a full copy."""
+    return np.asarray(image if image.mode == "RGB" else image.convert("RGB"))
+
+
 def lerp_stream_pose(prev: np.ndarray, current: np.ndarray, t: float) -> np.ndarray:
     """Lerp visible keypoints; keep a point parked if only one side can see it."""
     a = np.asarray(prev, dtype=np.float32)
@@ -163,26 +168,43 @@ def inbetween_pacing(
     return n, max(slot * SLOT_SLACK, span / float(n + 1))
 
 
+# OpenCV's own worker threads for the flow and warps. Its default is one per
+# core, and those spin while they wait: a mid took the same ~15 ms wall time on
+# 2 threads as on 32, but ~26 ms of CPU instead of ~76 — cores a game running
+# beside the stream needed.
+CV2_THREADS = 2
+_cv2_ready = False
+
+
 def _cv2():
     import cv2
 
-    try:
-        cv2.ocl.setUseOpenCL(False)
-    except Exception:
-        pass
+    global _cv2_ready
+    if not _cv2_ready:
+        _cv2_ready = True
+        try:
+            cv2.ocl.setUseOpenCL(False)
+        except Exception:
+            pass
+        try:
+            cv2.setNumThreads(CV2_THREADS)
+        except Exception:
+            pass
     return cv2
 
 
-_GRIDS: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+_GRIDS: dict[tuple[int, int], np.ndarray] = {}
 
 
-def _pixel_grid(height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+def _pixel_grid(height: int, width: int) -> np.ndarray:
+    """``(H, W, 2)`` float32 pixel coordinates, x then y (a cv2 two-channel map)."""
     key = (int(height), int(width))
     grid = _GRIDS.get(key)
     if grid is None:
-        grid = np.meshgrid(
+        gx, gy = np.meshgrid(
             np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32)
         )
+        grid = np.ascontiguousarray(np.dstack([gx, gy]))
         _GRIDS.clear()
         _GRIDS[key] = grid
     return grid
@@ -198,13 +220,14 @@ def _warp_rgb(image: np.ndarray, flow: np.ndarray, amount: float) -> np.ndarray:
     cv2 = _cv2()
 
     height, width = image.shape[:2]
-    grid_x, grid_y = _pixel_grid(height, width)
-    map_x = (grid_x - flow[..., 0] * float(amount)).astype(np.float32)
-    map_y = (grid_y - flow[..., 1] * float(amount)).astype(np.float32)
+    # One cv2 pass for both coordinates (~1.4 ms at 768²); the numpy x / y maps
+    # it replaces were ~4 ms per warp, two warps a mid.
+    flow = np.ascontiguousarray(flow, dtype=np.float32)
+    coords = cv2.scaleAdd(flow, -float(amount), _pixel_grid(height, width))
     return cv2.remap(
         image,
-        map_x,
-        map_y,
+        coords,
+        None,
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
@@ -257,8 +280,8 @@ def inbetween_image(prev: Image.Image, current: Image.Image, t: float) -> Image.
         return prev
     if amount >= 1.0 - 1e-4:
         return current
-    a = np.asarray(prev.convert("RGB"))
-    b = np.asarray(current.convert("RGB"))
+    a = _rgb_array(prev)
+    b = _rgb_array(current)
     if a.shape != b.shape:
         return blend_images(prev, current, amount)
     try:
@@ -272,8 +295,8 @@ def inbetween_maker(
 ) -> Callable[[float], Image.Image]:
     """``make(t)`` for pictures between two keys. Flow is worked out once, on
     the first call, so each mid can be drawn just before it is due."""
-    a = np.asarray(prev.convert("RGB"))
-    b = np.asarray(current.convert("RGB"))
+    a = _rgb_array(prev)
+    b = _rgb_array(current)
     if a.shape != b.shape:
         return lambda t: blend_images(prev, current, t)
     flow: list[np.ndarray | None] = []
