@@ -1,0 +1,5 @@
+# cmd misreads LF-only batch files: setlocal, cd /d, chcp and title lose their
+# first letters and the script runs from the wrong folder. GitHub's ZIP ships
+# files as stored unless told otherwise, so .bat / .cmd always check out CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
