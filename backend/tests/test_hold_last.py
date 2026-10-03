@@ -321,20 +321,15 @@ def _counting_engine(monkeypatch) -> tuple[StreamEngine, list]:
     return stream, captured
 
 
-def test_a_long_hold_starts_over_from_noise(monkeypatch) -> None:
-    """A still face held every key from the one before, forever: its error
-    compounded with nothing ever starting it from noise again."""
-    from backend.engine import STREAM_HOLD_MAX_CHAIN
-
+def test_a_long_hold_never_restarts_from_noise(monkeypatch) -> None:
+    """A still face keeps holding: a periodic restart from noise redrew the
+    line work and flickered every ~2 s. The still pull keeps it anchored."""
     stream, captured = _counting_engine(monkeypatch)
     kps = neutral_keypoints()
-    for _ in range(2 * STREAM_HOLD_MAX_CHAIN + 3):
+    for _ in range(40):
         stream.generate_from_keypoints(kps, num_steps=1, sanitize="none")
     fresh = [i for i, last in enumerate(captured) if last is None]
-    step = STREAM_HOLD_MAX_CHAIN + 1
-    assert fresh == [0, step, 2 * step]
-    # Every other call still holds (the anti-flicker stays).
-    assert len(captured) - len(fresh) == 2 * STREAM_HOLD_MAX_CHAIN + 3 - 3
+    assert fresh == [0]
 
 
 def test_a_new_rest_drops_the_hold(monkeypatch) -> None:

@@ -180,11 +180,9 @@ STREAM_HOLD_LAST = True
 # Stay low — 0.6 xeroxed the still into chrome after a few seconds.
 STREAM_HOLD_LAST_T = 0.28
 # Each hold also blends this much of the still latent so identity cannot drift.
+# That pull is what keeps a long hold anchored: restarting from noise every N
+# held calls instead redrew the line work and flickered every ~2 s while still.
 STREAM_HOLD_REF_PULL = 0.22
-# Held calls in a row before one starts from noise again. Each hold starts from
-# the last output with the same seed, so without a break a held face never
-# returns to what the still and pose alone give.
-STREAM_HOLD_MAX_CHAIN = 16
 IMAGE_SIZE = 768
 INFERENCE_TIMESTEP_SHIFT = 0.3
 NUM_KEYPOINTS = 37
@@ -1507,8 +1505,6 @@ class StreamEngine:
         self.hold_last = STREAM_HOLD_LAST
         self._last_gen_latent: torch.Tensor | None = None
         self._last_hold_kps: np.ndarray | None = None
-        # Calls in a row that started from the last output (see STREAM_HOLD_MAX_CHAIN).
-        self._hold_chain = 0
         self._body_skel_method: str = "unknown"
         self._body_lost: bool = False
         self._last_driven_body: np.ndarray | None = None
@@ -1550,7 +1546,7 @@ class StreamEngine:
         kps = np.asarray(self._ref_keypoints, dtype=np.float32)
         if bsz > 1:
             kps = np.stack([kps] * bsz, axis=0)
-        saved = (self.hold_last, self._last_gen_latent, self._last_hold_kps, self._hold_chain)
+        saved = (self.hold_last, self._last_gen_latent, self._last_hold_kps)
         self.hold_last = False
         times: list[float] = []
         try:
@@ -1559,7 +1555,7 @@ class StreamEngine:
                 self.generate_batch_from_keypoints(kps, sanitize="constrained")
                 times.append(time.perf_counter() - t0)
         finally:
-            self.hold_last, self._last_gen_latent, self._last_hold_kps, self._hold_chain = saved
+            self.hold_last, self._last_gen_latent, self._last_hold_kps = saved
         # The first run pays leftover lazy setup; the median ignores stalls.
         timed = sorted(times[1:])
         return timed[len(timed) // 2]
@@ -1571,7 +1567,6 @@ class StreamEngine:
         """The next call starts from noise: the frame it would continue is gone."""
         self._last_gen_latent = None
         self._last_hold_kps = None
-        self._hold_chain = 0
 
     @property
     def fast_status(self) -> str:
@@ -3310,10 +3305,6 @@ class StreamEngine:
         hold_last = bool(self.hold_last)
         now_kps = kps_batch[-1]
         prev = self._last_gen_latent if hold_last else None
-        chain = int(getattr(self, "_hold_chain", 0) or 0)
-        if chain >= STREAM_HOLD_MAX_CHAIN:
-            # A long hold starts over once from noise, so its error cannot compound.
-            prev = None
         start_t = 0.0
         if prev is not None:
             move = pose_move(self._last_hold_kps, now_kps)
@@ -3331,7 +3322,6 @@ class StreamEngine:
                 latents, images_u8, denoise_s = graphed
                 self._last_gen_latent = latents[-1:].detach().clone()
                 self._last_hold_kps = now_kps.copy()
-                self._hold_chain = chain + 1 if prev is not None else 0
                 return {
                     "latents": latents,
                     "images_u8": images_u8,
@@ -3374,7 +3364,6 @@ class StreamEngine:
         last = latents[-1:].detach()
         self._last_gen_latent = last.clone() if bool(torch.isfinite(last).all()) else None
         self._last_hold_kps = now_kps.copy()
-        self._hold_chain = chain + 1 if prev is not None else 0
 
         return {
             "latents": latents,
