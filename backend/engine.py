@@ -330,6 +330,91 @@ def face_pose_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
     return float(np.mean(np.linalg.norm(delta, axis=1)))
 
 
+# A blink moves 2 of the 28 face points, so the mean travel above never sees
+# it: the hold kept starting shut frames from the open one and Snap laid the
+# open eye over them. lid_delta is the share of a blink made in one step;
+# a quarter of a blink counts as the loose travel of whatever reads it (the
+# hold's or Snap's, which is ~4x tighter). Under a tenth of a blink a step is
+# tracker wobble: a pixel on a shallow lid is that much, and counting it kept
+# Snap from ever blending a still face.
+_LID_MOVE_FULL = 0.25
+_LID_NOISE = 0.10
+_LIDS = ((11, 12, 13), (17, 18, 19))  # upper lids, as in model_layout.EYE_LIDS
+
+
+def lid_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Largest share of a blink one lid made between two poses: the change in
+    its mid's height over its corner line, per the more open of the two."""
+    if a is None or b is None:
+        return 0.0
+    left = np.asarray(a, dtype=np.float32)
+    right = np.asarray(b, dtype=np.float32)
+    if left.ndim != 2 or right.ndim != 2 or left.shape[0] < 20 or right.shape[0] < 20:
+        return 0.0
+
+    def height(k: np.ndarray, eye: tuple[int, int, int]) -> float | None:
+        """Lid mid above its corner line, in corner-line lengths."""
+        outer, mid, inner = eye
+        if min(float(k[i, 3]) for i in eye) <= 0.35:
+            return None
+        chord = k[inner, :2] - k[outer, :2]
+        span2 = float(chord[0] * chord[0] + chord[1] * chord[1])
+        if span2 < 1e-10:
+            return None
+        d = k[mid, :2] - k[outer, :2]
+        return float(chord[1] * d[0] - chord[0] * d[1]) / span2
+
+    out = 0.0
+    for eye in _LIDS:
+        ha, hb = height(left, eye), height(right, eye)
+        if ha is not None and hb is not None:
+            out = max(out, abs(hb - ha) / max(abs(ha), abs(hb), 0.05))
+    return out
+
+
+# A shut eye drawn over the still's own (front-on) pose copies the still's open
+# eye in: a one-step sample averages it with the lid into pale grey patches. A
+# head turned off the still draws clean skin, so while the eyes shut the model
+# is told the still was turned this many degrees. Only the reference keypoints
+# move; where the face is drawn does not. A squint wants the still's eye, so
+# the turn starts at SHUT_REF_TURN_FROM shut and is whole at SHUT_REF_TURN_AT.
+SHUT_REF_TURN_DEG = 20.0
+SHUT_REF_TURN_FROM = 0.6
+SHUT_REF_TURN_AT = 0.95
+
+
+def shut_ref_turn(shut: float) -> float:
+    """Degrees to turn the reference for eyes ``shut`` (0 open .. 1 shut)."""
+    t = (float(shut) - SHUT_REF_TURN_FROM) / (SHUT_REF_TURN_AT - SHUT_REF_TURN_FROM)
+    t = min(max(t, 0.0), 1.0)
+    return SHUT_REF_TURN_DEG * t * t * (3.0 - 2.0 * t)
+
+
+def turned_ref(ref_model: np.ndarray, degrees: float) -> np.ndarray:
+    """``ref_model`` rows turned ``degrees`` in the image plane about the face's centre."""
+    out = np.asarray(ref_model, dtype=np.float32).copy()
+    if abs(float(degrees)) < 1e-6:
+        return out
+    seen = out[:, 3] >= 0.5
+    face = out[:28][seen[:28]]
+    if not len(face):
+        return out
+    centre = face[:, :2].astype(np.float64).mean(axis=0)
+    t = np.radians(float(degrees))
+    rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    out[seen, :2] = (centre + (out[seen, :2].astype(np.float64) - centre) @ rot.T).astype(np.float32)
+    return out
+
+
+def pose_move(
+    a: np.ndarray | None, b: np.ndarray | None, *, loose: float = _HOLD_MOVE_LOOSE
+) -> float:
+    """Face travel between two poses, with a blink counted as a move: a
+    quarter of a blink in one step is ``loose`` travel."""
+    lid = max(lid_delta(a, b) - _LID_NOISE, 0.0) / (_LID_MOVE_FULL - _LID_NOISE)
+    return max(face_pose_delta(a, b), float(loose) * lid)
+
+
 def hold_ease(delta: float, *, tight: float = _HOLD_MOVE_TIGHT, loose: float = _HOLD_MOVE_LOOSE) -> float:
     """1 = keep hold, 0 = drop it. Linear between ``tight`` and ``loose``."""
     span = max(float(loose) - float(tight), 1e-6)
@@ -348,6 +433,11 @@ def snap_alpha(alpha: float, move: float) -> float:
     """Share of the new key to show: ``alpha`` when still, 1 once the face moves."""
     ease = hold_ease(move, tight=_SNAP_MOVE_TIGHT, loose=_SNAP_MOVE_LOOSE)
     return 1.0 - (1.0 - float(alpha)) * ease
+
+
+def snap_move(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """``pose_move`` on Snap's scale, for ``snap_alpha``."""
+    return pose_move(a, b, loose=_SNAP_MOVE_LOOSE)
 
 
 def hold_plan(move: float, drift: float) -> tuple[float, float]:
@@ -381,11 +471,17 @@ def anchor_hold_latent(
     return (1.0 - amount) * last + amount * still
 
 
-def keypoints_for_model(keypoints: np.ndarray, layout: str) -> np.ndarray:
+def keypoints_for_model(
+    keypoints: np.ndarray,
+    layout: str,
+    *,
+    ref: np.ndarray | None = None,
+    lower_lids: Any = None,
+) -> np.ndarray:
     """Map KEYPOINT_SCHEMA rows to the layout a checkpoint expects."""
     from .model_layout import keypoints_for_model as _convert
 
-    return _convert(_as_keypoints37(keypoints), layout)
+    return _convert(_as_keypoints37(keypoints), layout, ref=ref, lower_lids=lower_lids)
 
 
 def _keypoints_for_model(
@@ -884,6 +980,22 @@ def _replace_legacy_sidecar(
         return loaded, sidecar, "legacy-sidecar"
 
 
+def detect_reference_lower_lids(
+    image_rgb: np.ndarray, device: str | None = "cpu"
+) -> list[list[list[float]]] | None:
+    """The still's own lower eyelids, or None (the model then gets each upper
+    lid mirrored, which cannot close a tall eye). Never raises."""
+    try:
+        from .ref_pose_fit import detect_lower_lids
+
+        lids = detect_lower_lids(image_rgb, device=device)
+    except Exception as exc:
+        print(f"[ref-fit] lower eyelids not found: {exc}")
+        return None
+    print(f"[ref-fit] lower eyelids: {'found' if lids else 'not found (mirrored upper lids)'}")
+    return lids
+
+
 def resolve_ref_keypoints(
     image_path: Path,
     keypoints: np.ndarray | Path | str | None = None,
@@ -1372,6 +1484,8 @@ class StreamEngine:
         self._ref_face_latent: torch.Tensor | None = None
         self._ref_keypoints: np.ndarray | None = None
         self._ref_keypoints_model: np.ndarray | None = None
+        # The reference still's own lower eyelids (model_layout.lower_lid_shape).
+        self._lower_lids: list[list[list[float]]] | None = None
         # Rest pose at apply/calibrate time — mesh reset restores this, not the
         # last drag (which is already baked into ``_ref_keypoints``).
         self._ref_keypoints_session_base: np.ndarray | None = None
@@ -1815,6 +1929,7 @@ class StreamEngine:
         hair_maps: np.ndarray | torch.Tensor | None,
         prev: torch.Tensor | None,
         start_t: float,
+        kps_ref: np.ndarray | None = None,
     ) -> tuple[torch.Tensor, np.ndarray, float] | None:
         """One key through the frame graph: (latents, uint8 images, seconds), or None.
 
@@ -1832,7 +1947,7 @@ class StreamEngine:
             t0 = time.perf_counter()
             latents, images, finite = gf.run(
                 kps_target=kps_model,
-                kps_ref=self._ref_keypoints_model,
+                kps_ref=self._ref_keypoints_model if kps_ref is None else kps_ref,
                 ref_latent=self._ref_latent,
                 ref_face_latent=self._ref_face_latent,
                 hair_maps=hair_maps,
@@ -1849,7 +1964,7 @@ class StreamEngine:
             bsz = int(kps_model.shape[0]) if np.ndim(kps_model) == 3 else 1
             if self._graph_mode_failed(mode, failure, bsz) is None:
                 return None
-            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
         if finite:
             return latents, images, seconds
         del gf
@@ -1858,12 +1973,12 @@ class StreamEngine:
             print(f"[graph] {mode} frame came out NaN/Inf in fp16, rebuilding that graph in fp32")
             self._graph_fp32_modes.add(mode)
             self._drop_graph_frame(mode)
-            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
         if plan == "normal":
             print("[graph] Ultra frame came out NaN/Inf in fp32, using the Normal decoder")
             self._ultra_failed = True
             self._drop_graph_frame(mode)
-            return self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
         self._graph_fallback(f"{mode} frame came out NaN/Inf in {dtype}")
         return None
 
@@ -2155,7 +2270,7 @@ class StreamEngine:
                 and self._ref_keypoints is not None
                 and Path(ref).suffix.lower() != ".vtm"
             ):
-                self._set_reference_locked(ref, self._ref_keypoints)
+                self._set_reference_locked(ref, self._ref_keypoints, lower_lids=self._lower_lids)
             return path
 
     def checkpoint_name(self) -> str:
@@ -2208,6 +2323,8 @@ class StreamEngine:
             path, keypoints, skip_crop=bool(skip_crop), fit_device="cpu"
         )
 
+        lower_lids = detect_reference_lower_lids(arr)
+
         print(f"Waiting for GPU lock to encode reference {path.name} …")
         _tick(0.55, "Encoding reference…")
         with self._cuda_lock:
@@ -2218,6 +2335,7 @@ class StreamEngine:
                 pose_source=pose_source,
                 skip_crop=bool(skip_crop),
                 image_arr=arr,
+                lower_lids=lower_lids,
             )
         _tick(0.92, "Building preview…")
         return out
@@ -2231,6 +2349,7 @@ class StreamEngine:
         kps_path: Path | None = None,
         pose_source: str | None = None,
         image_arr: np.ndarray | None = None,
+        lower_lids: Any = None,
     ) -> Path:
         if not self._ready:
             self.load()
@@ -2255,6 +2374,10 @@ class StreamEngine:
                 path, keypoints, skip_crop=bool(skip_crop), fit_device="cpu"
             )
         used_neutral = pose_source == "neutral"
+        from .model_layout import valid_lower_lids
+
+        # Installed with the reference: a failed encode keeps the old still's lids.
+        lids = valid_lower_lids(lower_lids)
 
         if (
             self._ref_path == path
@@ -2263,6 +2386,11 @@ class StreamEngine:
             and self._ref_keypoints_model is not None
             and np.allclose(self._ref_keypoints, kps, atol=1e-5)
         ):
+            if lids != self._lower_lids:
+                # The last frame was drawn against the old lids; do not continue it.
+                self.clear_last_gen_latent()
+            self._lower_lids = lids
+            self._ref_keypoints_model = self._model_keypoints(kps, ref=kps)
             if self._ref_rig is None:
                 from .live_retarget import build_reference_rig
 
@@ -2292,7 +2420,7 @@ class StreamEngine:
             )
         use_face = bool(self._cfg.get("use_ref_face_tokens", True))
         face_size = int(self._cfg.get("ref_face_size", 32))
-        kps_model = keypoints_for_model(kps, self.keypoint_layout)
+        kps_model = keypoints_for_model(kps, self.keypoint_layout, ref=kps, lower_lids=lids)
         print(
             f"[pose-diag] model keypoint layout: {self.keypoint_layout} "
             "(runtime mesh remains KEYPOINT_SCHEMA)"
@@ -2326,6 +2454,7 @@ class StreamEngine:
         # replace them with encode_reference's tensor after a bad pixel remap.
         self._ref_keypoints = kps
         self._ref_keypoints_model = kps_model
+        self._lower_lids = lids
         self._ref_keypoints_session_base = kps.copy()
         from .live_retarget import build_reference_rig
 
@@ -2391,6 +2520,7 @@ class StreamEngine:
         skip_crop: bool,
         path: Path | str,
         pose_source: str = "character_pack",
+        lower_lids: Any = None,
     ) -> Path:
         """Install a pre-encoded reference without running the VAE."""
         if not self._ready:
@@ -2399,7 +2529,10 @@ class StreamEngine:
                     self.load()
         dest = Path(path)
         kps = sanitize_normalized_keypoints(np.asarray(keypoints, dtype=np.float32))
-        kps_model = keypoints_for_model(kps, self.keypoint_layout)
+        from .model_layout import valid_lower_lids
+
+        lids = valid_lower_lids(lower_lids)
+        kps_model = keypoints_for_model(kps, self.keypoint_layout, ref=kps, lower_lids=lids)
         latent = torch.from_numpy(np.asarray(ref_latent, dtype=np.float32))
         if latent.ndim == 3:
             latent = latent.unsqueeze(0)
@@ -2422,6 +2555,7 @@ class StreamEngine:
         self.clear_last_gen_latent()
         self._ref_keypoints = kps
         self._ref_keypoints_model = kps_model
+        self._lower_lids = lids
         self._ref_keypoints_session_base = kps.copy()
         from .live_retarget import build_reference_rig
 
@@ -2438,6 +2572,37 @@ class StreamEngine:
         )
         return dest
 
+    def _model_keypoints(self, kps: np.ndarray, *, ref: np.ndarray | None = None) -> np.ndarray:
+        """``kps`` in the checkpoint's layout, lower lids from the reference."""
+        return keypoints_for_model(
+            kps,
+            self.keypoint_layout,
+            ref=self._ref_keypoints if ref is None else ref,
+            lower_lids=self._lower_lids,
+        )
+
+    def _shut_eye_ref(self, kps_batch: np.ndarray) -> np.ndarray | None:
+        """Model-layout reference for this call: turned while the eyes shut
+        (``shut_ref_turn``), so the still's open eye is not copied in. One
+        reference per call, by the most shut key in the batch."""
+        ref = self._ref_keypoints_model
+        if ref is None or self._ref_keypoints is None:
+            return ref
+        from .model_layout import eye_shut
+
+        shut = max(eye_shut(kps_batch[i], self._ref_keypoints) for i in range(kps_batch.shape[0]))
+        degrees = shut_ref_turn(shut)
+        return turned_ref(ref, degrees) if degrees > 0.0 else ref
+
+    def set_lower_lids(self, lower_lids: Any) -> None:
+        """Install the reference's own lower eyelids (``lower_lid_shape``)."""
+        from .model_layout import valid_lower_lids
+
+        self._lower_lids = valid_lower_lids(lower_lids)
+        if self._ref_keypoints is not None:
+            self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
+            self.clear_last_gen_latent()
+
     def adopt_ref_keypoints(
         self,
         keypoints: np.ndarray,
@@ -2453,7 +2618,7 @@ class StreamEngine:
         """
         kps = _as_keypoints37(keypoints).copy()
         self._ref_keypoints = kps
-        self._ref_keypoints_model = keypoints_for_model(kps, self.keypoint_layout)
+        self._ref_keypoints_model = self._model_keypoints(kps)
         # The last frame was drawn against the old rest; do not continue it.
         self.clear_last_gen_latent()
         from .live_retarget import build_reference_rig
@@ -2532,11 +2697,13 @@ class StreamEngine:
         kps = sanitize_normalized_keypoints(
             fitted, repair_mouth=False, repair_nose=False
         )
+        # The same still keeps its lower lids; another is read afresh.
+        lids = self._lower_lids if ref_path == self._ref_path else detect_reference_lower_lids(arr)
         with self._cuda_lock:
             # Force encode even if path matches (keypoints changed).
             self._ref_path = None
             self._set_reference_locked(
-                ref_path, kps, skip_crop=bool(skip_crop), image_arr=arr
+                ref_path, kps, skip_crop=bool(skip_crop), image_arr=arr, lower_lids=lids
             )
             self._ref_pose_source = "calibrated"
             saved = save_sidecar_keypoints(ref_path, kps)
@@ -2606,9 +2773,7 @@ class StreamEngine:
             if self._ref_keypoints is None:
                 return
             if self._ref_keypoints_model is None:
-                self._ref_keypoints_model = keypoints_for_model(
-                    self._ref_keypoints, self.keypoint_layout
-                )
+                self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
             if self.fast_mode:
                 if "tiny_vae" in stages:
                     _stage("tiny_vae", "Loading fast decoder")
@@ -3034,15 +3199,14 @@ class StreamEngine:
 
         kps_model = np.stack(
             [
-                keypoints_for_model(block_model_slots(kps_batch[i]), self.keypoint_layout)
+                self._model_keypoints(block_model_slots(kps_batch[i]))
                 for i in range(kps_batch.shape[0])
             ],
             axis=0,
         )
         if self._ref_keypoints_model is None:
-            self._ref_keypoints_model = keypoints_for_model(
-                self._ref_keypoints, self.keypoint_layout
-            )
+            self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
+        ref_model = self._shut_eye_ref(kps_batch)
 
         steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
 
@@ -3063,7 +3227,8 @@ class StreamEngine:
             prev = None
         start_t = 0.0
         if prev is not None:
-            move = face_pose_delta(self._last_hold_kps, now_kps)
+            move = pose_move(self._last_hold_kps, now_kps)
+            # Not pose_move: eyes held shut are a still face, fine to hold.
             drift = face_pose_delta(self._ref_keypoints, now_kps)
             start_t, pull = hold_plan(move, drift)
             if start_t <= 1e-4:
@@ -3072,7 +3237,7 @@ class StreamEngine:
             else:
                 prev = anchor_hold_latent(prev, self._ref_latent, pull=pull)
         if self._graph_ok(steps, pose_cfg, id_cfg):
-            graphed = self._run_graph_frame(kps_model, hair_maps, prev, start_t)
+            graphed = self._run_graph_frame(kps_model, hair_maps, prev, start_t, ref_model)
             if graphed is not None:
                 latents, images_u8, denoise_s = graphed
                 self._last_gen_latent = latents[-1:].detach().clone()
@@ -3096,7 +3261,7 @@ class StreamEngine:
                 self.model,
                 keypoints_target=kps_model,
                 ref_latent=self._ref_latent,
-                ref_keypoints=self._ref_keypoints_model,
+                ref_keypoints=ref_model,
                 ref_face_latent=self._ref_face_latent,
                 num_steps=steps,
                 pose_cfg_scale=pose_cfg,

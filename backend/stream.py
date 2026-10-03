@@ -60,7 +60,7 @@ from .engine import (
     _clip_max_fps,
     show_fps_max,
     effective_inbetweens,
-    face_pose_delta,
+    snap_move,
     gen_cap,
     gen_hold_s,
     interpolate_on,
@@ -1559,6 +1559,7 @@ class StreamRuntime:
                 ref_face_latent=pack.ref_face_latent,
                 skip_crop=pack.skip_crop,
                 path=ref,
+                lower_lids=self._pack_lower_lids(ref, pack),
             )
             return
         from .paths import refs_dir
@@ -2099,6 +2100,7 @@ class StreamRuntime:
                     ref_face_latent=pack.ref_face_latent,
                     skip_crop=pack.skip_crop,
                     path=path,
+                    lower_lids=self._pack_lower_lids(path, pack),
                 )
             else:
                 # Made with another model (or size): re-encode, preferring the
@@ -2214,6 +2216,7 @@ class StreamRuntime:
             "_ref_keypoints_model",
             "_ref_keypoints_session_base",
             "_ref_rig",
+            "_lower_lids",
         ):
             try:
                 setattr(eng, attr, None)
@@ -2505,6 +2508,29 @@ class StreamRuntime:
             # which is compared above; the model tag guards the rest.
             latent_shape=np.shape(pack.ref_latent),
         )
+
+    def _pack_lower_lids(self, path: Path, pack: Any) -> list[list[list[float]]] | None:
+        """The character's own lower eyelids: kept in its fit, else read once
+        from the still and kept there, so a blink can shut the eye."""
+        from .engine import detect_reference_lower_lids
+        from .model_layout import valid_lower_lids
+
+        lids = valid_lower_lids((getattr(pack, "fit", None) or {}).get("lower_lids"))
+        if lids is not None:
+            return lids
+        still = getattr(pack, "preview_rgb", None)
+        if still is None:
+            return None
+        lids = detect_reference_lower_lids(still)
+        if lids is not None:
+            from .character_pack import read_pack_fit, write_pack_fit
+
+            try:
+                # Fresh read: write_pack_fit replaces the whole fit.json.
+                write_pack_fit(path, {**read_pack_fit(path), "lower_lids": lids})
+            except Exception as exc:
+                print(f"Could not keep the lower eyelids in {path.name}: {exc}")
+        return lids
 
     def _store_reencoded_latents(self, path: Path) -> None:
         from .character_pack import replace_pack_latents
@@ -4516,7 +4542,7 @@ class StreamRuntime:
         if keypoints is not None:
             self._ema_kps = np.asarray(keypoints, dtype=np.float32).copy()
             if prev_kps is not None:
-                alpha = snap_alpha(alpha, face_pose_delta(prev_kps, self._ema_kps))
+                alpha = snap_alpha(alpha, snap_move(prev_kps, self._ema_kps))
         held = getattr(self, "_ema_frame", None)
         if (
             held is None

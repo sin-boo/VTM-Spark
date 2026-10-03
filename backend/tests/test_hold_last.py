@@ -11,7 +11,11 @@ from backend.engine import (
     face_pose_delta,
     hold_ease,
     hold_plan,
+    lid_delta,
     neutral_keypoints,
+    pose_move,
+    snap_move,
+    snap_alpha,
 )
 from backend.model_layout import LAYOUT_HRNET_NATIVE
 from backend.ui_session import load_ui_session, save_ui_session
@@ -142,6 +146,48 @@ def test_face_pose_delta_ignores_parked_and_measures_travel() -> None:
     parked[3, :2] = (0.9, 0.9)
     parked[3, 3] = 0.0
     assert face_pose_delta(rest, parked) < 0.02
+
+
+def _blink_step(rest: np.ndarray, amount: float) -> np.ndarray:
+    """Both lid mids ``amount`` of the way down to their corner lines."""
+    out = rest.copy()
+    for a, m, b in ((11, 12, 13), (17, 18, 19)):
+        chord = out[b, :2] - out[a, :2]
+        t = float(np.dot(out[m, :2] - out[a, :2], chord) / np.dot(chord, chord))
+        on = out[a, :2] + t * chord
+        out[m, :2] += amount * (on - out[m, :2])
+    return out
+
+
+def test_a_blink_counts_as_a_move_for_hold_and_snap() -> None:
+    rest = neutral_keypoints()
+    step = _blink_step(rest, 0.5)
+    # The mean face travel barely sees two lids...
+    assert hold_ease(face_pose_delta(rest, step)) == 1.0
+    # ...so a lid's move counts on its own: the hold drops and Snap shows the new key.
+    assert lid_delta(rest, step) > 0.0
+    assert hold_ease(pose_move(rest, step)) == 0.0
+    assert snap_alpha(0.58, snap_move(rest, step)) == 1.0
+
+
+def test_lid_delta_ignores_a_head_slide_and_lid_jitter() -> None:
+    rest = neutral_keypoints()
+    slid = rest.copy()
+    slid[:28, 0] += 0.05
+    assert lid_delta(rest, slid) < 1e-6
+    jitter = _blink_step(rest, 0.02)
+    assert hold_ease(pose_move(rest, jitter)) == 1.0
+
+
+def test_snap_still_blends_through_a_pixel_of_lid_wobble() -> None:
+    rest = neutral_keypoints()
+    wobble = rest.copy()
+    wobble[12, 1] += 0.002  # about a pixel at 512, a tenth of this shallow lid
+    assert snap_alpha(0.58, snap_move(rest, wobble)) == 0.58
+    assert hold_ease(pose_move(rest, wobble)) == 1.0
+    # A third of a blink in one key is a move on either scale.
+    quarter = _blink_step(rest, 0.33)
+    assert snap_alpha(0.58, snap_move(rest, quarter)) == 1.0
 
 
 def test_anchor_hold_pulls_toward_ref() -> None:

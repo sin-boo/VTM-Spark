@@ -14,3 +14,14 @@ atexit.register(shutil.rmtree, _LAB_OUTPUT, True)
 from backend.paths import ensure_import_paths  # noqa: E402
 
 ensure_import_paths()
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_lower_lid_detector(monkeypatch):
+    """Loading a character reads its lower eyelids with the anime face
+    detector; tests never load that model."""
+    import backend.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "detect_reference_lower_lids", lambda *_a, **_k: None)
