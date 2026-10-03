@@ -39,7 +39,7 @@ from .ifm import (
 )
 from .mouth_bits import bits as mouth_bits
 from .eye_bits import bits as eye_bits
-from .osf_cam import OsfFrame, _draw_lid_mids, _encode_jpeg, _stamp_id
+from .osf_cam import OsfFrame, _draw_lid_mids, _encode_jpeg, _stamp_id, preview_wanted
 from .retarget import FACE_TRACK
 from .rig import project_head
 from .visemes import apply_calibrated_rest, mouth_features
@@ -378,6 +378,8 @@ class IfmCam:
         hits = 0
         fps_t = time.perf_counter()
         pending = _LatestDatagram()
+        # Drawn and encoded only while Track Lab's preview is read.
+        pip = b""
         try:
             if sock is None:
                 raise RuntimeError("iFacialMocap socket closed")
@@ -430,14 +432,8 @@ class IfmCam:
                 self.receiving = True
                 self.peer = ip
                 self.last_peer = ip
-                snap = OsfFrame(
-                    weights=weights,
-                    head=dict(head),
-                    blink=blink,
-                    pose=pose,
-                    faces=1,
-                    ms=(time.perf_counter() - started) * 1000.0,
-                    camera_jpeg=_encode_jpeg(
+                if preview_wanted() or not pip:
+                    pip = _encode_jpeg(
                         _draw_ifm(
                             pip_pts,
                             True,
@@ -445,7 +441,15 @@ class IfmCam:
                             head,
                             look,
                         )
-                    ),
+                    )
+                snap = OsfFrame(
+                    weights=weights,
+                    head=dict(head),
+                    blink=blink,
+                    pose=pose,
+                    faces=1,
+                    ms=(time.perf_counter() - started) * 1000.0,
+                    camera_jpeg=pip,
                     look=look,
                     source="ifm",
                     brow=brow_of(packet),
