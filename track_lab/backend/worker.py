@@ -111,6 +111,11 @@ def main() -> int:
         _log(f"missing {ENV_PORT}")
         return 2
     _log(f"loading FaceBench (torch) ipc={port}")
+    import cv2
+
+    # OpenCV's default pool is one spinning thread per core; next to a game that
+    # costs more than the small per-frame ops it speeds up.
+    cv2.setNumThreads(2)
     from backend.face import bench
 
     _log("FaceBench ready — connecting to host")
