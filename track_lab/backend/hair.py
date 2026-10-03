@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -76,6 +77,27 @@ def _load_hair3():
         "amp": device.startswith("cuda"),
     }
     return _hair3
+
+
+def release_hair_model() -> None:
+    """Give the hair model's VRAM back. It only runs while a still is set up.
+
+    Kept, the Swin-base held over a gigabyte on the GPU for the whole live
+    session, next to the desk's DiT and whatever game is running. The next
+    detection loads it again (~2.5 s warm).
+    """
+    global _hair3
+    if _hair3 is None:
+        return
+    _hair3 = None
+    try:
+        import torch
+
+        if torch.cuda.is_initialized():
+            gc.collect()
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _mask_to_polygons(pred: np.ndarray, img_h: int, img_w: int) -> list[dict[str, Any]]:
@@ -581,3 +603,5 @@ def detect_hair(
     except Exception as exc:
         print(f"animeseg_hair3 failed ({exc})")
         return []
+    finally:
+        release_hair_model()

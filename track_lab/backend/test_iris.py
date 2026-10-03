@@ -656,3 +656,53 @@ def test_selfie_flips_head_turn() -> None:
     flip_far = abs(float(flipped[18, 1] - flipped[17, 1]))
     assert near > far
     assert flip_far > flip_near
+
+
+class _FakeYolo:
+    _iris_device = "cuda"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def predict(self, **kwargs):
+        self.calls.append(kwargs)
+        return []
+
+
+def _cam_frame() -> tuple[np.ndarray, np.ndarray]:
+    image = np.full((120, 200, 3), 128, dtype=np.uint8)
+    lms = np.zeros((68, 3), dtype=np.float32)
+    lms[:, 2] = 1.0
+    lms[36:42, 0] = np.linspace(40, 70, 6)
+    lms[36:42, 1] = 60.0
+    lms[42:48, 0] = np.linspace(120, 150, 6)
+    lms[42:48, 1] = 60.0
+    return image, lms
+
+
+def test_camera_crops_run_at_crop_size_not_640(monkeypatch) -> None:
+    from backend import iris
+
+    fake = _FakeYolo()
+    monkeypatch.delenv(iris.DEVICE_ENV, raising=False)
+    monkeypatch.setattr(iris, "_load_yolo", lambda: fake)
+    iris.detect_crops(*_cam_frame())
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["imgsz"] == iris.LIVE_IMGSZ == iris.CROP_LONG
+    assert iris.LIVE_IMGSZ % 32 == 0
+    crops = fake.calls[0]["source"]
+    assert len(crops) == 2
+    assert all(max(crop.shape[:2]) == iris.LIVE_IMGSZ for crop in crops)
+
+
+def test_iris_device_env(monkeypatch) -> None:
+    from backend import iris
+
+    fake = _FakeYolo()
+    monkeypatch.setattr(iris, "_load_yolo", lambda: fake)
+    monkeypatch.setenv(iris.DEVICE_ENV, "cpu")
+    assert iris._torch_device() == "cpu"
+    monkeypatch.setenv(iris.DEVICE_ENV, "off")
+    assert iris._torch_device() == "cpu"
+    assert iris.detect_crops(*_cam_frame()) == []
+    assert fake.calls == []
