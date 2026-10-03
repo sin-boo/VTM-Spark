@@ -68,7 +68,10 @@ internal static class Program
         {
             dir = InstallDir();
             Directory.CreateDirectory(dir);
+            // Earlier versions moved copies aside into dir itself.
             ClearOld(dir);
+            ClearOld(AsideDir(dir));
+            ClearLegacyLeftovers();
             foreach (string old in RegisteredFilters())
             {
                 before.Add(old);
@@ -163,11 +166,17 @@ internal static class Program
             }
             catch (UnauthorizedAccessException)
             {
-                MoveAside(path, dir);
+                if (!MoveAside(path, dir))
+                {
+                    return;
+                }
             }
             catch (IOException)
             {
-                MoveAside(path, dir);
+                if (!MoveAside(path, dir))
+                {
+                    return;
+                }
             }
             File.Copy(fresh, path);
         }
@@ -178,27 +187,59 @@ internal static class Program
         }
     }
 
-    // Into dir when it is on the same drive, else a hidden folder at the root
-    // of that drive. Both empty at the next restart.
-    private static void MoveAside(string path, string dir)
+    // Into dir\old, emptied at the next restart. Only when path is on dir's
+    // drive (a loaded DLL cannot move across drives); otherwise it stays put
+    // and its folder stays locked until the programs holding it close.
+    private static bool MoveAside(string path, string dir)
     {
         string root = Path.GetPathRoot(Path.GetFullPath(path));
-        string aside = dir;
-        bool leftovers = !string.Equals(root, Path.GetPathRoot(dir), StringComparison.OrdinalIgnoreCase);
-        if (leftovers)
+        if (!string.Equals(root, Path.GetPathRoot(dir), StringComparison.OrdinalIgnoreCase))
         {
-            aside = Path.Combine(root, "VTM Spark leftovers");
-            DirectoryInfo info = Directory.CreateDirectory(aside);
-            info.Attributes |= FileAttributes.Hidden;
-            ClearOld(aside);
+            return false;
         }
+        string aside = AsideDir(dir);
+        Directory.CreateDirectory(aside);
         string moved = Path.Combine(aside, Path.GetFileName(path) + "." + DateTime.Now.Ticks + ".old");
         File.Move(path, moved);
         MoveFileEx(moved, null, MoveFileDelayUntilReboot);
-        if (leftovers)
+        // After the file it holds; removes only an empty folder.
+        MoveFileEx(aside, null, MoveFileDelayUntilReboot);
+        return true;
+    }
+
+    // Where copies still loaded wait for the next restart: a plain folder
+    // inside dir, so on dir's drive.
+    private static string AsideDir(string dir)
+    {
+        return Path.Combine(dir, "old");
+    }
+
+    // Earlier versions moved copies held on another drive into a hidden
+    // "VTM Spark leftovers" folder at that drive's root. Empties and removes
+    // any still there; nothing creates it any more.
+    private static void ClearLegacyLeftovers()
+    {
+        foreach (DriveInfo drive in DriveInfo.GetDrives())
         {
-            // After the file it holds; removes only an empty folder.
-            MoveFileEx(aside, null, MoveFileDelayUntilReboot);
+            try
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady)
+                {
+                    continue;
+                }
+                string legacy = Path.Combine(drive.RootDirectory.FullName, "VTM Spark leftovers");
+                if (!Directory.Exists(legacy))
+                {
+                    continue;
+                }
+                ClearOld(legacy);
+                Directory.Delete(legacy);
+            }
+            catch (Exception)
+            {
+                // Still holds a copy some program has loaded; that run already
+                // set it to go at the next restart.
+            }
         }
     }
 
@@ -234,9 +275,7 @@ internal static class Program
             {
                 return dest;
             }
-            string old = dest + "." + DateTime.Now.Ticks + ".old";
-            File.Move(dest, old);
-            MoveFileEx(old, null, MoveFileDelayUntilReboot);
+            MoveAside(dest, dir);
         }
         File.Copy(src, dest);
         return dest;
@@ -245,6 +284,10 @@ internal static class Program
     // Copies moved aside by an earlier run, once nothing holds them any more.
     private static void ClearOld(string dir)
     {
+        if (!Directory.Exists(dir))
+        {
+            return;
+        }
         foreach (string old in Directory.GetFiles(dir, "*.old"))
         {
             try

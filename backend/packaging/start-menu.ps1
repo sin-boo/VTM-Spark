@@ -144,30 +144,6 @@ function Invoke-KillOrphans {
   }
 }
 
-function Get-VtmConsoleHwnd {
-  if (-not ("Win32.SplashWnd" -as [type])) {
-    Add-Type -Namespace Win32 -Name SplashWnd -MemberDefinition @"
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-"@
-  }
-  return [Win32.SplashWnd]::GetConsoleWindow()
-}
-
-function Hide-VtmConsole {
-  param($Hwnd)
-  if ($Hwnd -ne [IntPtr]::Zero) {
-    [void][Win32.SplashWnd]::ShowWindow($Hwnd, 0)
-  }
-}
-
-function Show-VtmConsole {
-  param($Hwnd)
-  if ($Hwnd -ne [IntPtr]::Zero) {
-    [void][Win32.SplashWnd]::ShowWindow($Hwnd, 5)
-  }
-}
-
 function Invoke-EnsureModel {
   param([switch]$Required)
 
@@ -300,9 +276,6 @@ function Invoke-EnsureVtmSparkCam {
   Write-Host ""
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
-  # A downloaded zip marks every file; a marked exe gets a SmartScreen warning
-  # on top of the admin prompt.
-  Unblock-File -LiteralPath $setupExe -ErrorAction SilentlyContinue
   try {
     Start-Process -FilePath $setupExe -WorkingDirectory (Split-Path $setupExe -Parent) -Wait -Verb RunAs
   } catch {
@@ -356,6 +329,17 @@ function Test-WebView2 {
   return $false
 }
 
+function Test-MicrosoftSigned {
+  param([string]$Path)
+  try {
+    $sig = Get-AuthenticodeSignature -LiteralPath $Path
+  } catch {
+    return $false
+  }
+  return ($sig.Status -eq "Valid" -and $sig.SignerCertificate -and
+    $sig.SignerCertificate.Subject -like "*Microsoft Corporation*")
+}
+
 function Invoke-EnsureWebView2 {
   if (Test-WebView2) {
     Write-Ansi "==> WebView2 runtime present" cyan
@@ -363,18 +347,32 @@ function Invoke-EnsureWebView2 {
   }
   Write-Host ""
   Write-Ansi "==> Installing Microsoft Edge WebView2 runtime (the desk window needs it)" cyan
-  # Microsoft's Evergreen bootstrapper, run silently. Unelevated it installs
-  # per-user with no UAC; if that is blocked, retry once system-wide (one UAC).
+  # Microsoft's Evergreen bootstrapper, kept in .tools\webview2 (run.exe uses the
+  # same file). Unelevated and silent it installs per-user with no UAC; if that
+  # is blocked, retry once system-wide with Microsoft's own installer window.
   $url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-  $exe = Join-Path $env:TEMP ("vtm-webview2-" + [guid]::NewGuid().ToString("N") + ".exe")
+  $dir = Join-Path $Root ".tools\webview2"
+  $exe = Join-Path $dir "MicrosoftEdgeWebview2Setup.exe"
   try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $prevProgress = $ProgressPreference
-    $ProgressPreference = "SilentlyContinue"
-    try {
-      Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
-    } finally {
-      $ProgressPreference = $prevProgress
+    if ((Test-Path -LiteralPath $exe) -and -not (Test-MicrosoftSigned $exe)) {
+      Remove-Item -LiteralPath $exe -Force
+    }
+    if (-not (Test-Path -LiteralPath $exe)) {
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      $part = "$exe.part"
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $prevProgress = $ProgressPreference
+      $ProgressPreference = "SilentlyContinue"
+      try {
+        Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing
+      } finally {
+        $ProgressPreference = $prevProgress
+      }
+      Move-Item -LiteralPath $part -Destination $exe -Force
+      if (-not (Test-MicrosoftSigned $exe)) {
+        Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+        throw "the downloaded installer is not signed by Microsoft"
+      }
     }
     $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Wait -PassThru
     Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
@@ -384,14 +382,13 @@ function Invoke-EnsureWebView2 {
       Write-Ansi "    This is for WebView2, Microsoft's component that draws the VTM Spark window." slate
       Write-Ansi "    The quick install did not take, so it installs for all users instead." slate
       Write-Ansi "    The prompt will say 'Microsoft Edge Update Setup' - that is this step. Click Yes." slate
+      Write-Ansi "    Microsoft's installer window then shows its progress." slate
       Write-Host ""
-      $proc = Start-Process -FilePath $exe -ArgumentList "/silent", "/install" -Verb RunAs -Wait -PassThru
+      $proc = Start-Process -FilePath $exe -ArgumentList "/install" -Verb RunAs -Wait -PassThru
       Write-Ansi "    WebView2 installer exited $($proc.ExitCode)" slate
     }
   } catch {
     Write-Ansi "WebView2 install failed: $_" amber
-  } finally {
-    Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
   }
   if (Test-WebView2) {
     Write-Ansi "WebView2 runtime installed." green
@@ -671,8 +668,7 @@ function Wait-VtmDeskWindow {
 }
 
 function Show-StartFailure {
-  param($ConsoleHwnd, [string]$Reason)
-  Show-VtmConsole $ConsoleHwnd
+  param([string]$Reason)
   Write-Host ""
   Write-Ansi $Reason rose
   $log = Join-Path $Root "models\vtm_noble.log"
@@ -698,7 +694,6 @@ function Invoke-StartApp {
     return
   }
 
-  $consoleHwnd = Get-VtmConsoleHwnd
   Write-Host ""
   Write-Ansi "==> Starting operator desk…" cyan
   Write-Ansi "    This window stays until the splash appears." slate
@@ -737,14 +732,13 @@ function Invoke-StartApp {
       if ($null -ne $proc -and $proc.HasExited) {
         $why = "Desk process exited before the splash appeared."
       }
-      Show-StartFailure $consoleHwnd $why
+      Show-StartFailure $why
       return
     }
-    Hide-VtmConsole $consoleHwnd
+    # Exiting closes this console; nothing needs to hide it first.
     exit 0
   } catch {
     $code = 1
-    Show-VtmConsole $consoleHwnd
     Write-Ansi "Failed to start: $_" rose
   } finally {
     if ($null -eq $prevPyPath) {
@@ -754,7 +748,7 @@ function Invoke-StartApp {
     }
   }
   if ($code -and $code -ne 0) {
-    Show-StartFailure $consoleHwnd "Process exited with code $code"
+    Show-StartFailure "Process exited with code $code"
     return
   }
 }

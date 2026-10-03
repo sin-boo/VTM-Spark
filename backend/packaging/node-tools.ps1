@@ -34,9 +34,12 @@ function Install-VtmNode {
   param([string]$RepoRoot)
   $dir = Get-VtmNodeDir $RepoRoot
   Write-Host "==> Downloading Node.js $NodeVersion into .tools\node (one-time, ~35 MB)"
+  # Staged inside the app folder, not %TEMP%; same volume, so the Move-Item below works.
+  $stage = Join-Path $RepoRoot ".tools\downloads"
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
   $tag = [guid]::NewGuid().ToString("N")
-  $zip = Join-Path $env:TEMP "vtm-node-$tag.zip"
-  $extract = Join-Path $env:TEMP "vtm-node-extract-$tag"
+  $zip = Join-Path $stage "node-$tag.zip"
+  $extract = Join-Path $stage "node-extract-$tag"
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $prevProgress = $ProgressPreference

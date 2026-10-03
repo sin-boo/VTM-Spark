@@ -55,10 +55,9 @@ def test_start_app_keeps_console_until_splash() -> None:
     assert "Wait-VtmDeskWindow" in body
     assert "Show-StartFailure" in body
     assert body.index("Start-Process") < body.index("Wait-VtmDeskWindow")
-    assert body.index("Wait-VtmDeskWindow") < body.index("Hide-VtmConsole")
+    assert body.index("Wait-VtmDeskWindow") < body.index("exit 0")
     assert "This window stays until the splash appears." in body
-    hide_before_start = body[: body.index("Start-Process")].count("Hide-VtmConsole")
-    assert hide_before_start == 0
+    assert "Hide-VtmConsole" not in body
 
 
 def test_start_repairs_dead_venv_home() -> None:

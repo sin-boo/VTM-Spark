@@ -54,14 +54,6 @@ def setup_exe() -> Path:
     return vcam_bundle_dir() / "VTM Spark Camera Setup.exe"
 
 
-def _unblock(path: Path) -> None:
-    """Drop the downloaded-file mark, so no SmartScreen warning joins the prompt."""
-    try:
-        Path(f"{path}:Zone.Identifier").unlink()
-    except OSError:
-        pass
-
-
 def device_available() -> bool:
     """True if pyvirtualcam can open our named Unity Capture device."""
     try:
@@ -203,7 +195,6 @@ def ensure_installed(*, allow_prompt: bool = True) -> None:
     creationflags = 0
     if sys.platform.startswith("win"):
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    _unblock(setup)
     try:
         proc = subprocess.run(
             [str(setup)],

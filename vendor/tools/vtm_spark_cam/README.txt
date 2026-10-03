@@ -11,8 +11,11 @@ backend\packaging\cam-setup.cs, built by build-run.ps1). Windows' admin
 prompt shows its name and the VTM Spark logo. It copies the filters to
 Program Files\VTM Spark\Camera and registers that copy, so programs that
 list webcams do not keep this folder open. A copy some program already has
-loaded (from an older install) moves out of the app folder and a fresh one
-takes its place, so the folder deletes without a restart. Started without admin it
+loaded (from an older install) moves into Program Files\VTM Spark\Camera\old
+(emptied at the next restart) and a fresh one takes its place, so the folder
+deletes without a restart. That needs the app on the same drive as Program
+Files; on another drive the folder stays locked until the programs holding the
+copy close. Started without admin it
 asks for it itself. Exit codes: 0 done, 1223 prompt declined, 2 a filter
 is missing, 3 registering failed.
 

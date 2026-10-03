@@ -18,6 +18,8 @@ $Py = Join-Path $VenvDir "Scripts\python.exe"
 # Pinned uv release (downloaded into .tools\ only when uv is not already on PATH).
 $UvVersion = "0.12.9"
 $UvZipUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
+# From https://github.com/astral-sh/uv/releases/download/0.12.9/uv-x86_64-pc-windows-msvc.zip.sha256
+$UvZipSha256 = "ddbfcee1ac615a0499f6aa97b5ec8ebdf3ee4a7714a48055ec2ba0030e3cf810"
 # Managed Python that uv downloads when no usable system Python is found.
 $ManagedPythonVersion = "3.13"
 
@@ -33,15 +35,22 @@ function Get-UvExe {
   Write-Host "==> Downloading uv $UvVersion into .tools\ (one-time)"
   $tools = Join-Path $Root ".tools"
   New-Item -ItemType Directory -Force -Path $tools | Out-Null
+  # Staged inside the app folder, not %TEMP%.
+  $stage = Join-Path $tools "downloads"
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
   $tag = [guid]::NewGuid().ToString("N")
-  $zip = Join-Path $env:TEMP "vtm-uv-$tag.zip"
-  $extract = Join-Path $env:TEMP "vtm-uv-extract-$tag"
+  $zip = Join-Path $stage "uv-$tag.zip"
+  $extract = Join-Path $stage "uv-extract-$tag"
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     try {
       Invoke-WebRequest -Uri $UvZipUrl -OutFile $zip -UseBasicParsing
     } catch {
       throw "Could not download uv $UvVersion from $UvZipUrl ($($_.Exception.Message)). Check your internet connection / proxy and re-run install.bat, or install uv yourself (https://docs.astral.sh/uv/) so it is on PATH."
+    }
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($hash -ne $UvZipSha256) {
+      throw "Checksum mismatch for the uv $UvVersion download (got $hash) - it was damaged or altered. Re-run install.bat."
     }
     Expand-Archive -Path $zip -DestinationPath $extract -Force
     $found = Get-ChildItem -Path $extract -Filter "uv.exe" -Recurse | Select-Object -First 1

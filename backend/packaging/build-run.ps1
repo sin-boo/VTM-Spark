@@ -25,7 +25,7 @@ $Fav = Join-Path $Root "ui\public\favicon.ico"
 & $py -m backend.app_icon $Png $Fav
 if ($LASTEXITCODE -ne 0) { throw "failed to write $Fav" }
 
-& $Csc /nologo /optimize /target:winexe /win32icon:"$Ico" /out:"$Out" "$Cs"
+& $Csc /nologo /optimize /target:winexe /reference:System.Management.dll /win32icon:"$Ico" /out:"$Out" "$Cs"
 if ($LASTEXITCODE -ne 0) { throw "csc failed" }
 Write-Host "wrote $Out"
 

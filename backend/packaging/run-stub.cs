@@ -1,19 +1,30 @@
 // run.exe - windowless launcher (compiled /target:winexe by build-run.ps1).
-// It never opens a console on its own: leftover cleanup, a stale-UI rebuild
-// and pythonw -m backend run hidden, and it exits once the desk's splash
-// window is up. When a start genuinely fails, a native dialog shows the reason
-// and offers the repair console (start-menu.ps1 -Action run); the console
-// only appears if the user says yes.
+// It never opens a console on its own: leftover cleanup runs in process, a
+// stale-UI rebuild and pythonw -m backend run hidden, and it exits once the
+// desk's splash window is up. When a start genuinely fails, a native dialog
+// shows the reason and offers the repair console (start-menu.ps1 -Action run);
+// the console only appears if the user says yes.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Management;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
+
+[assembly: AssemblyTitle("VTM Spark")]
+[assembly: AssemblyDescription("VTM Spark launcher")]
+[assembly: AssemblyCompany("VTM Studio")]
+[assembly: AssemblyProduct("VTM Spark")]
+[assembly: AssemblyCopyright("Copyright (c) VTM Studio")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 internal static class Program
 {
@@ -34,11 +45,17 @@ internal static class Program
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
     private const uint GW_OWNER = 4;
 
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, int tableClass, uint reserved);
+    private const int TCP_TABLE_OWNER_PID_LISTENER = 3;
+
     private const string DeskTitle = "VTM Spark";
     private const string DeskMutex = "Local\\VTMNobleSingleInstance";
     // Held by run.exe while it launches, before the desk takes DeskMutex.
     private const string LaunchMutex = "Local\\VTMNobleLauncher";
     private const int DeskPort = 8765;
+    // Last port kill-orphans.ps1's full sweep clears (8765-8828).
+    private const int LastPort = 8828;
     // backend/__main__.py exits with this when WebView2 is not installed.
     private const int WebView2MissingCode = 3;
     private const string WebView2RuntimeKey = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
@@ -134,8 +151,8 @@ internal static class Program
         }
 
         // Same sweep start-menu.ps1 does before a start: a leftover backend or
-        // ui/_mock_boot.py on port 8765 would otherwise refuse the desk. The
-        // script costs ~1.5 s, so it only runs when something could be left over.
+        // ui/_mock_boot.py on port 8765 would otherwise refuse the desk. It
+        // needs a WMI query, so it only runs when something could be left over.
         if (MaybeLeftovers())
         {
             KillOrphans(true);
@@ -148,7 +165,7 @@ internal static class Program
         return StartDesk(pyw);
     }
 
-    // Cheap check for anything kill-orphans.ps1 -Fast could stop.
+    // Cheap check for anything KillOrphans(true) could stop.
     private static bool MaybeLeftovers()
     {
         foreach (string name in new[] { "python", "pythonw", "VTMNoble", "RealStream" })
@@ -262,18 +279,34 @@ internal static class Program
         return false;
     }
 
-    // Microsoft's Evergreen bootstrapper, silent: per-user first (no UAC),
-    // then system-wide once if that did not take.
+    // Microsoft's Evergreen bootstrapper, kept in .tools\webview2 and reused:
+    // silent per-user first (no UAC), then system-wide once, with its own UI,
+    // if that did not take.
     private static void InstallWebView2()
     {
         Log("WebView2 runtime missing - installing");
-        string exe = Path.Combine(Path.GetTempPath(), "vtm-webview2-" + Guid.NewGuid().ToString("N") + ".exe");
+        string exe = Path.Combine(Root, ".tools", "webview2", "MicrosoftEdgeWebview2Setup.exe");
         try
         {
-            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; // TLS 1.2
-            using (WebClient web = new WebClient())
+            if (File.Exists(exe) && !SignedByMicrosoft(exe))
             {
-                web.DownloadFile(WebView2Bootstrapper, exe);
+                Log("discarding unsigned " + exe);
+                File.Delete(exe);
+            }
+            if (!File.Exists(exe))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(exe));
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; // TLS 1.2
+                using (WebClient web = new WebClient())
+                {
+                    web.DownloadFile(WebView2Bootstrapper, exe);
+                }
+            }
+            if (!SignedByMicrosoft(exe))
+            {
+                Log("downloaded WebView2 setup is not signed by Microsoft - deleted");
+                File.Delete(exe);
+                return;
             }
             RunWebView2Installer(exe, false);
             if (!WebView2Installed())
@@ -290,9 +323,18 @@ internal static class Program
         {
             Log("WebView2 install failed: " + ex.Message);
         }
-        finally
+    }
+
+    // Authenticode signer check; also rejects a truncated download.
+    private static bool SignedByMicrosoft(string file)
+    {
+        try
         {
-            try { File.Delete(exe); } catch (Exception) { }
+            return X509Certificate.CreateFromSignedFile(file).Subject.Contains("O=Microsoft Corporation");
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -301,9 +343,8 @@ internal static class Program
         ProcessStartInfo psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = "/silent /install",
+            Arguments = elevated ? "/install" : "/silent /install",
             UseShellExecute = elevated,
-            CreateNoWindow = true,
         };
         if (elevated)
         {
@@ -318,14 +359,20 @@ internal static class Program
         }
     }
 
-    // Rebuild ui/dist hidden. True = ui/dist is usable (fresh, or the last
-    // build when the rebuild could not run).
+    // Rebuild ui/dist hidden: portable Node runs npm-cli.js itself; cmd.exe
+    // only when there is no .tools\node. True = ui/dist is usable (fresh, or
+    // the last build when the rebuild could not run).
     private static bool BuildUi()
     {
         string ui = Path.Combine(Root, "ui");
         string index = Path.Combine(ui, "dist", "index.html");
+        string node = Path.Combine(Root, ".tools", "node", "node.exe");
+        string npmCli = Path.Combine(Root, ".tools", "node", "node_modules", "npm", "bin", "npm-cli.js");
         Log("ui source newer than ui\\dist - rebuilding hidden");
-        int code = RunHidden("cmd.exe", "/c npm run build", ui, TimeSpan.FromMinutes(10));
+        TimeSpan limit = TimeSpan.FromMinutes(10);
+        int code = File.Exists(node) && File.Exists(npmCli)
+            ? RunHidden(node, "\"" + npmCli + "\" run build", ui, limit)
+            : RunHidden("cmd.exe", "/c npm run build", ui, limit);
         if (code == 0)
         {
             Log("ui rebuilt");
@@ -335,16 +382,259 @@ internal static class Program
         return File.Exists(index);
     }
 
+    // kill-orphans.ps1 -Quiet [-Fast], in process; start-menu.ps1 and build.ps1
+    // still run the script, so keep the two in step.
     private static void KillOrphans(bool fast)
     {
-        string ps1 = Path.Combine(Root, "backend", "packaging", "kill-orphans.ps1");
-        if (!File.Exists(ps1))
+        try
+        {
+            SweepOrphans(fast);
+        }
+        catch (Exception ex)
+        {
+            Log("orphan sweep failed: " + ex.Message);
+        }
+    }
+
+    private sealed class Proc
+    {
+        public int Pid;
+        public int Parent;
+        public string Name;
+        public string Cmd;
+        public DateTime Created;
+    }
+
+    private const RegexOptions Ci = RegexOptions.IgnoreCase;
+    private static readonly Regex PyExe = new Regex(@"^(python|pythonw)\.exe$", Ci);
+    private static readonly Regex MBackend = new Regex(@"-m\s+backend(\s|$)", Ci);
+    private static readonly Regex OurDir = new Regex(
+        @"[\\/](vtm[ _-]?(noble|studio|spark)|real_stream|VTMNoble|VTMStudio|VTMSpark|RealStream)[\\/]", Ci);
+    private static readonly Regex OurDist = new Regex(@"[\\/]dist[\\/](VTMNoble|RealStream)[\\/]", Ci);
+    private static readonly Regex OurEnv = new Regex("VTM_NOBLE|REAL_STREAM", Ci);
+    private static readonly Regex OurRuntime = new Regex(@"[\\/]dist[\\/]VTMNoble[\\/]runtime[\\/].*python", Ci);
+    private static readonly Regex MockBoot = new Regex(@"_mock_boot\.py", Ci);
+
+    private static void SweepOrphans(bool fast)
+    {
+        List<Proc> procs = Snapshot();
+        foreach (string name in new[] { "VTMNoble", "RealStream" })
+        {
+            foreach (int pid in PidsNamed(name))
+            {
+                KillTree(pid, procs);
+            }
+            // taskkill /F /IM <name>.exe
+            foreach (int pid in PidsNamed(name))
+            {
+                KillPid(pid);
+            }
+        }
+
+        // Full: ...\python.exe -m backend from one of our trees, or the packaged
+        // runtime. Fast: any python -m backend or ui/_mock_boot.py.
+        foreach (Proc p in procs)
+        {
+            if (p.Name == null || !PyExe.IsMatch(p.Name) || string.IsNullOrEmpty(p.Cmd))
+            {
+                continue;
+            }
+            bool ours = fast
+                ? MBackend.IsMatch(p.Cmd) || MockBoot.IsMatch(p.Cmd)
+                : (MBackend.IsMatch(p.Cmd)
+                    && (OurDir.IsMatch(p.Cmd) || OurDist.IsMatch(p.Cmd) || OurEnv.IsMatch(p.Cmd)))
+                    || OurRuntime.IsMatch(p.Cmd);
+            if (ours)
+            {
+                KillTree(p.Pid, procs);
+            }
+        }
+
+        // Fast: python on 8765 (Vite's mock API has no "-m backend").
+        // Full: python/desk on 8765-8828 (stale Track Lab on 8780 and the like).
+        Regex owner = new Regex(fast ? "^(python|pythonw)" : "^(python|pythonw|VTMNoble|RealStream)", Ci);
+        foreach (int pid in Listeners(DeskPort, fast ? DeskPort : LastPort))
+        {
+            if (pid <= 4)
+            {
+                continue;
+            }
+            string name = NameOf(pid);
+            if (name != null && owner.IsMatch(name))
+            {
+                KillTree(pid, procs);
+            }
+        }
+        if (!fast)
+        {
+            Thread.Sleep(500);
+        }
+    }
+
+    // Win32_Process: name, command line and parent of every process.
+    private static List<Proc> Snapshot()
+    {
+        List<Proc> procs = new List<Proc>();
+        try
+        {
+            using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                "SELECT ProcessId, ParentProcessId, Name, CommandLine, CreationDate FROM Win32_Process"))
+            using (ManagementObjectCollection rows = q.Get())
+            {
+                foreach (ManagementBaseObject row in rows)
+                {
+                    using (row)
+                    {
+                        Proc p = new Proc
+                        {
+                            Pid = Convert.ToInt32(row["ProcessId"]),
+                            Parent = Convert.ToInt32(row["ParentProcessId"]),
+                            Name = row["Name"] as string,
+                            Cmd = row["CommandLine"] as string,
+                            Created = DateTime.MinValue,
+                        };
+                        string created = row["CreationDate"] as string;
+                        if (!string.IsNullOrEmpty(created))
+                        {
+                            try { p.Created = ManagementDateTimeConverter.ToDateTime(created); } catch (Exception) { }
+                        }
+                        procs.Add(p);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("process list unavailable: " + ex.Message);
+        }
+        return procs;
+    }
+
+    private static List<int> PidsNamed(string name)
+    {
+        List<int> pids = new List<int>();
+        foreach (Process proc in Process.GetProcessesByName(name))
+        {
+            pids.Add(proc.Id);
+            proc.Dispose();
+        }
+        return pids;
+    }
+
+    private static string NameOf(int pid)
+    {
+        try
+        {
+            using (Process proc = Process.GetProcessById(pid))
+            {
+                return proc.ProcessName;
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // taskkill /F /T /PID: the process, then everything it started. A child
+    // older than its parent only inherited a reused pid and is left alone.
+    private static void KillTree(int root, List<Proc> procs)
+    {
+        Dictionary<int, Proc> byPid = new Dictionary<int, Proc>();
+        foreach (Proc p in procs)
+        {
+            byPid[p.Pid] = p;
+        }
+        List<int> doomed = new List<int> { root };
+        for (int i = 0; i < doomed.Count; i++)
+        {
+            Proc parent;
+            byPid.TryGetValue(doomed[i], out parent);
+            foreach (Proc p in procs)
+            {
+                if (p.Parent != doomed[i] || doomed.Contains(p.Pid))
+                {
+                    continue;
+                }
+                if (parent != null && parent.Created != DateTime.MinValue
+                    && p.Created != DateTime.MinValue && p.Created < parent.Created)
+                {
+                    continue;
+                }
+                doomed.Add(p.Pid);
+            }
+        }
+        foreach (int pid in doomed)
+        {
+            KillPid(pid);
+        }
+    }
+
+    private static void KillPid(int pid)
+    {
+        if (pid <= 4 || pid == Process.GetCurrentProcess().Id)
         {
             return;
         }
-        string args = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \""
-            + ps1 + "\" -Quiet" + (fast ? " -Fast" : "");
-        RunHidden("powershell.exe", args, Root, TimeSpan.FromSeconds(fast ? 30 : 90));
+        try
+        {
+            using (Process proc = Process.GetProcessById(pid))
+            {
+                proc.Kill();
+            }
+        }
+        catch (Exception) { }
+    }
+
+    // Owning pids of TCP listeners on ports lo..hi, IPv4 and IPv6
+    // (Get-NetTCPConnection -State Listen).
+    private static List<int> Listeners(int lo, int hi)
+    {
+        List<int> pids = new List<int>();
+        // AF_INET rows: 24 bytes, port at 8, pid at 20; AF_INET6: 56, 20, 52.
+        int[][] layouts = { new[] { 2, 24, 8, 20 }, new[] { 23, 56, 20, 52 } };
+        foreach (int[] l in layouts)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                int size = 0;
+                GetExtendedTcpTable(IntPtr.Zero, ref size, false, l[0], TCP_TABLE_OWNER_PID_LISTENER, 0);
+                if (size <= 0)
+                {
+                    break;
+                }
+                IntPtr buf = Marshal.AllocHGlobal(size);
+                try
+                {
+                    uint err = GetExtendedTcpTable(buf, ref size, false, l[0], TCP_TABLE_OWNER_PID_LISTENER, 0);
+                    if (err == 122) // ERROR_INSUFFICIENT_BUFFER: the table grew
+                    {
+                        continue;
+                    }
+                    if (err == 0)
+                    {
+                        int count = Marshal.ReadInt32(buf);
+                        for (int i = 0; i < count; i++)
+                        {
+                            IntPtr row = new IntPtr(buf.ToInt64() + 4 + (long)i * l[1]);
+                            int raw = Marshal.ReadInt32(row, l[2]);
+                            int port = ((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF);
+                            int pid = Marshal.ReadInt32(row, l[3]);
+                            if (port >= lo && port <= hi && !pids.Contains(pid))
+                            {
+                                pids.Add(pid);
+                            }
+                        }
+                    }
+                    break;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buf);
+                }
+            }
+        }
+        return pids;
     }
 
     // Exit code of a hidden child; -1 = could not start, -2 = timed out (killed).
@@ -363,7 +653,7 @@ internal static class Program
             psi.EnvironmentVariables["PYTHONPATH"] = Root;
             // Portable Node from install.bat (.tools\node) wins over a system one.
             string node = Path.Combine(Root, ".tools", "node");
-            if (File.Exists(Path.Combine(node, "npm.cmd")))
+            if (File.Exists(Path.Combine(node, "node.exe")) || File.Exists(Path.Combine(node, "npm.cmd")))
             {
                 psi.EnvironmentVariables["PATH"] = node + ";" + psi.EnvironmentVariables["PATH"];
                 psi.EnvironmentVariables["npm_config_cache"] = Path.Combine(Root, ".tools", "npm-cache");
