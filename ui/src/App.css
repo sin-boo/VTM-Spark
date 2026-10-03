@@ -2612,3 +2612,60 @@ html[data-splash] #root {
   height: 18px;
   cursor: nwse-resize;
 }
+
+/* Developer: performance test */
+.perf-test {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.perf-test input[type='text'] {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.perf-progress {
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.perf-progress > div {
+  height: 100%;
+  background: var(--paper);
+  transition: width 0.4s linear;
+}
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.perf-table th,
+.perf-table td {
+  padding: 2px 3px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.perf-table th:first-child,
+.perf-table td:first-child {
+  text-align: left;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.perf-table th {
+  color: var(--mute);
+  font-weight: 600;
+}
+
+.perf-table small {
+  color: var(--mute);
+  font-size: 9px;
+}

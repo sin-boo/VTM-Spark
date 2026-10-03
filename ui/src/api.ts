@@ -45,6 +45,30 @@ export type BootStatus = {
   }
 }
 
+/** One performance test: the character on a fixed loop, the desk timing itself. */
+export type PerfResult = {
+  label: string
+  seconds: number
+  fps: number
+  /** Frame rate over the slowest 1% of gaps between pictures. */
+  fps_low: number
+  /** Gaps of 250 ms or more between pictures. */
+  stalls: number
+  keys_per_s: number
+  key_ms: number
+  key_ms_p95: number
+  gpu: number | null
+  vram_mb: number | null
+  cpu: number | null
+}
+
+export type PerfTestState = {
+  running: boolean
+  progress: number
+  label: string
+  results: PerfResult[]
+}
+
 export type AppStatus = {
   state: string
   message: string
@@ -108,6 +132,9 @@ export type AppStatus = {
   /** In-betweens actually drawn per key gap right now (what Auto chose). */
   inbetweens_live?: number
   auto_sync_track: boolean
+  /** Developer section on (VTM_DEVELOPER=1 on the desk). */
+  developer?: boolean
+  perf_test?: PerfTestState
   gen_fps: number
   show_fps?: number
   timing: string
@@ -741,6 +768,16 @@ export const api = {
     fetch('/api/stream/pause', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   resumeStream: () =>
     fetch('/api/stream/resume', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  startPerfTest: (seconds: number, label = '') =>
+    fetch('/api/perf-test/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seconds, label }),
+    }).then((r) => json<AppStatus>(r)),
+  stopPerfTest: () =>
+    fetch('/api/perf-test/stop', { method: 'POST' }).then((r) => json<AppStatus>(r)),
+  clearPerfTests: () =>
+    fetch('/api/perf-test/clear', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   startVirtualCam: () =>
     fetch('/api/virtual-cam/start', { method: 'POST' }).then((r) => json<AppStatus>(r)),
   stopVirtualCam: () =>

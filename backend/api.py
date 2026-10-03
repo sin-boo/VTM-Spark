@@ -209,6 +209,11 @@ class LabCommandBody(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
 
 
+class PerfTestBody(BaseModel):
+    seconds: float = Field(30.0, ge=5.0, le=300.0)
+    label: str = ""
+
+
 class DownloadBody(BaseModel):
     name: str | None = None
     names: list[str] | None = None
@@ -920,6 +925,24 @@ def stream_resume() -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
     return get_runtime().status()
+
+
+@app.post("/api/perf-test/start")
+def perf_test_start(body: PerfTestBody) -> dict[str, Any]:
+    try:
+        return get_runtime().start_perf_test(body.seconds, body.label)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/perf-test/stop")
+def perf_test_stop() -> dict[str, Any]:
+    return get_runtime().stop_perf_test()
+
+
+@app.post("/api/perf-test/clear")
+def perf_test_clear() -> dict[str, Any]:
+    return get_runtime().clear_perf_results()
 
 
 @app.post("/api/virtual-cam/start")

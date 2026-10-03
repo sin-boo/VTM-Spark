@@ -15,11 +15,11 @@ import {
   type CharacterLoadResult,
   type LabStatus,
 } from '../api'
-import { DEVELOPER } from '../developer'
 import { LANGUAGES, useI18n, type I18n, type Lang, type MessageKey } from '../i18n'
 import { CharacterLibrary } from './CharacterLibrary'
 import { GpuPicker } from './GpuPicker'
 import { LabFeel, MixMeters } from './LabFeel'
+import { PerfTest } from './PerfTest'
 import { TravelBox } from './TravelBox'
 import { Lamp, ProgressMeter, Toggle } from './widgets'
 
@@ -136,6 +136,7 @@ function ifmListenLine(t: I18n['t'], ifm?: LabIfm): string {
 export function ControlRail(props: Props) {
   const { t, tr, lang } = useI18n()
   const s = props.status
+  const developer = Boolean(s?.developer)
   const busy = Boolean(s?.busy)
   const streaming = Boolean(s?.streaming)
   const paused = Boolean(s?.paused)
@@ -338,7 +339,7 @@ export function ControlRail(props: Props) {
         <div className="rail-controls">
           {modelProgress}
           <section className="group">
-            {DEVELOPER ? (
+            {developer ? (
               <div className="row">
                 <button
                   type="button"
@@ -393,7 +394,7 @@ export function ControlRail(props: Props) {
                 ))}
               </ul>
             ) : null}
-            {DEVELOPER ? (
+            {developer ? (
               <>
                 <label className="field">
                   <span>{t('ref.imagePath')}</span>
@@ -476,7 +477,7 @@ export function ControlRail(props: Props) {
                     </button>
                   </div>
                   {restCalib?.hint ? <p className="hint">{tr(restCalib.hint)}</p> : null}
-                  {DEVELOPER && s?.body_label ? <p className="hint">{s.body_label}</p> : null}
+                  {developer && s?.body_label ? <p className="hint">{s.body_label}</p> : null}
                 </>
               }
             >
@@ -983,11 +984,13 @@ export function ControlRail(props: Props) {
                 </button>
               </div>
             </section>
-            {DEVELOPER ? (
+            {developer ? (
               <section className="group">
                 <div className="group-head">
                   <h2 className="group-title">{t('dev.title')}</h2>
                 </div>
+                <h3 className="group-subtitle">{t('dev.perfTitle')}</h3>
+                <PerfTest status={s} />
                 <label className="field inline">
                   <span>{t('dev.trackFps')}</span>
                   <input

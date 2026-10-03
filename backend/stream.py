@@ -20,6 +20,7 @@ from PIL import Image
 
 from . import debug_log
 from .developer import DEVELOPER
+from .perf_check import MAX_RESULTS as PERF_MAX_RESULTS, PerfRun, motion_pose
 from .desk_boot import (
     new_boot_state,
     patch_boot_stage,
@@ -452,7 +453,10 @@ class StreamRuntime:
             "travel_box": default_travel_box(),
             "pose_frozen": False,
             "pose_key_count": 0,
+            "developer": DEVELOPER,
+            "perf_test": {"running": False, "progress": 0.0, "label": "", "results": []},
         }
+        self._perf: PerfRun | None = None
         if not DEVELOPER:
             self._status.update(_PRODUCT_LOCKED_SETTINGS)
         self._boot = new_boot_state()
@@ -3958,6 +3962,11 @@ class StreamRuntime:
         self._set_status(message="Recentered", track_message="Recentered — re-locking origin…")
 
     def _current_keypoints(self) -> np.ndarray | None:
+        perf = getattr(self, "_perf", None)
+        if perf is not None:
+            # Performance test: the same loop every run, no camera.
+            base = getattr(self.engine, "_ref_keypoints", None)
+            return motion_pose(neutral_keypoints() if base is None else base, perf.clock(time.perf_counter()))
         with self._lock:
             frozen = bool(self._pose_frozen or self._mesh_edited)
             if frozen and self._driven_keypoints is not None:
@@ -4833,7 +4842,11 @@ class StreamRuntime:
         self._last_image = image
         if self._vcam_wanted:
             self._push_virtual_cam(image)
-        show_fps = self._shown_fps(time.perf_counter())
+        now = time.perf_counter()
+        show_fps = self._shown_fps(now)
+        perf = getattr(self, "_perf", None)
+        if perf is not None:
+            perf.note_frame(now)
         if self._frames_wanted():
             # ~4 ms of JPEG a picture, ~20 a second: skipped while the desk is
             # minimized or closed (it gets the current picture when it is back).
@@ -4974,6 +4987,9 @@ class StreamRuntime:
     ) -> None:
         """One streaming DiT call is done: start the next, queue these keys."""
         self._note_timing(elapsed, timings, streaming=True)
+        perf = getattr(self, "_perf", None)
+        if perf is not None:
+            perf.note_call(time.perf_counter(), elapsed, len(images))
         key_interval = self._note_key_interval(time.perf_counter(), len(images))
         keys = [
             (
@@ -6061,6 +6077,82 @@ class StreamRuntime:
             track_message="Tracking on" if self._tracking else "Tracking off",
         )
         return self.status()
+
+    # ------------------------------------------------------------------ performance test
+    def _perf_state(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status.get("perf_test") or {})
+
+    def start_perf_test(self, seconds: float = 30.0, label: str = "") -> dict[str, Any]:
+        """Move the character on a fixed loop for ``seconds`` and time the stream.
+
+        Starts the stream if it is off (and stops it after); run it once alone and
+        once beside a game to see what the game costs.
+        """
+        if self._perf is not None:
+            raise RuntimeError("A performance test is already running.")
+        results = list(self._perf_state().get("results") or [])
+        label = str(label or "").strip()[:40] or f"Run {len(results) + 1}"
+        started = not self._streaming
+        run = PerfRun(min(max(float(seconds), 5.0), 300.0), time.perf_counter(), label=label, started_stream=started)
+        self._perf = run
+        try:
+            if started:
+                self.start_stream()
+                if not self._streaming:
+                    raise RuntimeError("Load a character before running the test.")
+        except Exception:
+            self._perf = None
+            raise
+        self._set_status(perf_test={"running": True, "progress": 0.0, "label": label, "results": results})
+        threading.Thread(target=self._perf_loop, args=(run,), name="perf-test", daemon=True).start()
+        return self.status()
+
+    def stop_perf_test(self) -> dict[str, Any]:
+        """End the test now; what it measured so far still becomes a result."""
+        run = self._perf
+        if run is not None:
+            run.stop.set()
+        return self.status()
+
+    def clear_perf_results(self) -> dict[str, Any]:
+        if self._perf is None:
+            self._set_status(perf_test={**self._perf_state(), "results": []})
+        return self.status()
+
+    def _perf_loop(self, run: PerfRun) -> None:
+        from .gpu_monitor import device_uuid, gpu_memory_used_mb
+
+        try:
+            import psutil
+
+            proc = psutil.Process()
+            proc.cpu_percent(None)
+            cores = psutil.cpu_count() or 1
+        except Exception:
+            proc, cores = None, 1
+        uuid = getattr(self, "_gpu_uuid", None) or device_uuid(getattr(self.engine, "device", None))
+        try:
+            while self._perf is run and self._streaming and not run.done(time.perf_counter()):
+                run.stop.wait(0.5)
+                now = time.perf_counter()
+                cpu = proc.cpu_percent(None) / cores if proc is not None else None
+                run.sample(now, gpu=self._gpu_util(), vram_mb=gpu_memory_used_mb(uuid), cpu=cpu)
+                self._set_status(perf_test={**self._perf_state(), "progress": run.progress(now)})
+        finally:
+            self._finish_perf(run)
+
+    def _finish_perf(self, run: PerfRun) -> None:
+        if self._perf is not run:
+            return
+        self._perf = None
+        result = run.result()
+        results = list(self._perf_state().get("results") or [])
+        if result["fps"] > 0:
+            results = (results + [result])[-PERF_MAX_RESULTS:]
+        if run.started_stream and self._streaming:
+            self.stop_stream()
+        self._set_status(perf_test={"running": False, "progress": 1.0, "label": run.label, "results": results})
 
     def _restore_lab_session(self) -> None:
         """Track Lab restarted: give the new tracker the character still again

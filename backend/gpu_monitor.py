@@ -96,3 +96,22 @@ def gpu_utilization(uuid: str, *, now: float | None = None) -> int | None:
                 value = int(util.gpu)
         _cache[uuid] = (t, value)
         return value
+
+
+class _Memory(ctypes.Structure):
+    _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+
+def gpu_memory_used_mb(uuid: str) -> float | None:
+    """Whole-card VRAM in use, MB (games count too), or None without NVML."""
+    if not uuid:
+        return None
+    with _lock:
+        lib = _load()
+        if lib is None:
+            return None
+        handle = _handle(lib, uuid)
+        mem = _Memory()
+        if handle is None or lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem)) != 0:
+            return None
+        return mem.used / (1024 * 1024)
