@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6">
   <img alt="NVIDIA RTX 30/40/50" src="https://img.shields.io/badge/GPU-NVIDIA%20RTX%2030%20%7C%2040%20%7C%2050-76B900">
-  <img alt="License Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue">
+  <a href="#license"><img alt="License: Apache 2.0, plus third-party model licences" src="https://img.shields.io/badge/license-Apache%202.0%20%2B%20third--party%20models-blue"></a>
 </p>
 
 ---
@@ -42,6 +42,12 @@
 - **Shows up as a webcam called "VTM Spark"** in OBS, Discord, Zoom, and anything else that takes a camera.
 - **Characters are single `.vtm` files** you can keep, back up, and share.
 - **Track Lab** lets you tune the mouth shapes, blinks, and how far the head may move, per character.
+
+## How it works
+
+<p align="center"><img src="docs/media/pipeline.svg" alt="Webcam or iPhone, then Track Lab, then 37 keypoints, then the VTM-1.5.1 DiT (fed with your character picture), then the SD VAE, then the VTM Spark camera" width="100%"></p>
+
+Your face is turned into 37 keypoints (face outline, brows, eyes, irises, nose, mouth, upper body). The model, `VTM-1.5.1`, redraws your character in that pose from its one reference picture, in a single step, and the VAE turns that into a 768 × 768 frame.
 
 ## Requirements
 
@@ -149,18 +155,25 @@ Shapes are edited with tracking stopped.
 
 ## Models and licences
 
-Models download automatically into:
+`install.bat` downloads the models for you. You never fetch them by hand.
 
-| Asset | Local path |
-|-------|------------|
-| DiT checkpoint | `models/dit/VTM-1.5.1.pt` |
-| Iris / body / hair trackers | `models/trackers/` |
-| Anime face box + landmarks (`face_yolov8n.pt`, `mmpose_anime-face_hrnetv2.pth`) | `models/trackers/` |
-| OpenSeeFace face stack | `vendor/tools/openseeface/models/` |
+<p align="center"><img src="docs/media/model-downloads.svg" alt="Model downloads by size: hair segmentation 432 MB, generator 360 MB, SD VAE 335 MB, anime face landmarks 39 MB, body keypoints 23 MB, OpenSeeFace 21 MB, tiny VAE 9.8 MB, iris 6.4 MB, anime face box 6.2 MB, body tracking 5.8 MB" width="100%"></p>
 
-Source weights: [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). Anime face weights come from [Bingsu/adetailer](https://huggingface.co/Bingsu/adetailer) and [hysts/anime-face-detector](https://github.com/hysts/anime-face-detector/releases/tag/v0.0.1).
+| Model | What it does | Size | Local path | Licence | Commercial use |
+|---|---|---|---|---|---|
+| `VTM-1.5.1.pt` | Draws your character (DiT) | 360 MB | `models/dit/` | Apache-2.0 (ours) | Yes |
+| `vtm-fast-decoder.pt` | Fast picture decode for the live stream | 3.9 MB | `models/decoder/` | Ours, distilled from `cqyan/hybrid-sd-tinyvae`, whose licence is not stated ([notices](THIRD_PARTY_NOTICES.md)) | Unclear |
+| `animeseg_hair3.pt` | Hair parts, so hair follows the head | 432 MB | `models/trackers/` | Our fine-tune of Meta Mask2Former, **CC BY-NC 4.0** | **No** |
+| `dwpose_v2.pt` | Body keypoints on your picture | 23 MB | `models/trackers/` | Our fine-tune of Ultralytics YOLO-pose, **AGPL-3.0** | Under AGPL terms |
+| `iris_pose.pt` | Iris / pupils on your picture | 6.4 MB | `models/trackers/` | Our fine-tune of Ultralytics YOLO-pose, **AGPL-3.0** | Under AGPL terms |
+| `pose_landmarker_lite.task` | Live body tracking (MediaPipe) | 5.8 MB | `models/trackers/` | Apache-2.0 (Google) | Yes |
+| OpenSeeFace (5 files) | Webcam face tracking | 21 MB | `vendor/tools/openseeface/models/` | BSD 2-Clause | Yes |
+| `face_yolov8n.pt` | Anime face box | 6.2 MB | `models/trackers/` | Apache-2.0 ([Bingsu/adetailer](https://huggingface.co/Bingsu/adetailer)) | Yes |
+| `mmpose_anime-face_hrnetv2.pth` | Anime face landmarks | 39 MB | `models/trackers/` | MIT ([hysts/anime-face-detector](https://github.com/hysts/anime-face-detector/releases/tag/v0.0.1)) | Yes |
+| `stabilityai/sd-vae-ft-mse` | Turns the model's output into a picture | 335 MB | Hugging Face cache | MIT | Yes |
+| `cqyan/hybrid-sd-tinyvae` | Faster picture decode | 9.8 MB | Hugging Face cache | Not stated by the publisher | Unclear |
 
-Hair tracking (`animeseg_hair3.pt`) is built on Mask2Former weights licensed CC BY-NC 4.0: **non-commercial use only** (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+The first seven come from our Hugging Face repo, [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). The rest come straight from their original publishers. In total that's about 1.24 GB; Python and PyTorch are downloaded separately.
 
 If the DiT weights are missing when you press Start, they download before launch.
 
@@ -180,5 +193,12 @@ Vendor code is committed under `vendor/`. Only pass `-SyncVendor` to `backend\pa
 ## License
 
 Apache License 2.0 covers VTM Spark source and **our** original / fine-tune training work (see [LICENSE](LICENSE)). That grant does **not** cover third-party model weights, and it does not apply to models added later.
+
+Two of the models we ship start from weights with stricter terms, and those terms still apply:
+
+- **`animeseg_hair3.pt`** (hair tracking) is built on Meta's Mask2Former weights: **CC BY-NC 4.0, non-commercial use only**.
+- **`iris_pose.pt` and `dwpose_v2.pt`** are built on Ultralytics YOLO-pose weights: **AGPL-3.0**.
+
+The full per-file list is in the [Models and licences](#models-and-licences) table above.
 
 Third-party weights keep the official licence of the publisher who released them. Inventory and source URLs: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). OpenSeeFace binary library notices: `vendor/tools/openseeface/Licenses/`.

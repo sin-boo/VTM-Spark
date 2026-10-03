@@ -8,14 +8,14 @@ This file lists the weights we actually load, the official license from the elig
 
 ## Ours (Apache-2.0)
 
-Eligible publisher: this project / [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark) (`license: apache-2.0` on that card).
+Eligible publisher: this project / [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). That card is tagged `license: other` and links back to this file, because the repo mixes Apache, AGPL, CC BY-NC and BSD files.
 
-| File | What it is |
-|------|------------|
-| `models/dit/VTM-1.5.1.pt` | Our DiT generation checkpoint |
-| `models/trackers/iris_pose.pt` | Our YOLO-pose iris / pupil fine-tune |
-| `models/trackers/dwpose_v2.pt` (+ `.onnx`) | Our YOLO-pose body fine-tune |
-| `models/trackers/animeseg_hair3.pt` | Our Mask2Former hair-part fine-tune |
+| File | What it is | Base weights still apply |
+|------|------------|--------------------------|
+| `models/dit/VTM-1.5.1.pt` | Our DiT generation checkpoint | None. Apache-2.0 throughout |
+| `models/trackers/iris_pose.pt` | Our YOLO-pose iris / pupil fine-tune | **AGPL-3.0** (Ultralytics) |
+| `models/trackers/dwpose_v2.pt` | Our YOLO-pose body fine-tune (a `.onnx` export is also accepted if present; setup downloads the `.pt`) | **AGPL-3.0** (Ultralytics) |
+| `models/trackers/animeseg_hair3.pt` | Our Mask2Former hair-part fine-tune | **CC BY-NC 4.0, non-commercial** (Meta) |
 
 Our training work is Apache. The **base weights those fine-tunes started from** are not. Ultralytics says a YOLO model trained from their pretrained checkpoints stays under AGPL-3.0 unless you have an Enterprise license or you trained from scratch without their weights. Iris and `dwpose_v2` are YOLO-pose fine-tunes.
 
@@ -35,7 +35,7 @@ Our training work is Apache. The **base weights those fine-tunes started from** 
 | `stabilityai/sd-vae-ft-mse` | Stability AI | MIT | [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) (`license: mit`) |
 | `cqyan/hybrid-sd-tinyvae` | cqyan / ByteDance Hybrid-SD; fine-tune of TAESD | **Not declared on the weight card.** Hybrid-SD *code* is Apache-2.0. TAESD *weights* are MIT (Ollin Boer Bohan). | [cqyan/hybrid-sd-tinyvae](https://huggingface.co/cqyan/hybrid-sd-tinyvae) (no `license:` field); [bytedance/Hybrid-SD](https://github.com/bytedance/Hybrid-SD); [madebyollin/taesd](https://huggingface.co/madebyollin/taesd) |
 | `models/decoder/vtm-fast-decoder.pt` (downloaded from `sinBoo1/VTM-Spark` on setup) | This project; **derived from** `cqyan/hybrid-sd-tinyvae` | Same open question as the TinyVAE row: its early decoder stages are warm-started with, and the whole decoder is distilled from, `cqyan/hybrid-sd-tinyvae`, whose weight licence is **not declared**. Our training (on this project's own dataset latents) is Apache, but that does not settle the upstream weights. | The TinyVAE row above; code `backend/pixel_decoder.py` |
-| `openai/clip-vit-large-patch14` (HF cache on first generation setup) | OpenAI | MIT | [openai/CLIP LICENSE](https://github.com/openai/CLIP/blob/main/LICENSE), Copyright (c) 2021 OpenAI |
+| `openai/clip-vit-large-patch14` (training scripts under `vendor/torch_train/` only; the app does not download it) | OpenAI | MIT | [openai/CLIP LICENSE](https://github.com/openai/CLIP/blob/main/LICENSE), Copyright (c) 2021 OpenAI |
 
 AnimeSeg ([suzukimain/AnimeSeg](https://github.com/suzukimain/AnimeSeg)) has **no license** on GitHub (`license: null`). Do not treat it as Apache.
 
@@ -44,7 +44,7 @@ AnimeSeg ([suzukimain/AnimeSeg](https://github.com/suzukimain/AnimeSeg)) has **n
 1. **YOLO fine-tunes** — Apache on our training does not replace AGPL on Ultralytics pretrained starts. Shipping `iris_pose.pt` or `dwpose_v2.pt` inside a closed app is the case Ultralytics says needs AGPL source-offer or an Enterprise license.
 2. **Hair Mask2Former** — CC BY-NC 4.0 on the Facebook zoo weights is the opposite of a commercial Apache grant. Keep `animeseg_hair3.pt` out of a paid/redistributed build unless Meta (or a later official relicense) says otherwise.
 3. **TinyVAE** — no official weight license from cqyan. Runtime download is convenient; redistributing those bytes needs a statement from that publisher. The same applies to `vtm-fast-decoder.pt`, which we **do** redistribute (Hugging Face `sinBoo1/VTM-Spark`, `decoder/`): it is a distillation warm-started from those weights, so a redistributed or paid build carries this open question until cqyan states a license.
-4. **Hugging Face pack** `sinBoo1/VTM-Spark` is tagged Apache-2.0 for the **repo**, but the uploaded zip also contains OpenSeeFace (BSD) and MediaPipe (Apache) files. That tag does not rewrite those licenses. Keep this notices file next to any redistributed pack.
+4. **Hugging Face repo** `sinBoo1/VTM-Spark` holds our files plus OpenSeeFace (BSD) and MediaPipe (Apache) files, uploaded one by one. It is tagged `license: other` and points here, since no single licence covers every file. Keep this notices file next to any redistributed copy.
 5. **Future models** — add a row here with the publisher’s own LICENSE / Hugging Face `license:` field. Do not assume Apache.
 
 ## Runtime vs git
