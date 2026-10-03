@@ -9,8 +9,9 @@ once per batch size and replayed with a single launch. Same math as ``denoise_ke
 
 The DiT and decoder run in fp16 (outputs match the fp32 path to ~57 dB PSNR), or fp32 on
 GPUs without fast fp16. Weights are private copies, so the fp32 model the rest of the engine
-uses is untouched. Each replay also reports whether the frame came out finite (fp16 overflow
-shows up as NaN/Inf), read back with the image so it costs no extra sync.
+uses is untouched (and waits in RAM while keys run here). Each replay also reports whether
+the frame came out finite (fp16 overflow shows up as NaN/Inf), read back with the image so
+it costs no extra sync.
 """
 
 from __future__ import annotations
@@ -118,12 +119,16 @@ class GraphedFrame:
         dtype: torch.dtype = torch.float16,
         compile_mode: str | None = None,
         pose_sigma: float = 1.5,
+        device: torch.device | str | None = None,
     ) -> None:
-        device = next(model.parameters()).device
+        # ``device`` lets the source model sit in RAM: the copy goes straight to the GPU
+        # at graph precision, never as a second fp32 DiT in VRAM.
+        device = torch.device(device) if device is not None else next(model.parameters()).device
         if device.type != "cuda":
             raise RuntimeError("GraphedFrame needs CUDA")
         self.device, self.dtype = device, dtype
-        dit = copy.deepcopy(getattr(model, "_orig_mod", model)).to(dtype=dtype).eval().requires_grad_(False)
+        dit = copy.deepcopy(getattr(model, "_orig_mod", model))
+        dit = dit.to(device=device, dtype=dtype).eval().requires_grad_(False)
         dec = copy.deepcopy(decoder).to(device=device, dtype=dtype).eval().requires_grad_(False)
         dec = dec.to(memory_format=torch.channels_last)
         self.input_size = int(dit.input_size)
@@ -203,6 +208,21 @@ class GraphedFrame:
         self._slot(int(bsz))
 
     # ------------------------------------------------------------------ replay
+    def _fill_ref(self, s: dict[str, Any], ref_latent: torch.Tensor, ref_face_latent: torch.Tensor | None) -> None:
+        """Reference + face into the slot's static buffers, only when they changed.
+
+        The engine swaps in a new tensor for a new reference and never writes into
+        the old one; the version counter also catches an in-place write.
+        """
+        src = (ref_latent, ref_face_latent, _version(ref_latent), _version(ref_face_latent))
+        old = s.get("ref_src")
+        if old is not None and old[0] is src[0] and old[1] is src[1] and old[2:] == src[2:]:
+            return
+        bsz = s["ref"].shape[0]
+        s["ref"].copy_(ref_latent[-1:].expand(bsz, -1, -1, -1))
+        self._fill_face(s, ref_latent, ref_face_latent)
+        s["ref_src"] = src  # holds the tensors, so their ids cannot be reused
+
     def _fill_face(self, s: dict[str, Any], ref_latent: torch.Tensor, ref_face_latent: torch.Tensor | None) -> None:
         """Face crop into its static buffer, sized like the DiT's ``ref_face_size``.
 
@@ -247,8 +267,7 @@ class GraphedFrame:
         kr = np.asarray(kps_ref, dtype=np.float32)
         kr = kr[-1] if kr.ndim == 3 else kr
         s["kps_r"].copy_(torch.from_numpy(kr)[None].expand(bsz, -1, -1), non_blocking=True)
-        s["ref"].copy_(ref_latent[-1:].expand(bsz, -1, -1, -1))
-        self._fill_face(s, ref_latent, ref_face_latent)
+        self._fill_ref(s, ref_latent, ref_face_latent)
         if hair_maps is None:
             s["hair"].zero_()
         else:
@@ -271,4 +290,16 @@ class GraphedFrame:
         s["host_bad"].copy_(s["bad_out"], non_blocking=True)
         self.done.record()
         self.done.synchronize()
+        # Copied: the pinned buffer is overwritten next replay, and denoise_to_latents
+        # hands the images out past _cuda_lock.
         return lat, s["host"].numpy().copy(), not bool(s["host_bad"])
+
+
+def _version(t: torch.Tensor | None) -> int:
+    """In-place write counter; -1 for None or an inference tensor (which has none)."""
+    if t is None:
+        return -1
+    try:
+        return int(t._version)
+    except RuntimeError:
+        return -1
