@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,14 @@ DETECT_CONF = 0.25
 PUPIL_VIS = 0.3
 GAZE_CONF = 0.15
 CROP_LONG = 160
+# Camera crops run at their own size. iris_pose learnt at 640 on whole anime
+# pictures; a 160 px eye crop blown up to 640 shows the eye four times bigger
+# than any it saw, and it found no pupil on 346 real camera eyes. At 160 it
+# finds them, for a sixteenth of the GPU work every frame.
+LIVE_IMGSZ = CROP_LONG
+# cuda / cpu / off. "off" leaves the camera eyes to OSF gaze, so live tracking
+# does no iris work at all; the still keeps its iris (on the CPU).
+DEVICE_ENV = "VTM_IRIS_DEVICE"
 CROP_PAD = 0.40
 CROP_PAD_Y = 0.70
 _IN_EYE_X = 0.18
@@ -58,7 +67,13 @@ class IrisHit:
     box: tuple[float, float, float, float] | None = None
 
 
+def _device_choice() -> str:
+    return os.environ.get(DEVICE_ENV, "").strip().lower()
+
+
 def _torch_device() -> str:
+    if _device_choice() in ("cpu", "off"):
+        return "cpu"
     try:
         import torch
 
@@ -213,6 +228,8 @@ def upscale_crop(
 
 def detect_crops(image_bgr: np.ndarray, lms: np.ndarray | None) -> list[dict[str, object]]:
     """YOLO on padded, upscaled OSF eye crops. Hits are full-frame pixels."""
+    if _device_choice() == "off":
+        return []
     model = _load_yolo()
     if model is None or image_bgr is None or image_bgr.size == 0 or lms is None:
         return []
@@ -233,7 +250,9 @@ def detect_crops(image_bgr: np.ndarray, lms: np.ndarray | None) -> list[dict[str
         return []
     device = getattr(model, "_iris_device", None)
     try:
-        results = model.predict(source=crops, conf=DETECT_CONF, verbose=False, device=device)
+        results = model.predict(
+            source=crops, conf=DETECT_CONF, verbose=False, device=device, imgsz=LIVE_IMGSZ
+        )
     except Exception:
         return []
     if not results:

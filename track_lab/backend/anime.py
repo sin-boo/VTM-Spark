@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import cv2
 import numpy as np
 import torch
@@ -434,9 +436,20 @@ def get_anime_mesh() -> AnimeFaceMesh:
 
 
 def reset_anime_mesh() -> None:
+    """Drop the face models and hand their VRAM back."""
     global _detector
+    if _detector is None:
+        return
     _detector = None
+    if torch.cuda.is_initialized():
+        gc.collect()  # ultralytics holds the model in reference cycles
+        torch.cuda.empty_cache()
 
 
 def fit_mesh(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return get_anime_mesh().detect(bgr)
+    """Fit the still once. The models are not kept on the GPU through live;
+    the next fit loads them again (~0.5 s)."""
+    try:
+        return get_anime_mesh().detect(bgr)
+    finally:
+        reset_anime_mesh()
