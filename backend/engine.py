@@ -1527,6 +1527,9 @@ class StreamEngine:
         self._graph_skip_compile = False
         # Modes whose fp16 graph gave a NaN/Inf frame: rebuilt in fp32.
         self._graph_fp32_modes: set[str] = set()
+        # Weights waiting in RAM while keys run on the frame graph: "dit" (the fp32
+        # eager DiT) and/or "vae" (SD-VAE). See _park_idle / _unpark.
+        self._parked: set[str] = set()
 
     def set_stream_batch_size(self, batch_size: int) -> None:
         """Poses per DiT forward (1..STREAM_BATCH_MAX)."""
@@ -1693,6 +1696,7 @@ class StreamEngine:
             if bsz > 1:
                 kps_target = np.stack([kps_target] * bsz, axis=0)
             with self._cuda_lock:
+                self._unpark("dit")
                 with torch.inference_mode():
                     _ = denoise_keypoint(
                         self.model,
@@ -1756,6 +1760,7 @@ class StreamEngine:
         """Decode latents; Fast path prefers TinyVAE when available."""
         if self.fast_mode and self._ensure_tiny_vae():
             return decode_tiny_vae(self.vae_tiny, latents), "tiny"
+        self._unpark("vae")
         return decode_sd_vae(self.vae, latents), "sd"
 
     def _graph_ok(
@@ -1853,6 +1858,7 @@ class StreamEngine:
             seed=STREAM_FIXED_SEED,
             dtype=GRAPH_DTYPES[dtype],
             compile_mode=compile_mode,
+            device=self.device,  # the eager DiT may be parked in RAM
         )
         gf.mode, gf.dtype_name, gf.decoder_name = mode, dtype, decoder_name
         return gf
@@ -1871,6 +1877,9 @@ class StreamEngine:
         if gf is None:
             if self.model is None or (mode == "normal" and not self._ensure_tiny_vae()):
                 return None
+            # First, so the fp16 copy is made from RAM and never sits next to the
+            # fp32 DiT in VRAM: the peak that decides whether the graph fits.
+            self._park_idle()
             try:
                 gf = self._build_graph_frame(mode, self.graph_dtype(mode))
                 self._graph_frames[mode] = gf
@@ -1966,6 +1975,8 @@ class StreamEngine:
                 return None
             return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
         if finite:
+            # Again after an encode / eager key brought them back; a set check otherwise.
+            self._park_idle()
             return latents, images, seconds
         del gf
         plan = nonfinite_frame_plan(dtype, mode)
@@ -2126,6 +2137,7 @@ class StreamEngine:
             # Bring them to the new DiT's device before claiming GPU residency,
             # or ensure_gpu() skips them and decode mixes cuda input / cpu weights.
             self.vae = _mod_to(self.vae, self.device)
+        self._parked.clear()  # the new DiT and the VAE are both on the device now
         self.vae_tiny = _mod_to(self.vae_tiny, self.device)
         self._ref_latent = _ten_to(self._ref_latent, self.device)
         self._ref_face_latent = _ten_to(self._ref_face_latent, self.device)
@@ -2151,6 +2163,7 @@ class StreamEngine:
         self._graph_fp32_modes.clear()
         self.model = None
         self._eager_model = None
+        self._parked.discard("dit")
         self._model_compiled = False
         self.clear_last_gen_latent()
         self._compile_mode_active = None
@@ -2202,6 +2215,7 @@ class StreamEngine:
             self._last_gen_latent = _ten_to(self._last_gen_latent, cpu)
             self._decode_stream = None
             self._gpu_resident = False
+            self._parked.clear()  # all in RAM now; ensure_gpu decides again
             self._model_compiled = False
             self._compile_verified = False
             gc.collect()
@@ -2222,9 +2236,15 @@ class StreamEngine:
             if self._gpu_resident:
                 return
             print("[engine] moving models back to GPU …")
-            self.model = _mod_to(self.model, self.device)
-            self._eager_model = self.model
-            self.vae = _mod_to(self.vae, self.device)
+            if self._graph_ok():
+                # Graph keys never touch them; _unpark fetches them if that changes.
+                self._parked |= self._parkable()
+            with torch.inference_mode(False):
+                if "dit" not in self._parked:
+                    self.model = _mod_to(self.model, self.device)
+                    self._eager_model = self.model
+                if "vae" not in self._parked:
+                    self.vae = _mod_to(self.vae, self.device)
             self.vae_tiny = _mod_to(self.vae_tiny, self.device)
             self._ref_latent = _ten_to(self._ref_latent, self.device)
             self._ref_face_latent = _ten_to(self._ref_face_latent, self.device)
@@ -2232,6 +2252,69 @@ class StreamEngine:
             self._gpu_resident = True
             self._model_compiled = False
             self._compile_verified = False
+
+    def _parkable(self) -> set[str]:
+        return {k for k, m in (("dit", self.model), ("vae", self.vae)) if m is not None}
+
+    def _park_idle(self) -> None:
+        """Move the fp32 eager DiT and the SD-VAE to RAM while keys run on the frame graph.
+
+        The graph has its own fp16 copies, so both sit idle in VRAM (~450 MB with
+        VTM-1.5.2) that a game next to the stream needs. Not freed: ``_unpark`` brings them back before
+        any eager key, reference encode or SD-VAE decode.
+        """
+        if self.device.type != "cuda" or not self._gpu_resident:
+            return
+        if not self._parkable() - self._parked:
+            return
+        with self._cuda_lock:
+            # A side-stream decode may be using the SD-VAE outside _cuda_lock, and
+            # may itself be waiting for this lock to unpark it: never wait for it.
+            if not self._decode_lock.acquire(blocking=False):
+                return
+            try:
+                todo = self._parkable() - self._parked  # again, under the lock
+                cpu = torch.device("cpu")
+                # Called under inference_mode too; moved weights must stay normal tensors.
+                with torch.inference_mode(False):
+                    if "dit" in todo:
+                        self._restore_eager_model()  # a compile wrapper would pin the CUDA weights
+                        self.model = _mod_to(self.model, cpu)
+                        self._eager_model = self.model
+                    if "vae" in todo:
+                        self.vae = _mod_to(self.vae, cpu)
+                self._parked |= todo
+            finally:
+                self._decode_lock.release()
+            if not todo:
+                return
+            gc.collect()
+            # Hand the memory back to the driver, not just torch's cache.
+            torch.cuda.empty_cache()
+            print(f"[engine] {' + '.join(sorted(todo))} parked in RAM while keys run on the graph")
+
+    def _unpark(self, *names: str) -> None:
+        """Put parked weights (``"dit"``, ``"vae"``; default both) back on the GPU."""
+        want = set(names or ("dit", "vae"))
+        if not want & self._parked:
+            return
+        with self._cuda_lock:
+            todo = want & self._parked
+            # Not _mod_to: an OOM must reach the caller's recovery, and the name stays
+            # parked so the next call finishes a half-done move.
+            with torch.inference_mode(False):
+                if "dit" in todo:
+                    eager = self._eager_model if self._eager_model is not None else self.model
+                    if eager is not None:
+                        moved = eager.to(self.device)  # in place: a compile wrapper follows
+                        if self.model is eager:
+                            self.model = moved
+                        self._eager_model = moved
+                    self._parked.discard("dit")
+                if "vae" in todo:
+                    if self.vae is not None:
+                        self.vae = self.vae.to(self.device)
+                    self._parked.discard("vae")
 
     def set_checkpoint(
         self, path: Path | str, on_stage: StageCallback | None = None
@@ -2427,6 +2510,7 @@ class StreamEngine:
         )
 
         _clear_cuda_errors()
+        self._unpark("vae")  # the next graph key parks it again
         print("VAE encode starting…")
         with torch.inference_mode():
             ref_latent, ref_face, _ref_kps_t = encode_reference(
@@ -2812,6 +2896,8 @@ class StreamEngine:
                     if ok:
                         _stage("done", "Ready")
                         return
+            # Eager warmup from here: a graph build may have parked the fp32 DiT.
+            self._unpark("dit")
 
             def _run_denoise_warmups(
                 runs: int, *, batch_size: int = 1
@@ -3255,6 +3341,8 @@ class StreamEngine:
                     "batch": int(kps_batch.shape[0]),
                     "hold_last": bool(prev is not None),
                 }
+        # Off the graph (settings, or it failed): the fp32 DiT may be parked.
+        self._unpark("dit")
         with torch.inference_mode():
             t0 = time.perf_counter()
             latents = denoise_keypoint(
