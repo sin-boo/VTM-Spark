@@ -260,7 +260,11 @@ def test_uninstall_bat_removes_the_camera_through_the_setup_exe() -> None:
     root = Path(__file__).resolve().parents[2]
     bat = (root / "uninstall.bat").read_text(encoding="utf-8")
     assert "backend\\packaging\\uninstall.ps1" in bat
+    # Exit 3 = delete the folder, from the last line once cmd has left it.
+    last = bat.strip().splitlines()[-1]
+    assert '"%EC%"=="3"' in bat and "(goto) 2>nul & rd /s /q \"%ROOT%\"" in last
     script = (root / "backend" / "packaging" / "uninstall.ps1").read_text(encoding="utf-8")
+    assert "exit 3" in script
     assert "VTM Spark Camera Setup.exe" in script and '"--uninstall"' in script
     assert '".venv-build"' in script and '".tools"' in script
     src = (root / "backend" / "packaging" / "cam-setup.cs").read_text(encoding="utf-8")

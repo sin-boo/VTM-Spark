@@ -1,12 +1,17 @@
 # VTM Spark uninstall (uninstall.bat): stops the app, removes the virtual camera
-# and everything install.bat and the app put on this PC. The app folder itself
-# stays; delete it afterwards. Exit 0 = all removed, 2 = some steps need attention.
+# and everything install.bat and the app put on this PC, then (if asked) the app
+# folder itself. Exit 0 = all removed, 2 = some steps need attention,
+# 3 = uninstall.bat deletes the folder once this script has exited.
 $ErrorActionPreference = "Continue"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $CamSetup = Join-Path $Root "vendor\tools\vtm_spark_cam\VTM Spark Camera Setup.exe"
 $script:Problems = 0
 
-function Confirm-Vtm([string]$question) {
+function Confirm-Vtm([string]$question, [bool]$default = $false) {
+  if ($default) {
+    $answer = Read-Host "$question [Y/n]"
+    return $answer -notmatch '^\s*(n|no)\s*$'
+  }
   $answer = Read-Host "$question [y/N]"
   return $answer -match '^\s*(y|yes)\s*$'
 }
@@ -50,7 +55,20 @@ if (-not (Confirm-Vtm "Uninstall VTM Spark?")) {
   Write-Host "Nothing was removed."
   exit 0
 }
-$removeUserData = Confirm-Vtm "Also delete your characters, reference images and outputs?"
+# A git checkout may hold unpushed work, so there the folder stays unless asked.
+$isCheckout = Test-Path -LiteralPath (Join-Path $Root ".git")
+$removeFolder = $false
+if ((Test-Path -LiteralPath (Join-Path $Root "install.bat")) -and
+    (Test-Path -LiteralPath (Join-Path $Root "backend\__main__.py"))) {
+  if ($isCheckout) {
+    Write-Host "This folder is a git checkout: deleting it also deletes any work you have not pushed." -ForegroundColor Yellow
+  }
+  $removeFolder = Confirm-Vtm "Also delete the VTM Spark folder itself, with your characters ($Root)?" (-not $isCheckout)
+}
+$removeUserData = $removeFolder
+if (-not $removeFolder) {
+  $removeUserData = Confirm-Vtm "Also delete your characters, reference images and outputs?"
+}
 $removeUvCache = Confirm-Vtm "Also clear uv's download cache and its managed Python (shared with other uv projects; frees several GB)?"
 Write-Host ""
 
@@ -117,7 +135,7 @@ foreach ($base in @(${env:LOCALAPPDATA}, ${env:APPDATA})) {
   if ($base) { Remove-VtmPath (Join-Path $base "pywebview") }
 }
 
-if ($removeUserData) {
+if ($removeUserData -and -not $removeFolder) {
   Write-Host "==> Removing your characters, references and outputs" -ForegroundColor Cyan
   foreach ($rel in @("characters", "models\refs", "models\blendshapes", "track_lab\input")) {
     Remove-VtmFiles (Join-Path $Root $rel) @("*")
@@ -136,9 +154,18 @@ if ($script:Problems -eq 0) {
   Write-Host "VTM Spark is uninstalled." -ForegroundColor Green
 } else {
   Write-Host "VTM Spark is uninstalled, but $($script:Problems) item(s) need attention (see above)." -ForegroundColor Yellow
-  Write-Host "Close anything using VTM Spark and run uninstall.bat again." -ForegroundColor Yellow
+  if (-not $removeFolder) {
+    Write-Host "Close anything using VTM Spark and run uninstall.bat again." -ForegroundColor Yellow
+  }
 }
-Write-Host "You can now delete this folder: $Root"
+Write-Host ""
+if ($removeFolder) {
+  # Neither this script nor uninstall.bat can delete the folder while running
+  # from it; uninstall.bat does it as its last step.
+  Write-Host "The folder $Root is deleted when you press a key."
+  exit 3
+}
+Write-Host "The app folder stays: $Root"
 Write-Host ""
 if ($script:Problems -eq 0) { exit 0 }
 exit 2
