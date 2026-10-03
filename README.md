@@ -70,6 +70,10 @@ Your face is turned into 37 keypoints (face outline, brows, eyes, irises, nose, 
 
 You can run `install.bat` again at any time. It repairs whatever is missing and skips what's already done.
 
+To get the latest version, double-click `update.bat`. It closes VTM Spark, pulls the update with git (or downloads it from GitHub if you don't have git), then runs `install.bat` for you. Your characters and models stay.
+
+To remove VTM Spark, double-click `uninstall.bat` next to it. It removes the virtual camera (one admin prompt), the Python environment, downloaded models and caches, and asks before deleting your characters. Then delete the folder.
+
 ## Your first stream
 
 1. **Open the desk** with `run.exe` and pick your language (you can change it later in Settings).

@@ -256,6 +256,33 @@ def test_camera_setup_registers_a_copy_outside_the_app() -> None:
     assert "Release(old, dir);" in src and "MoveFileDelayUntilReboot" in src
 
 
+def test_uninstall_bat_removes_the_camera_through_the_setup_exe() -> None:
+    root = Path(__file__).resolve().parents[2]
+    bat = (root / "uninstall.bat").read_text(encoding="utf-8")
+    assert "backend\\packaging\\uninstall.ps1" in bat
+    script = (root / "backend" / "packaging" / "uninstall.ps1").read_text(encoding="utf-8")
+    assert "VTM Spark Camera Setup.exe" in script and '"--uninstall"' in script
+    assert '".venv-build"' in script and '".tools"' in script
+    src = (root / "backend" / "packaging" / "cam-setup.cs").read_text(encoding="utf-8")
+    # The elevated relaunch keeps --uninstall, and it unregisters with regsvr32 /u.
+    assert "ElevatedFlag + \" \" + UninstallFlag" in src
+    assert '"/u /s \\""' in src
+
+
+def test_update_bat_pulls_with_git_or_downloads_the_zip() -> None:
+    root = Path(__file__).resolve().parents[2]
+    bat = (root / "update.bat").read_text(encoding="utf-8")
+    assert "backend\\packaging\\update.ps1" in bat
+    # One parenthesised block, so replacing update.bat mid-run is safe.
+    assert bat.index("(") < bat.index("update.ps1") < bat.rindex(")")
+    script = (root / "backend" / "packaging" / "update.ps1").read_text(encoding="utf-8")
+    assert "pull --ff-only" in script
+    assert "github.com/$Repo/archive/$ref.zip" in script
+    assert "stop-app.ps1" in script and "install.bat" in script
+    # git's own output must not become Update-WithGit's return value.
+    assert "| Out-Host" in script
+
+
 def test_stale_registration_reinstalls_even_when_the_device_opens(monkeypatch, tmp_path) -> None:
     vcam_device, ran = _vcam_ready_to_install(monkeypatch, tmp_path)
     monkeypatch.setattr(vcam_device, "device_available", lambda: True)

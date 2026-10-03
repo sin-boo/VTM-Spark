@@ -11,6 +11,9 @@
 // Exit codes: 0 done, 1223 prompt declined, 2 a filter is missing,
 // 3 registering failed.
 //
+// With --uninstall (uninstall.bat) it unregisters the camera and removes the
+// Program Files copy instead; copies still loaded go at the next restart.
+//
 // It registers a copy under Program Files, not the filters next to it. Every
 // program that lists webcams (browsers, OBS, Discord) loads the registered DLL
 // and holds it open; registered from vendor\ that locked the app folder, which
@@ -39,6 +42,7 @@ internal static class Program
     // The name OBS, Discord and Zoom list the camera under.
     private const string DeviceName = "VTM Spark";
     private const string ElevatedFlag = "--elevated";
+    private const string UninstallFlag = "--uninstall";
     private const int Declined = 1223; // ERROR_CANCELLED
     private const int Missing = 2;
     private const int Failed = 3;
@@ -49,10 +53,15 @@ internal static class Program
     {
         string exe = Assembly.GetExecutingAssembly().Location;
         string here = Path.GetDirectoryName(exe);
+        bool uninstall = Array.IndexOf(args, UninstallFlag) >= 0;
         // The flag stops a relaunch loop where elevation is not what it seems.
         if (!IsAdmin() && Array.IndexOf(args, ElevatedFlag) < 0)
         {
-            return RunElevated(exe, here);
+            return RunElevated(exe, here, uninstall ? ElevatedFlag + " " + UninstallFlag : ElevatedFlag);
+        }
+        if (uninstall)
+        {
+            return Uninstall(here);
         }
         string dll32 = Path.Combine(here, "UnityCaptureFilter32.dll");
         string dll64 = Path.Combine(here, "UnityCaptureFilter64.dll");
@@ -102,6 +111,64 @@ internal static class Program
             Release(old, dir);
         }
         return 0;
+    }
+
+    // Unregisters every copy the camera is registered from (and the bundled and
+    // Program Files ones), then removes Program Files\VTM Spark.
+    private static int Uninstall(string here)
+    {
+        string dir = InstallDir();
+        HashSet<string> dlls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string dll in RegisteredFilters())
+        {
+            dlls.Add(dll);
+        }
+        foreach (string name in new[] { "UnityCaptureFilter32.dll", "UnityCaptureFilter64.dll" })
+        {
+            dlls.Add(Path.Combine(dir, name));
+            dlls.Add(Path.Combine(here, name));
+        }
+        string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        string sys32 = Environment.GetFolderPath(Environment.SpecialFolder.SystemX86);
+        foreach (string dll in dlls)
+        {
+            if (!File.Exists(dll))
+            {
+                continue;
+            }
+            bool x86 = Path.GetFileNameWithoutExtension(dll).EndsWith("32", StringComparison.OrdinalIgnoreCase);
+            Unregister(Path.Combine(x86 ? sys32 : sys, "regsvr32.exe"), dll);
+        }
+        ClearLegacyLeftovers();
+        RemoveTree(Path.GetDirectoryName(dir));
+        return RegisteredFilters().Count == 0 ? 0 : Failed;
+    }
+
+    // Deletes what it can; what a program still has loaded goes at the next restart.
+    private static void RemoveTree(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return;
+        }
+        foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception)
+            {
+                MoveFileEx(file, null, MoveFileDelayUntilReboot);
+            }
+        }
+        string[] dirs = Directory.GetDirectories(path, "*", SearchOption.AllDirectories);
+        Array.Sort(dirs, (a, b) => b.Length.CompareTo(a.Length));
+        foreach (string sub in dirs)
+        {
+            try { Directory.Delete(sub); } catch (Exception) { MoveFileEx(sub, null, MoveFileDelayUntilReboot); }
+        }
+        try { Directory.Delete(path); } catch (Exception) { MoveFileEx(path, null, MoveFileDelayUntilReboot); }
     }
 
     // Filter DLLs the VTM Spark camera is registered from, 64- and 32-bit
@@ -331,12 +398,12 @@ internal static class Program
         }
     }
 
-    private static int RunElevated(string exe, string here)
+    private static int RunElevated(string exe, string here, string args)
     {
         ProcessStartInfo psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = ElevatedFlag,
+            Arguments = args,
             WorkingDirectory = here,
             UseShellExecute = true,
             Verb = "runas",
@@ -356,6 +423,23 @@ internal static class Program
         catch (Win32Exception ex)
         {
             return ex.NativeErrorCode == Declined ? Declined : Failed;
+        }
+    }
+
+    private static int Unregister(string regsvr32, string dll)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo
+        {
+            FileName = regsvr32,
+            Arguments = "/u /s \"" + dll + "\" \"/i:UnityCaptureName=" + DeviceName + "\"",
+            WorkingDirectory = Path.GetDirectoryName(dll),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using (Process p = Process.Start(psi))
+        {
+            p.WaitForExit();
+            return p.ExitCode;
         }
     }
 
