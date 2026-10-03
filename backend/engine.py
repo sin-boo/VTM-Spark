@@ -1346,7 +1346,10 @@ def _enable_tf32() -> None:
         return
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    # No cuDNN autotune: each new conv shape tried algorithms with ~11 GB of
+    # scratch (SD-VAE encode, first eager key, graph warmup), enough to push a
+    # small card into shared memory beside a game. Keys run no slower without it.
+    torch.backends.cudnn.benchmark = False
     try:
         torch.set_float32_matmul_precision("high")
     except Exception:
