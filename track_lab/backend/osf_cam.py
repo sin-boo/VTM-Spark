@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -84,6 +85,76 @@ def _open_camera(index: int) -> cv2.VideoCapture | None:
 _FEATURE_LEARN_S = 30
 
 
+def _onnx_plan(cpus: int | None = None) -> tuple[int, bool]:
+    """(threads per OpenSeeFace model, keep workers spinning inside a run).
+
+    The tracker shares the PC with a game. OpenSeeFace asked for 4 landmark
+    threads plus 4 + 2 RetinaFace threads, and onnxruntime's workers spin on
+    their cores between runs: ~3.7 of 4 cores busy to track 30 frames a
+    second, ~1 once capped and quiet, at the same predict time. The landmark
+    model runs about as fast on 2 threads as on 4 there, so up to 8 logical
+    cores it gets 2 that sleep when idle. Bigger PCs keep 4 threads spinning
+    through a run (the old speed) and stop them when it ends.
+    """
+    n = int(cpus if cpus is not None else (os.cpu_count() or 1))
+    if n <= 2:
+        return 1, False
+    if n <= 8:
+        return 2, False
+    return 4, True
+
+
+def _quiet_options(opts: object, threads: int, spin: bool) -> object:
+    """Cap an OpenSeeFace session's intra-op threads; stop idle spinning."""
+    have = int(getattr(opts, "intra_op_num_threads", 0) or 0)
+    # 0 is onnxruntime's "one per core".
+    opts.intra_op_num_threads = max(1, min(have, threads) if have > 0 else threads)  # type: ignore[attr-defined]
+    if spin:
+        key, value = "session.force_spinning_stop", "1"
+    else:
+        key, value = "session.intra_op.allow_spinning", "0"
+    try:
+        current = opts.get_session_config_entry(key)  # type: ignore[attr-defined]
+    except Exception:
+        current = None
+    if current != value:
+        opts.add_session_config_entry(key, value)  # type: ignore[attr-defined]
+    return opts
+
+
+class _QuietOrt:
+    """onnxruntime as OpenSeeFace's tracker / retinaface modules see it.
+
+    Every session they open goes through _quiet_options. Their thread counts
+    are fixed inside the vendored code (RetinaFace takes max(threads, 4)),
+    and the copy in osf/ is refreshed from vendor/ on each desk start, so
+    the policy lives here instead of in either copy.
+    """
+
+    def __init__(self, real: object, threads: int, spin: bool) -> None:
+        self._real = real
+        self._threads = int(threads)
+        self._spin = bool(spin)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+    def InferenceSession(self, path: object, sess_options: object = None, **kwargs: object) -> object:  # noqa: N802
+        opts = sess_options if sess_options is not None else self._real.SessionOptions()  # type: ignore[attr-defined]
+        _quiet_options(opts, self._threads, self._spin)
+        return self._real.InferenceSession(path, sess_options=opts, **kwargs)  # type: ignore[attr-defined]
+
+
+def _quiet_osf_onnx(threads: int, spin: bool) -> None:
+    for name in ("tracker", "retinaface"):
+        mod = sys.modules.get(name)
+        ort = getattr(mod, "onnxruntime", None) if mod is not None else None
+        if ort is None:
+            continue
+        real = ort._real if isinstance(ort, _QuietOrt) else ort
+        mod.onnxruntime = _QuietOrt(real, threads, spin)  # type: ignore[union-attr]
+
+
 def _make_tracker(width: int, height: int) -> object:
     if not (MODELS_DIR / "lm_model3_opt.onnx").is_file():
         raise FileNotFoundError(
@@ -91,13 +162,15 @@ def _make_tracker(width: int, height: int) -> object:
         )
     from tracker import Tracker  # noqa: E402
 
+    threads, spin = _onnx_plan()
+    _quiet_osf_onnx(threads, spin)
     return Tracker(
         width=width,
         height=height,
         model_type=3,
         detection_threshold=0.6,
         max_faces=1,
-        max_threads=4,
+        max_threads=threads,
         silent=True,
         model_dir=str(MODELS_DIR),
         no_gaze=False,
@@ -269,6 +342,46 @@ def _drain_queued(cap: object, frame: np.ndarray) -> tuple[np.ndarray, int]:
         except Exception:
             pass
     return frame, extra
+
+
+# The camera preview is JPEG-encoded only while someone reads it: Track Lab's
+# picture-in-picture polls every ~40 ms while open, and is usually shut while
+# streaming. Encoding every grab at quality 92 for nobody cost ~4 ms of CPU
+# a camera frame.
+_PREVIEW_HOLD_S = 2.0
+_preview_read_t = -1e9
+# The cam whose tracker loop is running, for an on-demand preview.
+_active_cam: OsfCam | None = None
+
+# Tracked frames are at least this far apart (camera time): every frame of a
+# 30 fps camera with jitter to spare, every other of a 60 fps one. The desk
+# keys at 10 a second; 60 tracks a second doubled the CPU for nothing.
+_TRACK_MIN_GAP_S = 0.025
+# With no face for a while, OpenSeeFace runs its full-frame RetinaFace on
+# every frame looking for one: its most expensive path. Look ~10 times a
+# second then; a face lost for less than the hold is hunted at full rate.
+_NO_FACE_HOLD_S = 1.0
+_NO_FACE_GAP_S = 0.09
+
+
+def preview_wanted(now: float | None = None) -> bool:
+    """A camera preview was read within the last _PREVIEW_HOLD_S."""
+    t = time.perf_counter() if now is None else now
+    return t - _preview_read_t <= _PREVIEW_HOLD_S
+
+
+def want_preview() -> bytes | None:
+    """A reader asks for the camera preview. Keeps previews encoding for a
+    while; if they had stopped, returns the newest grab encoded now (None
+    when the OSF camera is not running or there is no fresher picture)."""
+    global _preview_read_t
+    now = time.perf_counter()
+    cold = not preview_wanted(now)
+    _preview_read_t = now
+    cam = _active_cam
+    if not cold or cam is None or not cam.running:
+        return None
+    return cam._encode_newest()
 
 
 def _encode_jpeg(bgr: np.ndarray) -> bytes:
@@ -470,6 +583,8 @@ class _LatestFrame:
         self.age_ms = 0.0
         self.read_ms = 0.0
         self._put_t = 0.0
+        # When the item take() last returned was put (perf_counter).
+        self.taken_put_t = 0.0
 
     def put(self, item: np.ndarray, read_ms: float = 0.0) -> None:
         now = time.perf_counter()
@@ -489,6 +604,7 @@ class _LatestFrame:
         with self._lock:
             item = self._item
             self.age_ms = (now - self._put_t) * 1000.0 if self._put_t else 0.0
+            self.taken_put_t = self._put_t
             self._item = None
             self._has.clear()
         return item
@@ -506,6 +622,10 @@ class OsfCam:
         # Flip the preview JPEG like a selfie. Landmarks stay raw.
         self.preview_flip = False
         self._preview_jpeg = b""
+        # Newest grab, kept (not copied) for an on-demand preview, and
+        # whether _preview_jpeg already shows it.
+        self._preview_raw: np.ndarray | None = None
+        self._preview_fresh = False
         self.latest = OsfFrame()
 
     @property
@@ -623,10 +743,29 @@ class OsfCam:
             return
         with self._lock:
             self._preview_jpeg = jpeg
+            self._preview_fresh = self._preview_raw is raw
 
     def _latest_preview(self) -> bytes:
         with self._lock:
             return self._preview_jpeg
+
+    def _offer_preview(self, raw: np.ndarray) -> None:
+        """Keep the newest grab; encode it only while a reader wants it."""
+        with self._lock:
+            self._preview_raw = raw
+            self._preview_fresh = False
+        if preview_wanted():
+            self._publish_preview(raw)
+
+    def _encode_newest(self) -> bytes | None:
+        with self._lock:
+            raw = self._preview_raw
+            fresh = self._preview_fresh
+        if raw is None:
+            return None
+        if not fresh:
+            self._publish_preview(raw)
+        return self._latest_preview() or None
 
     def _grab_loop(self, cap: cv2.VideoCapture, pending: _LatestFrame) -> None:
         """Keep eating camera frames so DirectShow never queues a delay."""
@@ -680,7 +819,7 @@ class OsfCam:
                 # OpenCV reuses the capture buffer; copy before the next read.
                 fresh = raw.copy()
                 pending.put(fresh, read_ms)
-                self._publish_preview(fresh)
+                self._offer_preview(fresh)
                 now = time.perf_counter()
                 if debug_log.ENABLED and now - last_log >= 0.5:
                     last_log = now
@@ -717,10 +856,12 @@ class OsfCam:
                 self._grab_thread = None
 
     def _loop(self, on_frame: Callable[[OsfFrame], None] | None) -> None:
+        global _active_cam
         me = threading.current_thread()
         _ensure_com()
         cap = self._cap
         pending = _LatestFrame()
+        _active_cam = self
         try:
             if cap is None:
                 raise RuntimeError("Camera closed")
@@ -738,6 +879,8 @@ class OsfCam:
             stalls = 0
             last_seq = 0
             saw_frame = False
+            last_put = 0.0
+            face_t = time.perf_counter()
             while self._running:
                 raw = pending.take(timeout=0.05)
                 if raw is None:
@@ -756,6 +899,13 @@ class OsfCam:
                     # #endregion
                     continue
                 saw_frame = True
+                put_t = pending.taken_put_t
+                gap = _TRACK_MIN_GAP_S
+                if put_t - face_t > _NO_FACE_HOLD_S:
+                    gap = _NO_FACE_GAP_S
+                if last_put and put_t - last_put < gap:
+                    continue
+                last_put = put_t
                 raw_wh = [int(raw.shape[1]), int(raw.shape[0])]
                 frame = cv2.resize(raw, (CAM_W, CAM_H))
                 started = time.perf_counter()
@@ -784,6 +934,8 @@ class OsfCam:
                     )
                 # #endregion
                 face = faces[0] if faces else None
+                if face is not None:
+                    face_t = put_t
                 pose = _face_pose(face)
                 head = _head(face)
                 # Raw: the bench eases the mouth with the rest of the mesh.
@@ -833,6 +985,8 @@ class OsfCam:
                 on_frame(snap)
             self._running = False
         finally:
+            if _active_cam is self:
+                _active_cam = None
             if self._cap is cap:
                 self._release()
             if self._thread is me:

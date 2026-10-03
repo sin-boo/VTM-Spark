@@ -51,7 +51,11 @@ def _jpeg(bench, kind: str) -> bytes | None:
     if kind == "overlay":
         return bench.overlay_jpeg()
     if kind == "camera":
-        return bench.camera_jpeg()
+        from backend.osf_cam import want_preview
+
+        # Previews are encoded only while read; the first read after a
+        # pause gets the newest grab encoded now.
+        return want_preview() or bench.camera_jpeg()
     if kind == "gen":
         from backend.vtm_gen import last_jpeg
 

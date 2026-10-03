@@ -287,6 +287,12 @@ class _DshowHold:
         self._reader = None
 
 
+# DirectShow frame intervals, 100 ns units: 30 fps, and the slowest still
+# counted as 30 (29.97 fps NTSC modes report 333667).
+_WANT_IV = 333333
+_SLOWEST_IV = 340000
+
+
 def _rank_dcaps(
     caps: list[dict],
     width: int,
@@ -294,17 +300,25 @@ def _rank_dcaps(
     *,
     prefer_mid: bool,
 ) -> list[int]:
-    """One DirectShow capability id per resolution. DroidCam repeats each size."""
+    """One DirectShow capability id per resolution. DroidCam repeats each size.
+
+    Of one size's modes, the one whose top rate is nearest 30 fps without
+    falling short: the tracker keeps ~30 frames a second, so a 60 fps mode
+    only doubles the decode and copy work in the grab thread.
+    """
+
+    def rate(min_iv: int) -> tuple[int, int]:
+        return (1 if min_iv > _SLOWEST_IV else 0, abs(min_iv - _WANT_IV))
 
     def score(cap: dict) -> tuple:
         cx = int(cap.get("minCX") or 0)
         cy = int(cap.get("minCY") or 0)
-        min_iv = int(cap.get("minInterval") or 333333)
+        min_iv = int(cap.get("minInterval") or _WANT_IV)
         if prefer_mid:
             mid = abs(cx - 640) + abs(cy - 480)
             huge = 1 if (cx * cy) >= (1280 * 720) else 0
-            return (huge, mid, abs(cx - width) + abs(cy - height), min_iv)
-        return (abs(cx - width) + abs(cy - height), abs(cx - 960) + abs(cy - 720), min_iv)
+            return (huge, mid, abs(cx - width) + abs(cy - height), rate(min_iv))
+        return (abs(cx - width) + abs(cy - height), abs(cx - 960) + abs(cy - 720), rate(min_iv))
 
     best: dict[tuple[int, int], dict] = {}
     for cap in caps:

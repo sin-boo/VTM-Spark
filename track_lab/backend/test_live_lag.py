@@ -268,3 +268,158 @@ def test_rig_eases_the_turn_but_not_the_mouth(monkeypatch) -> None:
     out = rig.apply(opened, rest, still, pose)
     assert out is not None
     assert abs(float(out[25, 1] - out[21, 1]) - 14.0) < 0.01
+
+
+# --- CPU next to a game ------------------------------------------------------
+
+
+class _PacedCap:
+    def __init__(self, fps: float) -> None:
+        self.fps = fps
+        self.n = 0
+        self.t0 = time.perf_counter()
+
+    def read(self):
+        self.n += 1
+        wait = self.t0 + self.n / self.fps - time.perf_counter()
+        if wait > 0:
+            time.sleep(wait)
+        return True, np.full((12, 12, 3), self.n % 255, dtype=np.uint8)
+
+    def release(self) -> None:
+        return None
+
+
+class _CountTracker:
+    def __init__(self, face: bool = True) -> None:
+        self.calls = 0
+        self.face = face
+
+    def predict(self, frame):
+        self.calls += 1
+        return [object()] if self.face else []
+
+    def close(self) -> None:
+        return None
+
+
+def _run_osf(monkeypatch, cap: _PacedCap, tracker: _CountTracker, seconds: float) -> OsfCam:
+    monkeypatch.setattr(osf_cam_mod, "_make_tracker", lambda w, h: tracker)
+    cam = OsfCam()
+    cam._cap = cap
+    cam._tracker = tracker
+    cam._running = True
+    thread = threading.Thread(target=cam._loop, args=(lambda snap: None,), daemon=True)
+    cam._thread = thread
+    thread.start()
+    time.sleep(seconds)
+    return cam
+
+
+def test_camera_preview_is_encoded_only_while_read(monkeypatch) -> None:
+    encoded = {"n": 0}
+
+    def encode(img) -> bytes:
+        encoded["n"] += 1
+        return b"jpeg%d" % encoded["n"]
+
+    monkeypatch.setattr(osf_cam_mod, "_encode_jpeg", encode)
+    monkeypatch.setattr(osf_cam_mod, "_preview_read_t", -1e9)
+    cam = _run_osf(monkeypatch, _PacedCap(100.0), _CountTracker(face=False), 0.25)
+    try:
+        # Nobody reading (Track Lab shut while streaming): no JPEG work.
+        assert encoded["n"] == 0
+        # The first read encodes the newest grab on the spot...
+        first = osf_cam_mod.want_preview()
+        assert first and encoded["n"] == 1
+        # ...and while reads keep coming, each grab is encoded for them.
+        time.sleep(0.15)
+        assert encoded["n"] >= 5
+        assert osf_cam_mod.want_preview() is None
+        assert cam._latest_preview().startswith(b"jpeg")
+    finally:
+        cam.stop()
+
+
+def test_tracker_keeps_about_30_frames_a_second_off_a_60_fps_camera(monkeypatch) -> None:
+    tracker = _CountTracker()
+    monkeypatch.setattr(osf_cam_mod, "_encode_jpeg", lambda img: b"x")
+    cam = _run_osf(monkeypatch, _PacedCap(60.0), tracker, 1.0)
+    cam.stop()
+    assert 22 <= tracker.calls <= 36
+
+
+def test_tracker_tracks_every_frame_of_a_30_fps_camera(monkeypatch) -> None:
+    tracker = _CountTracker()
+    cap = _PacedCap(30.0)
+    monkeypatch.setattr(osf_cam_mod, "_encode_jpeg", lambda img: b"x")
+    cam = _run_osf(monkeypatch, cap, tracker, 1.0)
+    cam.stop()
+    assert tracker.calls >= cap.n - 3
+
+
+def test_tracker_hunts_a_missing_face_less_often(monkeypatch) -> None:
+    tracker = _CountTracker(face=False)
+    monkeypatch.setattr(osf_cam_mod, "_encode_jpeg", lambda img: b"x")
+    monkeypatch.setattr(osf_cam_mod, "_NO_FACE_HOLD_S", 0.2)
+    cam = _run_osf(monkeypatch, _PacedCap(30.0), tracker, 1.2)
+    cam.stop()
+    # ~0.2 s at 30 a second, then ~10 a second: about 16, not 36.
+    assert 8 <= tracker.calls <= 22
+
+
+def test_onnx_threads_fit_the_pc() -> None:
+    plan = osf_cam_mod._onnx_plan
+    assert plan(1) == (1, False)
+    assert plan(4) == (2, False)
+    assert plan(8) == (2, False)
+    assert plan(32) == (4, True)
+
+
+def test_osf_sessions_are_capped_and_stop_spinning() -> None:
+    import pytest
+
+    ort = pytest.importorskip("onnxruntime")
+    opened: list = []
+
+    class Real:
+        SessionOptions = ort.SessionOptions
+        ExecutionMode = ort.ExecutionMode
+
+        @staticmethod
+        def InferenceSession(path, sess_options=None, **kwargs):  # noqa: N802
+            opened.append(sess_options)
+            return path
+
+    quiet = osf_cam_mod._QuietOrt(Real, threads=2, spin=False)
+    assert quiet.ExecutionMode is ort.ExecutionMode
+    wide = ort.SessionOptions()
+    wide.intra_op_num_threads = 4
+    quiet.InferenceSession("retina.onnx", sess_options=wide, providers=["CPUExecutionProvider"])
+    one = ort.SessionOptions()
+    one.intra_op_num_threads = 1
+    # OpenSeeFace hands one options object to two sessions.
+    quiet.InferenceSession("gaze.onnx", sess_options=one)
+    quiet.InferenceSession("detect.onnx", sess_options=one)
+    assert [o.intra_op_num_threads for o in opened] == [2, 1, 1]
+    assert all(o.get_session_config_entry("session.intra_op.allow_spinning") == "0" for o in opened)
+
+    big = osf_cam_mod._QuietOrt(Real, threads=4, spin=True)
+    big.InferenceSession("lm.onnx", sess_options=ort.SessionOptions())
+    assert opened[-1].intra_op_num_threads == 4
+    assert opened[-1].get_session_config_entry("session.force_spinning_stop") == "1"
+
+
+def test_camera_mode_prefers_30_fps_over_60() -> None:
+    from backend.cameras import _rank_dcaps
+
+    caps = [
+        {"id": 0, "minCX": 640, "minCY": 480, "minInterval": 166666},
+        {"id": 1, "minCX": 640, "minCY": 480, "minInterval": 333333},
+        {"id": 2, "minCX": 640, "minCY": 480, "minInterval": 400000},
+        # A size with only 10 fps and 60 fps modes keeps 60, not 10.
+        {"id": 3, "minCX": 1280, "minCY": 720, "minInterval": 1000000},
+        {"id": 4, "minCX": 1280, "minCY": 720, "minInterval": 166666},
+    ]
+    assert _rank_dcaps(caps, 640, 480, prefer_mid=False) == [1, 4]
+    assert _rank_dcaps(caps, 640, 480, prefer_mid=True) == [1, 4]
