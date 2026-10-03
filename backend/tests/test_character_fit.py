@@ -416,8 +416,10 @@ def test_a_redetect_never_overrides_the_users_points_or_nudges(tmp_path: Path, m
     assert "12" in fit["points"]
     assert fit["point_offsets"] == [{"id": 18, "dx": 3.0, "dy": -2.0}]
 
-    # Track Lab re-detects: a different face, no nudges.
+    # Track Lab re-detects: a different face, no nudges. Its rest reaches the
+    # desk as the rest (a track ack), not only as whatever the overlay shows.
     rt._last_overlay_kps = neutral_keypoints().copy()
+    rt._rest_kps = neutral_keypoints().copy()
     rt.lab_offsets = []
     rt.sent.clear()
     assert StreamRuntime._apply_character_fit(rt) is True
@@ -471,3 +473,225 @@ def test_detected_hair_never_replaces_painted_hair(tmp_path: Path, monkeypatch) 
     rt._last_lab_hair = [{"class": "hair_left", "polygon": [[0.5, 0.5], [0.6, 0.5], [0.5, 0.6]]}]
     StreamRuntime._store_pack_hair(rt)
     assert read_character_fit("hero")["hair"] == painted
+
+
+# --- The rest a fit edit saves is the character's rest, never the overlay ---
+
+_NUDGE = {"id": 18, "dx": 3.0, "dy": -2.0}
+
+
+def _rest_runtime(tmp_path: Path, monkeypatch):
+    """_edit_runtime with every character folder in tmp_path and a known rest."""
+    monkeypatch.setattr("backend.paths.characters_dir", lambda: tmp_path)
+    rt = _edit_runtime(tmp_path, monkeypatch)
+    rest = neutral_keypoints().copy()
+    rest[:, 3] = 1.0
+    rt._rest_kps = rest.copy()
+    return rt, rest
+
+
+def _nudged(rest: np.ndarray) -> np.ndarray:
+    """``rest`` as Track Lab draws it: the nudge on slot 18 (100 px canvas)."""
+    shown = rest.copy()
+    shown[18, 0] += _NUDGE["dx"] * 2.0 / 100.0
+    shown[18, 1] += _NUDGE["dy"] * 2.0 / 100.0
+    return shown
+
+
+def test_a_point_move_while_tracking_saves_the_rest_not_the_live_pose(tmp_path: Path, monkeypatch) -> None:
+    """The 50 ms lab poll and the stream write the live / generated pose into
+    the overlay; a fit edit saved that overlay into the .vtm as the rest."""
+    from backend.pose_controller import pixels_to_normalized
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    live = rest.copy()
+    live[:28, 0] += 0.2  # head turned
+    rt._last_overlay_kps = live.copy()
+    # Track Lab is tracking: its reply carries the live frame.
+    rt._lab_packet_from_ack = lambda ack: {"live": True, "keypoints": [], "point_offsets": []}
+    StreamRuntime.move_character_point(rt, 12, 30.0, 40.0)
+    want = rest.copy()
+    want[12, :2] = pixels_to_normalized(30.0, 40.0, 100, 100)
+    saved = read_character_pack(tmp_path / "hero.vtm").keypoints
+    np.testing.assert_allclose(saved[:, :2], want[:, :2], atol=1e-6)
+    np.testing.assert_allclose(rt._rest_kps[:, :2], want[:, :2], atol=1e-6)
+
+
+def test_nudges_are_never_baked_into_the_saved_rest(tmp_path: Path, monkeypatch) -> None:
+    """Track Lab's frame has the nudges on. Saved as the rest, the next load
+    sent it with the nudges beside it and they applied twice."""
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    rt._last_overlay_kps = _nudged(rest)
+    rt.lab_offsets = [dict(_NUDGE)]
+    # Track Lab's own rest frame (not live), nudge on.
+    rt._lab_packet_from_ack = lambda ack: {
+        "keypoints": [],
+        "image_wh": [100, 100],
+        "point_offsets": list(rt.lab_offsets),
+    }
+    for _ in range(3):
+        StreamRuntime.move_character_point(rt, 12, 30.0, 40.0)
+    saved = read_character_pack(tmp_path / "hero.vtm").keypoints
+    np.testing.assert_allclose(saved[18, :2], rest[18, :2], atol=1e-6)
+    # The overlay and the model still show the still as Track Lab draws it.
+    np.testing.assert_allclose(rt._last_overlay_kps[18, :2], _nudged(rest)[18, :2], atol=1e-6)
+    # Next load: the rest goes to Track Lab once, the nudge beside it once.
+    rt._still_image = rt._last_image
+    body = StreamRuntime._packaged_lab_rest(rt, {"commands": ["set_rest"]})
+    assert body is not None
+    x18 = (float(rest[18, 0]) + 1.0) * 0.5 * 100
+    assert abs(body["points"][18][0] - x18) < 1e-3
+    assert body["point_offsets"] == [_NUDGE]
+
+
+def test_the_rest_read_from_track_lab_has_its_edits_but_not_its_nudges(tmp_path: Path, monkeypatch) -> None:
+    """Track Lab's reply frame: its own edit on a joint (kept), the nudge on
+    (taken off), a mouth shape being authored (the status rest wins) and
+    0.01 px rounding everywhere (the held rest wins)."""
+    from backend.pose_controller import pixels_to_normalized
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    lab = rest.copy()
+    lab[33, :2] = (0.3, 0.6)  # moved in Track Lab
+    frame = _nudged(lab)
+    frame[22, 1] += 0.1  # the mouth shape on screen in Track Lab
+    frame[:, :2] += 0.004 * 2.0 / 100.0  # Track Lab's rounding
+    face = [[(float(lab[i, 0]) + 1.0) * 50.0, (float(lab[i, 1]) + 1.0) * 50.0, 1.0] for i in range(28)]
+    del rt.adopt_lab_overlay
+    rt._lab_overlay_keypoints = lambda packet=None: frame.copy()
+    rt.lab_offsets = [dict(_NUDGE)]
+    rt._lab_packet_from_ack = lambda ack: {
+        "keypoints": [],
+        "image_wh": [100, 100],
+        "rest": [list(row) for row in face],
+        "point_offsets": list(rt.lab_offsets),
+    }
+    StreamRuntime.move_character_point(rt, 12, 30.0, 40.0)
+    want = rest.copy()
+    want[33, :2] = (0.3, 0.6)
+    want[12, :2] = pixels_to_normalized(30.0, 40.0, 100, 100)
+    saved = read_character_pack(tmp_path / "hero.vtm").keypoints
+    np.testing.assert_allclose(saved[:, :2], want[:, :2], atol=1e-4)
+    for slot in (0, 18, 22, 28, 31):
+        assert np.array_equal(saved[slot], rest[slot]), slot
+
+
+def test_skeleton_move_saves_rest_joints_without_nudges(tmp_path: Path, monkeypatch) -> None:
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    nudge = {"id": 34, "dx": 4.0, "dy": 0.0}
+    shown = rest.copy()
+    shown[34, 0] += 4.0 * 2.0 / 100.0
+    rt._last_overlay_kps = shown.copy()
+    rt._lab_packet_from_ack = lambda ack: {"keypoints": [], "image_wh": [100, 100], "point_offsets": [nudge]}
+    StreamRuntime.move_character_skeleton(rt, 32, 20.0, 70.0)
+    joints = {row["id"]: row for row in read_character_fit("hero")["skeleton"]}
+    assert joints[34]["x"] == round(float(rest[34, 0]), 5)
+    saved = read_character_pack(tmp_path / "hero.vtm").keypoints
+    np.testing.assert_allclose(saved[34, :2], rest[34, :2], atol=1e-6)
+
+
+def test_track_lab_rounding_is_not_read_as_a_moved_point(tmp_path: Path, monkeypatch) -> None:
+    """The restore compared points at 1e-5 (0.004 px); Track Lab sends 0.01 px,
+    so a load re-sent the user's points and rewrote the pack every time."""
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    rt._lab_image_wh = (768, 768)
+    update_character_fit("hero", {"points": {"12": [round(float(rest[12, 0]), 5), round(float(rest[12, 1]), 5)]}})
+    echoed = rest.copy()
+    echoed[12, 0] += 0.01 * 2.0 / 768.0  # Track Lab's rounding
+    rt._rest_kps = echoed.copy()
+    rt._last_overlay_kps = echoed.copy()
+    pack = tmp_path / "hero.vtm"
+    stamp = pack.stat().st_mtime_ns
+    before = read_character_pack(pack).keypoints.copy()
+    rt.sent.clear()
+    assert StreamRuntime._apply_character_fit(rt) is False
+    assert [op for op, _ in rt.sent] == []
+    np.testing.assert_array_equal(read_character_pack(pack).keypoints, before)
+    assert pack.stat().st_mtime_ns == stamp
+
+
+def test_a_load_never_takes_the_live_frame_as_the_rest(tmp_path: Path, monkeypatch) -> None:
+    """A set_rest reply without keypoints made the overlay fall back to
+    GET /frame, the live pose while tracking, and the model took it as the
+    character's reference."""
+    from types import SimpleNamespace
+
+    from backend.stream import StreamRuntime
+
+    rt, rest = _rest_runtime(tmp_path, monkeypatch)
+    del rt._lab_packet_from_ack
+    del rt.adopt_lab_overlay
+    rt._still_image = rt._last_image
+    rt._lab_seen_generation = 0
+    rt._lab_overlay_gen = 0
+    adopted: list[np.ndarray] = []
+    rt.engine = SimpleNamespace(
+        _ref_keypoints=rest.copy(),
+        adopt_ref_keypoints=lambda kps, **kw: adopted.append(np.asarray(kps).copy()),
+    )
+    live = rest.copy()
+    live[:28, 1] += 0.15
+
+    def get_frame(frame=None):
+        rt._last_overlay_kps = live.copy()
+        return live.copy()
+
+    rt._lab_overlay_keypoints = get_frame
+
+    class _Lab:
+        def status(self, merge_frame=False):
+            return {"online": True, "ready": False, "commands": ["set_rest", "track"]}
+
+        def put_source(self, path):
+            return {"ok": True, "status": {"generation": 2}}
+
+    monkeypatch.setattr("backend.lab_harness.lab", _Lab())
+    rt._same_lab_still = lambda: False
+    rt._write_lab_source = lambda: "track_lab/input/source.png"
+    rt._adopt_lab_hair = lambda packet=None: True
+    rt._lab_ack = lambda op, body=None: rt.sent.append((op, body)) or {
+        "ok": True,
+        "status": {"generation": 2, "point_offsets": []},
+    }
+    StreamRuntime._sync_lab_character(rt)
+    assert rt.sent[0][0] == "set_rest"
+    np.testing.assert_allclose(rt._rest_kps[:, :2], rest[:, :2], atol=1e-6)
+    assert adopted
+    np.testing.assert_allclose(adopted[-1][:, :2], rest[:, :2], atol=1e-6)
+
+
+def test_desk_mesh_drag_saves_the_rest_without_nudges(tmp_path: Path) -> None:
+    from backend.tests.test_pose_keys import _bare_runtime
+
+    rest = neutral_keypoints().copy()
+    rt = _bare_runtime(tmp_path, _nudged(rest))
+    persisted: list[tuple[bool, np.ndarray]] = []
+
+    def adopt(kps, persist=True, **kw):
+        persisted.append((persist, np.asarray(kps).copy()))
+        rt.engine._ref_keypoints = np.asarray(kps).copy()
+
+    rt.engine.adopt_ref_keypoints = adopt
+    rt._rest_kps = rest.copy()
+    base = _nudged(rest)
+    edited = base.copy()
+    edited[21, 0] += 0.05
+    rt._last_overlay_kps = edited
+    rt._drag_slots = {21}
+    rt._drag_base_kps = base.copy()
+    rt.mesh_release()
+    saved = [kps for persist, kps in persisted if persist]
+    assert len(saved) == 1
+    np.testing.assert_allclose(saved[0][18, :2], rest[18, :2], atol=1e-6)
+    np.testing.assert_allclose(saved[0][21, 0], rest[21, 0] + 0.05, atol=1e-6)
+    # The model keeps drawing the still with the nudge on.
+    np.testing.assert_allclose(rt.engine._ref_keypoints[18, :2], _nudged(rest)[18, :2], atol=1e-6)
+    np.testing.assert_allclose(rt._rest_kps, saved[0], atol=1e-6)

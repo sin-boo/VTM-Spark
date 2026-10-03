@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from .calibrate import WARMUP_SEC, calibrator
 from .ease import HeadEase
 from .feel import feel
 from .travel_box import SIZE_MAX, soft_barrier
@@ -138,6 +139,15 @@ FACE_DEPTH = np.array(
 # close to this share of the drawn one.
 _SILHOUETTE = ((0, 11), (1, 23), (4, 19), (3, 26))
 _SILHOUETTE_KEEP = 0.3
+
+
+def _seen_part(seen: float, swing: float) -> float:
+    """How much of ``swing`` the camera saw along one axis: none of it when
+    the eyes stayed or moved the other way, all of it at most."""
+    if swing == 0.0:
+        return 0.0
+    side = 1.0 if swing > 0.0 else -1.0
+    return side * min(abs(swing), max(0.0, side * seen))
 
 
 def neck_offset(yaw_r: float, pitch_r: float, roll_r: float) -> tuple[float, float]:
@@ -511,16 +521,29 @@ class FaceRig:
         self._provisional = False
         # Solved roll minus the eye-line tilt on the last clean solve.
         self._eye_roll_gap = 0.0
+        # Clean frames of Set Rest's capture window (after its warm-up), and
+        # when the window was first seen.
+        self._rest_hold: list[tuple[dict[str, float], dict[str, float]]] = []
+        self._rest_hold_t: float | None = None
         self._ease = HeadEase()
 
-    def _lock(self, rest: np.ndarray, head: dict[str, float], pose: dict[str, float]) -> None:
+    def _lock(
+        self,
+        rest: np.ndarray,
+        head: dict[str, float],
+        pose: dict[str, float],
+        *,
+        keep_size: bool = False,
+    ) -> None:
+        """``keep_size``: keep the sealed distance (see _note_size)."""
         self._rest_cx, self._rest_cy = mesh_center(rest)
         self._rest_ms = _mesh_scale(rest)
         self._cam_cx = float(pose["cx"])
         self._cam_cy = float(pose["cy"])
         self._cam_bx, self._cam_by = _body_xy(pose)
-        self._cam_scale = max(float(pose["scale"]), 1.0)
-        self._cam_tz = max(float(pose.get("tz", 0.0) or 0.0), 0.0)
+        if not keep_size:
+            self._cam_scale = max(float(pose["scale"]), 1.0)
+            self._cam_tz = max(float(pose.get("tz", 0.0) or 0.0), 0.0)
         self._pitch = float(head.get("pitch", 0.0))
         self._yaw = float(head.get("yaw", 0.0))
         self._roll = float(pose.get("tilt", head.get("roll", 0.0)))
@@ -597,6 +620,50 @@ class FaceRig:
             seal_scale = med
         self._seal_size(seal_tz, seal_scale)
 
+    def _hold_rest(self, head: dict[str, float], pose: dict[str, float], head_ok: bool) -> None:
+        """Keep the clean frames of Set Rest's capture window, the way
+        calibrate keeps the mouth's: past its warm-up, while the face is held."""
+        if calibrator.capturing != "rest":
+            self._rest_hold = []
+            self._rest_hold_t = None
+            return
+        now = time.perf_counter()
+        if self._rest_hold_t is None:
+            self._rest_hold_t = now
+        if head_ok and now - self._rest_hold_t >= WARMUP_SEC:
+            self._rest_hold.append((dict(head), dict(pose)))
+
+    def _held_rest(
+        self, head: dict[str, float], pose: dict[str, float]
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """Set Rest's zero: the median over its capture window and this
+        frame, not the one frame the window ended on (a twitch there was the
+        zero for the session). No window (a snapshot from disk): this frame."""
+        rows = self._rest_hold + [(head, pose)]
+        self._rest_hold = []
+        self._rest_hold_t = None
+        if len(rows) < 2:
+            return head, pose
+
+        def angle(values: list[float], near: float) -> float:
+            # Unwrapped round this frame's reading: 179 and -179 are 2 apart.
+            return float(np.median([near + ((v - near + 180.0) % 360.0 - 180.0) for v in values]))
+
+        out_head = dict(head)
+        for key in ("pitch", "yaw", "roll"):
+            out_head[key] = angle([float(h.get(key, 0.0)) for h, _p in rows], float(head.get(key, 0.0)))
+        out_pose = dict(pose)
+        if "tilt" in pose:
+            out_pose["tilt"] = angle([float(p.get("tilt", 0.0)) for _h, p in rows], float(pose["tilt"]))
+        for key in ("cx", "cy", "bx", "by", "scale"):
+            if key in pose:
+                out_pose[key] = float(np.median([float(p.get(key, pose[key])) for _h, p in rows]))
+        if float(pose.get("tz", 0.0) or 0.0) > 1e-3:
+            # Solved distance only where there was one (0 = no PnP).
+            dists = [float(p.get("tz", 0.0) or 0.0) for _h, p in rows]
+            out_pose["tz"] = float(np.median([d for d in dists if d > 1e-3]))
+        return out_head, out_pose
+
     def _sync(
         self,
         rest: np.ndarray,
@@ -609,6 +676,7 @@ class FaceRig:
             return False
         stamp = rest_stamp()
         relock = False
+        size_pose = pose
         # A flipped head solve must never become the zero: every later frame
         # would read as a turn / tilt away from it.
         head_ok = bool(pose.get("head_ok", 1.0))
@@ -626,17 +694,21 @@ class FaceRig:
             self._provisional = not head_ok
         elif self._provisional and head_ok:
             # The first clean solve is the real zero. Kept on the stand-in, an
-            # off-level camera read as a nod pinned at the pitch stop.
-            self._lock(rest, head, pose)
+            # off-level camera read as a nod pinned at the pitch stop. A size
+            # zero already sealed stays: it is a 5-frame median, and taking
+            # this one frame's instead ended its settling for the session.
+            self._lock(rest, head, pose, keep_size=self._size_ready)
             self._provisional = False
         elif stamp != self._token and session_rest_locked() and head_ok:
             snap = stamp[1] if isinstance(stamp, tuple) and len(stamp) > 1 else None
             if snap is not None:
-                self._lock(rest, head, pose)
+                held_head, size_pose = self._held_rest(head, pose)
+                self._lock(rest, held_head, size_pose)
                 relock = True
+        self._hold_rest(head, pose, head_ok)
         # Set Rest grabs the face in hand. Otherwise wait until distance
         # holds still, so the opening solve cannot pin the overlay large.
-        self._note_size(pose, force=relock)
+        self._note_size(size_pose, force=relock)
         raw_p = float(head.get("pitch", 0.0))
         raw_y = float(head.get("yaw", 0.0))
         if not head_ok and self._live is not None:
@@ -717,9 +789,18 @@ class FaceRig:
                 self._torso_walk_y += (self._walk[1] - self._torso_walk_y) * (1.0 - hold)
             # A bad solve holds the last turn, so its swing cannot be taken
             # out of the eyes: the last walk holds with it.
-            swing = (nx * ms, ny * ms)
             walk = self._walk
             torso_walk = (walk[0], self._torso_walk_y)
+            # The drawn head swings head_sway of the way, as the iPhone's
+            # does. Only the swing the camera saw is cut: what the neck model
+            # expects but the eyes did not do would draw the head running
+            # against the turn. The walk above, and so tracking, is unchanged.
+            sway = feel.head_sway()
+            seen = (walk[0] + nx * ms, walk[1] + ny * ms)
+            swing = (
+                seen[0] - walk[0] - (1.0 - sway) * _seen_part(seen[0], nx * ms),
+                seen[1] - walk[1] - (1.0 - sway) * _seen_part(seen[1], ny * ms),
+            )
         self._dx = _clip(walk[0] + swing[0], -ms * 2.2, ms * 2.2)
         self._dy = _clip(walk[1] + swing[1], -ms * 1.6, ms * 1.6)
         torso_x, torso_y = _dead(torso_walk[0], torso_walk[1], _WALK_DEADBAND * ms)
@@ -824,12 +905,25 @@ class FaceRig:
         depth = face_depth(len(xs), radius) if face_rows else None
         return face_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s, depth=depth)
 
-    def _plane(
+    def map_hair(
         self,
         xs: np.ndarray,
         ys: np.ndarray,
         max_turn: float | None = None,
+        *,
+        wide: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Rest-centered hair: same place as the face, a card turned with it.
+
+        Through the face's portrait lens, so the hair turns with the eyes
+        under it: through the hair's own wide lens the bangs stayed centred
+        while the eyes swung under them and a turn read as the face sliding
+        across the head; it also pushed the outline past the hair the model
+        draws, which drew a second edge. ``wide``: that wide lens, for a
+        pinned part's anchor, whose silhouette it holds on a big turn.
+        """
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
         radius = max(self._rest_ms * 1.05 * self._s, 1.0)
         yaw = self._yaw_r
         pitch = self._pitch_r
@@ -837,20 +931,8 @@ class FaceRig:
             cap = math.radians(float(max_turn))
             yaw = _clip(yaw, -cap, cap)
             pitch = _clip(pitch, -cap, cap)
-        return plane_xy(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
-
-    def map_plane(
-        self,
-        xs: np.ndarray,
-        ys: np.ndarray,
-        max_turn: float | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Rest-centered overlay shapes: same place as the face, planar turn."""
-        x2, y2 = self._plane(
-            np.asarray(xs, dtype=np.float64),
-            np.asarray(ys, dtype=np.float64),
-            max_turn=max_turn,
-        )
+        lens = plane_xy if wide else face_xy
+        x2, y2 = lens(xs, ys, yaw, pitch, self._roll_r, radius, self._s)
         return self._rest_cx + self._dx + x2, self._rest_cy + self._dy + y2
 
     def map_flat(self, xs: np.ndarray, ys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -6,12 +6,36 @@ export type BootStage = {
   label: string
 }
 
+/** backend.gpu_check: the graphics card cannot run the AI; the launch stops on the splash. */
+export type GpuProblemKind = 'no_nvidia' | 'card_too_old' | 'driver_old' | 'wrong_build' | 'cuda_error'
+
+export type GpuTried = {
+  /** 'build': install put in a torch build and tested it; 'start_check': this launch's test. */
+  what: 'build' | 'start_check'
+  build?: string
+  ok: boolean
+  error?: string
+}
+
+export type GpuProblem = {
+  kind: GpuProblemKind
+  gpu: string
+  driver: string
+  cap: string
+  build: string
+  error: string
+  tried: GpuTried[]
+  /** Another AI engine build supports this card and has not failed on it: Repair runs install.bat. */
+  repair: boolean
+}
+
 export type BootStatus = {
   ready: boolean
   running: boolean
   error: string
   awaiting?: string
   suggested?: string
+  gpu_problem?: GpuProblem | null
   progress?: number
   progress_label?: string
   stages: {
@@ -45,7 +69,7 @@ export type AppStatus = {
   frame_blend: number
   inbetweens?: number
   interpolate?: boolean
-  /** Cap on generated keys per second; 0 = Auto (fill the 20 fps display with in-betweens). */
+  /** Cap on generated keys per second (0..100); 0 = Auto (fill the 20 fps display with in-betweens). Above 20 the display follows the cap. */
   max_fps?: number
   /** Keys/s the stream is actually held to (the cap, or what Auto picked). */
   gen_cap?: number
@@ -69,6 +93,11 @@ export type AppStatus = {
   use_body: boolean
   fast_mode: boolean
   compile_model: boolean
+  /** Decoder really running (read-only): "ultra" = fast decoder, "normal" = TinyVAE
+   *  fallback (fast decoder missing), "eager" = slow eager fallback. */
+  speed_mode_active?: 'ultra' | 'normal' | 'eager'
+  /** The fast decoder file is installed. */
+  ultra_available?: boolean
   batch2: boolean
   /** Batch setting: poses per model call, 0 = Auto. */
   batch?: number
@@ -538,6 +567,7 @@ export const api = {
   boot: () => fetch('/api/boot').then((r) => json<BootStatus>(r)),
   startBoot: () =>
     fetch('/api/boot', { method: 'POST' }).then((r) => json<BootStatus>(r)),
+  gpuRepair: () => fetch('/api/gpu/repair', { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
   checkpoints: () => fetch('/api/checkpoints').then((r) => json<Checkpoint[]>(r)),
   cameras: () =>
     fetch('/api/cameras').then((r) =>

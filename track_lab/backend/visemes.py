@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
@@ -24,6 +25,13 @@ _ABS_CORNER = 1.6
 # dlib outer lip mid. Inner 60/64 often stay shut while 51/57 open.
 _OUTER_UPPER = 51
 _OUTER_LOWER = 57
+# Once locked, rest moves only after a still, neutral mouth has held this
+# long, then eases over about _REZERO_TAU. Blending a few % per frame made a
+# held smile / ee / ah the new rest in half a second; relaxing read as sad.
+_REZERO_HOLD = 3.0
+_REZERO_TAU = 2.0
+# Corners this close to rest sit inside the smile / sad dead zone.
+_REZERO_CORNER = 0.02
 
 
 class RestState:
@@ -45,8 +53,11 @@ class RestState:
         self._yaw0: float | None = None
         self._cx0: float | None = None
         self._scale0: float | None = None
+        self._hold_t: float | None = None
+        self._last_t = 0.0
         self._branch = "init"
-        # Phone input has a fixed synthetic rest. Never re-learn it from motion.
+        # Set Rest and phone input fix rest. Never re-learn it from motion,
+        # and a lost face (hand, cup) does not drop it.
         self.frozen = False
 
     def snapshot(self) -> dict[str, float] | None:
@@ -86,6 +97,8 @@ class RestState:
         self._seed_n = 99
         self.misses = 0
         self._prev = (opened, width, float(self.corner_rest or 0.0))
+        # Calibrated poses are measured from this zero. It stays put.
+        self.frozen = True
 
     def _still(self, opened: float, width: float, corner: float) -> bool:
         prev = self._prev
@@ -119,6 +132,41 @@ class RestState:
             return
         self.inner_rest = (1.0 - rate) * self.inner_rest + rate * inner
 
+    def _rezero(
+        self,
+        opened: float,
+        width: float,
+        corner: float,
+        inner: float | None,
+        homing: bool,
+        closed: bool,
+        near: bool,
+        now: float | None,
+    ) -> None:
+        """Locked rest follows only a still, neutral mouth held for seconds.
+
+        Width and corners must sit at rest, so a smile / ee / oo never
+        qualifies. Only the lip gap may differ: shut, or a half-open read at
+        the start pose (PnP hysteresis after walking off and back).
+        """
+        rest_c = self.corner_rest
+        level = rest_c is None or abs(corner - rest_c) <= _REZERO_CORNER
+        if not (near and level and (closed or homing)):
+            self._hold_t = None
+            self._branch = "skip_not_neutral"
+            return
+        t = time.perf_counter() if now is None else float(now)
+        if self._hold_t is None:
+            self._hold_t = t
+            self._last_t = t
+        dt = min(max(t - self._last_t, 0.0), 0.25)
+        self._last_t = t
+        if t - self._hold_t < _REZERO_HOLD:
+            self._branch = "hold"
+            return
+        self._mix(opened, width, corner, inner, 1.0 - math.exp(-dt / _REZERO_TAU))
+        self._branch = "follow_closed" if closed else "home_rezero"
+
     def observe(
         self,
         opened: float,
@@ -129,6 +177,7 @@ class RestState:
         yaw: float | None = None,
         cx: float | None = None,
         scale: float | None = None,
+        now: float | None = None,
     ) -> None:
         if self.frozen:
             self._branch = "frozen"
@@ -136,6 +185,7 @@ class RestState:
         if not seen:
             self.misses += 1
             self._prev = None
+            self._hold_t = None
             if self.misses > 40:
                 self.reset()
             return
@@ -144,6 +194,7 @@ class RestState:
             return
         still = self._still(opened, width, corner)
         if not still:
+            self._hold_t = None
             self._branch = "moving"
             return
         if self.width_rest is None:
@@ -178,13 +229,16 @@ class RestState:
             home = at_cx if self._yaw0 is None or yaw is None else (home and at_cx)
         # Walked off-center, then back: PnP hysteresis looks like an open
         # mouth. Re-zero rest at the start pose instead of keeping A on.
-        if home and opened <= rest_o + 0.14:
-            self._mix(opened, width, corner, inner, 0.28 if self.locked else 0.22)
+        homing = home and opened <= rest_o + 0.14
+        if self.locked:
+            self._rezero(opened, width, corner, inner, homing, closed, near, now)
+            return
+        if homing:
+            self._mix(opened, width, corner, inner, 0.22)
             self._branch = "home_rezero"
-            if not self.locked:
-                self._seed_n += 1
-                if self._seed_n >= 10:
-                    self.locked = True
+            self._seed_n += 1
+            if self._seed_n >= 10:
+                self.locked = True
             return
         if not closed:
             self._branch = "skip_not_closed"
@@ -192,12 +246,11 @@ class RestState:
         if not (near or quieter):
             self._branch = "skip_not_near"
             return
-        self._mix(opened, width, corner, inner, 0.08 if self.locked else 0.22)
+        self._mix(opened, width, corner, inner, 0.22)
         self._branch = "follow_closed"
-        if not self.locked:
-            self._seed_n += 1
-            if self._seed_n >= 10:
-                self.locked = True
+        self._seed_n += 1
+        if self._seed_n >= 10:
+            self.locked = True
 
 
 _rest = RestState()

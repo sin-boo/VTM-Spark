@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-PRESET_PATH = ROOT / "output" / "mouth_presets.json"
+from .paths import OUTPUT
+
+PRESET_PATH = OUTPUT / "mouth_presets.json"
 
 MOUTH_SLOTS = tuple(range(20, 28))
 # Character eyes by screen side: (corner, lid mid, corner). Blink "l" drives
@@ -381,6 +381,24 @@ def retarget_mouth(
     return out
 
 
+# A rest this close is the same face (a re-push, or saved at another
+# precision). Re-projecting onto it only adds float and save rounding.
+_SAME_REST_PX = 0.01
+
+
+def _same_rest(a: np.ndarray | None, b: np.ndarray | None) -> bool:
+    if a is None or b is None:
+        return False
+    left = np.asarray(a, dtype=np.float64)[:28]
+    right = np.asarray(b, dtype=np.float64)[:28]
+    if left.shape != right.shape:
+        return False
+    return bool(
+        np.all(np.abs(left[:, :2] - right[:, :2]) <= _SAME_REST_PX)
+        and np.all(np.abs(left[:, 2:] - right[:, 2:]) <= 1e-4)
+    )
+
+
 def empty_weights() -> dict[str, float]:
     out = {name: 0.0 for name in VOWEL_IDS}
     for name in FORM_IDS:
@@ -392,7 +410,15 @@ class MouthBook:
     def __init__(self) -> None:
         self.shapes: dict[str, np.ndarray] = {}
         self.active: str = ""
+        # The shapes as last authored, rest included. Every rebase starts
+        # here: moving on from the last rebase drifted them a little on each
+        # character switch until the desk read a new plan.
+        self._authored: dict[str, np.ndarray] = {}
         self._load()
+
+    def _anchor(self) -> None:
+        """What the book holds now is the authored plan."""
+        self._authored = {name: copy_pts(pts) for name, pts in self.shapes.items()}
 
     def _load(self) -> None:
         if not PRESET_PATH.is_file():
@@ -413,6 +439,15 @@ class MouthBook:
                 pts = json_to_pts(raw)
                 if pts is not None:
                     self.shapes[name] = pts
+        authored = data.get("authored")
+        if isinstance(authored, dict):
+            for name, raw in authored.items():
+                pts = json_to_pts(raw) if name in self.shapes else None
+                if pts is not None:
+                    self._authored[name] = pts
+        if set(self._authored) != set(self.shapes):
+            # Older files keep no authored copy: the saved shapes are the plan.
+            self._anchor()
         active = data.get("active")
         if isinstance(active, str) and active in self.shapes:
             self.active = active
@@ -427,11 +462,15 @@ class MouthBook:
         payload = {
             "active": self.active if self.active in self.shapes else "",
             "shapes": {name: pts_to_json(self.shapes[name]) for name in _stored_ids(self.shapes)},
+            "authored": {
+                name: pts_to_json(self._authored[name]) for name in _stored_ids(self._authored)
+            },
         }
         PRESET_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def clear(self) -> None:
         self.shapes = {}
+        self._authored = {}
         self.active = ""
         if PRESET_PATH.is_file():
             try:
@@ -441,20 +480,38 @@ class MouthBook:
 
     def seed_rest(self, pts: np.ndarray) -> None:
         self.shapes["rest"] = copy_pts(pts)
+        self._anchor()
         self.active = "rest"
         self.save()
 
     def rebase(self, pts: np.ndarray) -> None:
-        """Keep shapes when rest jumps; only their own points move onto the new face."""
+        """Keep shapes when rest jumps; only their own points move onto the new face.
+
+        Shapes move from how they were authored, never from the last rebase,
+        so switching A -> B -> A lands exactly back on A's shapes.
+        """
         old = self.shapes.get("rest")
         nxt = copy_pts(pts)
-        if old is not None:
-            for name in list(self.shapes):
-                if name == "rest":
-                    continue
-                group = "eyes" if shape_slots(name) == EYE_SLOTS else "mouth"
-                self.shapes[name] = retarget_mouth(self.shapes[name], old, nxt, group)
-        self.shapes["rest"] = nxt
+        if _same_rest(old, nxt):
+            if self.active != "rest":
+                self.active = "rest"
+                self.save()
+            return
+        if set(self._authored) != set(self.shapes):
+            self._anchor()
+        home = self._authored.get("rest")
+        if _same_rest(home, nxt):
+            self.shapes = {name: copy_pts(self._authored[name]) for name in self.shapes}
+        else:
+            if home is not None:
+                for name in list(self.shapes):
+                    if name == "rest":
+                        continue
+                    group = "eyes" if shape_slots(name) == EYE_SLOTS else "mouth"
+                    self.shapes[name] = retarget_mouth(self._authored[name], home, nxt, group)
+            self.shapes["rest"] = nxt
+            if home is None:
+                self._anchor()
         self.active = "rest"
         self.save()
 
@@ -502,6 +559,7 @@ class MouthBook:
                 raise ValueError("Track a face first")
             self.shapes["rest"] = copy_pts(source)
             stored = self.shapes["rest"]
+            self._anchor()
         self.active = name
         self.save()
         return copy_pts(stored)
@@ -522,6 +580,7 @@ class MouthBook:
                 base = draft_shape(name, source) if name == "eye_closed" else source
         pts = apply_mouth(base, mouth, shape_slots(name))
         self.shapes[name] = pts
+        self._anchor()
         self.active = name
         self.save()
         return copy_pts(pts)
@@ -558,6 +617,8 @@ class MouthBook:
         if new_name in self.shapes:
             raise ValueError("A point is already there")
         self.shapes[new_name] = self.shapes.pop(name)
+        if name in self._authored:
+            self._authored[new_name] = self._authored.pop(name)
         if self.active == name:
             self.active = new_name
         self.save()
@@ -568,6 +629,7 @@ class MouthBook:
         if pair_ends(name) is None or name not in self.shapes:
             raise ValueError("No saved point")
         del self.shapes[name]
+        self._authored.pop(name, None)
         if self.active == name:
             self.active = "rest" if "rest" in self.shapes else ""
         self.save()

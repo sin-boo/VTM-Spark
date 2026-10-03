@@ -1051,20 +1051,175 @@ def test_head_rig_look_down_keeps_hair_above_nose() -> None:
 def test_back_at_center_rezeros_drifted_open() -> None:
     _rest.reset()
     home = dict(opened=0.18, width=0.40, corner=0.0)
+    t = 0.0
     for _ in range(14):
-        _rest.observe(home["opened"], home["width"], home["corner"], True, yaw=0.0, cx=200.0, scale=100.0)
+        t += 1.0 / 30.0
+        _rest.observe(home["opened"], home["width"], home["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
     assert _rest.locked
     rest_o = float(_rest.open_rest or 0.0)
     for _ in range(10):
-        _rest.observe(0.30, 0.40, 0.0, True, yaw=40.0, cx=80.0, scale=100.0)
+        t += 1.0 / 30.0
+        _rest.observe(0.30, 0.40, 0.0, True, yaw=40.0, cx=80.0, scale=100.0, now=t)
     assert abs(float(_rest.open_rest or 0.0) - rest_o) < 0.02
     drifted = {**home, "opened": 0.26}
-    for _ in range(10):
-        _rest.observe(drifted["opened"], drifted["width"], drifted["corner"], True, yaw=0.0, cx=200.0, scale=100.0)
+    # Still and level at the start pose: re-zeroed after a few seconds.
+    for _ in range(30 * 8):
+        t += 1.0 / 30.0
+        _rest.observe(drifted["opened"], drifted["width"], drifted["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
     weights = _heuristic(
         {"open": drifted["opened"], "width": drifted["width"], "corner": drifted["corner"]}
     )
     assert weights["A"] < 0.15
+
+
+def _hold(feat: dict[str, float], seconds: float, t: float) -> float:
+    """Feed a still mouth at the start pose at 30 fps. Returns the clock."""
+    for _ in range(int(round(seconds * 30.0))):
+        t += 1.0 / 30.0
+        _rest.observe(feat["open"], feat["width"], feat["corner"], True, yaw=0.0, cx=200.0, scale=100.0, now=t)
+    return t
+
+
+def test_set_rest_holds_through_held_expressions() -> None:
+    rest = _set_rest()
+    zero = _rest.snapshot()
+    held = {
+        "smile": {**rest, "corner": rest["corner"] + 0.14, "width": rest["width"] * 1.10},
+        "I": {**rest, "open": rest["open"] + 0.07, "width": rest["width"] * 1.14},
+        "A": {**rest, "open": rest["open"] + 0.10},
+    }
+    try:
+        t = 0.0
+        for name, feat in held.items():
+            first = _heuristic(feat)[name]
+            assert first > 0.2
+            t = _hold(feat, 6.0, t)
+            assert _rest.snapshot() == zero
+            assert abs(_heuristic(feat)[name] - first) < 1e-9
+            # Relaxing is neutral, not the opposite shape.
+            relaxed = _heuristic(rest)
+            assert all(abs(value) < 1e-6 for value in relaxed.values())
+    finally:
+        _rest.reset()
+
+
+def test_session_rest_does_not_chase_held_expressions() -> None:
+    _rest.reset()
+    home = {"open": 0.18, "width": 0.40, "corner": 0.0}
+    try:
+        t = _hold(home, 0.5, 0.0)
+        assert _rest.locked
+        zero = _rest.snapshot()
+        smile = {**home, "corner": 0.14, "width": 0.44}
+        ee = {**home, "open": 0.25, "width": 0.456}
+        for feat in (smile, ee):
+            t = _hold(feat, 6.0, t)
+            assert _rest.snapshot() == zero
+        assert _heuristic(smile)["smile"] > 0.2
+        assert all(abs(value) < 1e-6 for value in _heuristic(home).values())
+        # A still half-open "ah" is not re-zeroed for seconds.
+        ah = {**home, "open": 0.28}
+        t = _hold(ah, 2.5, t)
+        assert _rest.snapshot() == zero
+        assert _heuristic(ah)["A"] > 0.3
+    finally:
+        _rest.reset()
+
+
+def test_calibrated_smile_holds_against_set_rest(tmp_path, monkeypatch) -> None:
+    from . import calibrate as calibrate_mod
+
+    monkeypatch.setattr(calibrate_mod, "CALIB_PATH", tmp_path / "webcam_calibration.json")
+    cal = calibrate_mod.Calibrator()
+    rest = {"open": 0.15, "width": 0.40, "corner": 0.50, "lift": -0.50}
+    smile = {"open": 0.16, "width": 0.46, "corner": 0.64, "lift": -0.64}
+    sad = {"open": 0.16, "width": 0.37, "corner": 0.38, "lift": -0.38}
+    cal.samples = {"rest": dict(rest), "smile": dict(smile), "sad": dict(sad)}
+    _rest.reset()
+    _rest.use_snapshot(rest)
+    try:
+        t = 0.0
+        seen = []
+        for _ in range(60):
+            t = _hold(smile, 1.0 / 30.0, t)
+            seen.append(cal.weights(smile, _heuristic, origin=_rest.snapshot())["smile"])
+        assert min(seen) > 0.5
+        relaxed = cal.weights(rest, _heuristic, origin=_rest.snapshot())
+        assert relaxed["smile"] < 0.05
+        assert relaxed["sad"] < 0.05
+    finally:
+        _rest.reset()
+    assert not (tmp_path / "webcam_calibration.json").exists()
+
+
+def test_face_loss_keeps_set_rest() -> None:
+    from .visemes import mouth_features, rest_stamp
+
+    _set_rest()
+    zero = _rest.snapshot()
+    stamp = rest_stamp()
+    try:
+        # A cup or hand over the mouth for ~3 s.
+        for _ in range(90):
+            mouth_features(None)
+        assert rest_stamp() == stamp
+        assert _rest.snapshot() == zero
+    finally:
+        _rest.reset()
+
+
+def test_face_expr_relocks_only_on_set_rest_or_first_rest() -> None:
+    from .eye_bits import bits as eyes
+    from .feel import feel
+    from .retarget import FaceExpr
+    from .visemes import mouth_features, rest_stamp
+
+    rest, osf = _toy_face()
+    raised = osf.copy()
+    raised[17:27, 1] -= 0.35
+    closed = {"open": 0.15, "width": 0.40, "corner": 0.50}
+    expr = FaceExpr()
+    prev = feel.payload()
+    eye_snap = eyes.snapshot()
+    feel.update({"smoothing": 0.0, "response": 1.0, "mouth": 0.5})
+    _rest.reset()
+    try:
+        eyes.restore(frozenset(), {})
+        expr.apply(rest, rest, osf)
+        # This session's first closed-mouth rest still re-locks the face.
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert _rest.locked
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        _rest.use_snapshot(closed)
+        expr.apply(rest, rest, osf)
+        assert expr._token == rest_stamp()
+        # Face lost past the miss limit, back with the brows up (a drink).
+        for _ in range(60):
+            mouth_features(None)
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        out = rest
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+        # A rest re-seeded without Set Rest is not a new neutral either.
+        _rest.reset()
+        for _ in range(12):
+            _rest.observe(closed["open"], closed["width"], closed["corner"], True)
+        assert rest_stamp() == (True, None)
+        for _ in range(8):
+            out = expr.apply(rest, rest, raised)
+        assert out is not None
+        assert float(out[6, 1]) < float(rest[6, 1]) - 1.0
+        assert float(out[9, 1]) < float(rest[9, 1]) - 1.0
+    finally:
+        feel.update(prev)
+        eyes.restore(*eye_snap)
+        _rest.reset()
 
 
 def _toy_face() -> tuple[np.ndarray, np.ndarray]:
@@ -2035,10 +2190,11 @@ def _webcam_pose(head: dict[str, float], lean: float = 0.0) -> dict[str, float]:
     return {"cx": x, "cy": y, "bx": x, "by": y, "scale": 100.0, "tilt": head["roll"], "ok": 1.0}
 
 
-def test_head_turn_and_nod_leave_the_torso_put() -> None:
+def test_head_turn_and_nod_never_walk_the_torso() -> None:
     """The torso rode the head's slide: every look-down pulled the shoulders
     down and every turn slid them sideways, until the body wall held them.
-    The head swings round the neck; the body did not move."""
+    The head swings round the neck. The neck base stays put; the torso only
+    turns round it (body_turn), and with body_turn 0 not at all."""
     from .feel import feel
     from .ifm import IfmPacket, pose_of
     from .rig import FaceRig
@@ -2051,30 +2207,36 @@ def test_head_turn_and_nod_leave_the_torso_put() -> None:
         {"pitch": 20.0, "yaw": 0.0, "roll": 0.0},
         {"pitch": -15.0, "yaw": 30.0, "roll": 0.0},
     )
-    feel.update({"smoothing": 0.0})
-    for source in ("webcam", "iphone"):
-        for look in looks:
-            rig = FaceRig()
-            if source == "webcam":
-                start, moved = _webcam_pose(head0), _webcam_pose(look)
-            else:
-                start = moved = pose_of(IfmPacket(), 1.0)
-            parked_face = rig.apply(rest, rest, head0, start)
-            parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-            turned_face = rig.apply(rest, rest, look, moved)
-            turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-            assert parked_face is not None and turned_face is not None
-            # The head swings.
-            assert float(np.hypot(*(turned_face[21, :2] - parked_face[21, :2]))) > 5.0
-            for idx, joint in parked.items():
-                assert abs(turned[idx]["x"] - joint["x"]) < 0.2, (source, look, idx)
-                assert abs(turned[idx]["y"] - joint["y"]) < 0.2, (source, look, idx)
+    for share in (0.0, feel.body_turn()):
+        feel.update({"smoothing": 0.0, "body_turn": share})
+        for source in ("webcam", "iphone"):
+            for look in looks:
+                rig = FaceRig()
+                if source == "webcam":
+                    start, moved = _webcam_pose(head0), _webcam_pose(look)
+                else:
+                    start = moved = pose_of(IfmPacket(), 1.0)
+                parked_face = rig.apply(rest, rest, head0, start)
+                parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)}
+                turned_face = rig.apply(rest, rest, look, moved)
+                turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)}
+                assert parked_face is not None and turned_face is not None
+                # The head swings.
+                assert float(np.hypot(*(turned_face[21, :2] - parked_face[21, :2]))) > 5.0
+                still = parked.items() if share == 0.0 else [(31, parked[31])]
+                for idx, joint in still:
+                    assert abs(turned[idx]["x"] - joint["x"]) < 0.2, (share, source, look, idx)
+                    assert abs(turned[idx]["y"] - joint["y"]) < 0.2, (share, source, look, idx)
+                if share:
+                    # It turns round the neck base: the chest goes with the look.
+                    assert float(np.hypot(turned[36]["x"] - parked[36]["x"], turned[36]["y"] - parked[36]["y"])) > 1.0
 
 
-def test_nod_the_neck_model_misses_leaves_the_torso_put() -> None:
+def test_nod_the_neck_model_misses_never_walks_the_torso() -> None:
     """A real neck swings the eyes by more (or less) than NECK_UP models. On a
     webcam that miss read as a walk: past the dead band every look-down slid
-    the face and pulled the shoulders down with it."""
+    the face and pulled the shoulders down with it. The neck base stays put
+    (the torso only leans round it); with body_turn 0 nothing moves."""
     import math
 
     from .feel import feel
@@ -2084,22 +2246,24 @@ def test_nod_the_neck_model_misses_leaves_the_torso_put() -> None:
     rest, _osf = _toy_face()
     body = skeleton_from_face(rest)
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
-    feel.update({"smoothing": 0.0})
-    for miss in (1.5, 0.5):
-        rig = FaceRig()
-        rig.apply(rest, rest, head0, _webcam_pose(head0))
-        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-        # A 30 deg look-down over a few frames.
-        for pitch in range(2, 32, 2):
-            look = {"pitch": float(pitch), "yaw": 0.0, "roll": 0.0}
-            pose = _webcam_pose(look)
-            _nx, ny = neck_offset(0.0, math.radians(pitch), 0.0)
-            pose["cy"] = pose["by"] = 200.0 + 100.0 * ny * miss
-            assert rig.apply(rest, rest, look, pose) is not None
-        nodded = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-        for idx, joint in parked.items():
-            assert abs(nodded[idx]["x"] - joint["x"]) < 0.5, (miss, idx)
-            assert abs(nodded[idx]["y"] - joint["y"]) < 0.5, (miss, idx)
+    for share in (0.0, feel.body_turn()):
+        feel.update({"smoothing": 0.0, "body_turn": share})
+        for miss in (1.5, 0.5):
+            rig = FaceRig()
+            rig.apply(rest, rest, head0, _webcam_pose(head0))
+            parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)}
+            # A 30 deg look-down over a few frames.
+            for pitch in range(2, 32, 2):
+                look = {"pitch": float(pitch), "yaw": 0.0, "roll": 0.0}
+                pose = _webcam_pose(look)
+                _nx, ny = neck_offset(0.0, math.radians(pitch), 0.0)
+                pose["cy"] = pose["by"] = 200.0 + 100.0 * ny * miss
+                assert rig.apply(rest, rest, look, pose) is not None
+            nodded = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)}
+            still = parked.items() if share == 0.0 else [(31, parked[31])]
+            for idx, joint in still:
+                assert abs(nodded[idx]["x"] - joint["x"]) < 0.5, (share, miss, idx)
+                assert abs(nodded[idx]["y"] - joint["y"]) < 0.5, (share, miss, idx)
 
 
 def test_webcam_lean_still_moves_the_torso() -> None:
@@ -2138,8 +2302,8 @@ def test_turn_stop_stops_the_slide_on_webcam_and_iphone_alike() -> None:
         places = []
         for webcam in (True, False):
             rig = FaceRig()
-            start = _webcam_pose(head0) if webcam else pose_of(IfmPacket(), 1.0)
-            moved = _webcam_pose(look) if webcam else pose_of(IfmPacket(), 1.0)
+            start = _webcam_pose(head0) if webcam else pose_of(IfmPacket(), feel.head_sway())
+            moved = _webcam_pose(look) if webcam else pose_of(IfmPacket(), feel.head_sway())
             rig.apply(rest, rest, head0, start)
             rig.apply(rest, rest, look, moved)
             places.append((rig.place()["dx"], rig.place()["dy"]))
@@ -2149,8 +2313,11 @@ def test_turn_stop_stops_the_slide_on_webcam_and_iphone_alike() -> None:
     assert abs(cam_y) < 0.55 * 0.25 * float(rest[4, 0] - rest[0, 0])
 
 
-def test_big_head_turn_does_not_turn_the_torso() -> None:
-    """Turning the head folded the shoulders into a line and swung them round the nose."""
+def test_big_head_turn_turns_the_torso_without_folding_it() -> None:
+    """Turning the head folded the shoulders into a line and swung them round
+    the nose. The torso now turns with the head, but round the neck base and
+    capped: the shoulders keep most of their width and stay below the neck,
+    and the arms keep their length. With body_turn 0 its shape holds."""
     import math
 
     from .feel import feel
@@ -2163,24 +2330,38 @@ def test_big_head_turn_does_not_turn_the_torso() -> None:
     head0 = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
     prev = feel.payload()
     feel.update({"smoothing": 0.0, "max_yaw": 1.0, "max_pitch_up": 1.0, "max_roll": 1.0})
+    poses = {}
     try:
-        rig = FaceRig()
-        rig.apply(rest, rest, head0, origin)
-        parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
-        for _ in range(12):
-            rig.apply(rest, rest, {"pitch": -30.0, "yaw": 80.0, "roll": 0.0}, origin)
-        turned = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig)}
+        for share in (0.0, feel.body_turn()):
+            rig = FaceRig()
+            rig.apply(rest, rest, head0, origin)
+            parked = {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)}
+            for _ in range(12):
+                rig.apply(rest, rest, {"pitch": -30.0, "yaw": 80.0, "roll": 0.0}, origin)
+            poses[share] = (parked, {int(j["id"]): j for j in follow_skeleton(body, rest, rig=rig, share=share)})
     finally:
         feel.update(prev)
 
     def _vec(pose: dict, a: int, b: int) -> tuple[float, float]:
         return pose[b]["x"] - pose[a]["x"], pose[b]["y"] - pose[a]["y"]
 
-    # Shoulders keep their width and the torso keeps its shape around the neck.
+    def _len(pose: dict, a: int, b: int) -> float:
+        return math.hypot(*_vec(pose, a, b))
+
+    # body_turn 0: shoulders keep their width and the torso its shape.
+    parked, turned = poses[0.0]
     for a, b in ((32, 34), (31, 36), (31, 32), (32, 33)):
         rx, ry = _vec(parked, a, b)
         tx, ty = _vec(turned, a, b)
         assert math.hypot(tx - rx, ty - ry) < 1.0, (a, b)
+    # Turning: capped short of a fold, below the neck, arms full length.
+    parked, turned = [pose for share, pose in poses.items() if share][0]
+    assert _len(turned, 32, 34) > 0.65 * _len(parked, 32, 34)
+    assert _len(turned, 32, 34) < 0.95 * _len(parked, 32, 34)
+    for idx in (32, 34):
+        assert turned[idx]["y"] > turned[31]["y"] - 0.05 * _len(parked, 32, 34), idx
+    for sh, el in ((32, 33), (34, 35)):
+        assert _len(turned, sh, el) > 0.9 * _len(parked, sh, el), el
 
 
 def test_manual_skeleton_ignores_camera_body() -> None:
@@ -2584,7 +2765,7 @@ def test_hair_pin_zero_matches_old_follow() -> None:
                 rest, rest, {"pitch": 0.0, "yaw": 50.0, "roll": 0.0}, origin
             )
         moved = follow_hair(hrig, turned, face)
-        xs, ys = face.map_plane(hrig.parts[0].local[:, 0], hrig.parts[0].local[:, 1])
+        xs, ys = face.map_hair(hrig.parts[0].local[:, 0], hrig.parts[0].local[:, 1])
         expect = [[round(float(x), 1), round(float(y), 1)] for x, y in zip(xs, ys)]
         assert moved[0]["polygon"] == expect
     finally:

@@ -16,13 +16,13 @@ from __future__ import annotations
 import json
 import math
 import threading
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-TRAVEL_PATH = ROOT / "output" / "travel_box.json"
+from .paths import OUTPUT
+
+TRAVEL_PATH = OUTPUT / "travel_box.json"
 
 NUM_KEYPOINTS = 37
 KEYPOINT_DIM = 4

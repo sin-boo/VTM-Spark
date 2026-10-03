@@ -67,6 +67,43 @@ const en = {
   'splash.loading': 'Loading resources…',
   'splash.ready': 'Ready',
 
+  // Splash: the graphics card cannot run the AI (backend.gpu_check)
+  'gpu.title.no_nvidia': 'No NVIDIA graphics card found',
+  'gpu.title.card_too_old': 'This graphics card is too old for VTM Spark',
+  'gpu.title.driver_old': 'The NVIDIA driver is too old',
+  'gpu.title.wrong_build': 'The AI engine does not match this graphics card',
+  'gpu.title.cuda_error': 'The graphics card could not run the AI engine',
+  'gpu.whatHeading': 'What happened',
+  'gpu.triedHeading': 'What we tried',
+  'gpu.nextHeading': 'What you can do',
+  'gpu.what.no_nvidia':
+    'VTM Spark runs its AI on an NVIDIA graphics card (GeForce GTX 900 series or newer). Windows does not show one on this PC.',
+  'gpu.what.card_too_old':
+    '{gpu} (CUDA {cap}) is older than any card the AI engine supports. VTM Spark needs a GeForce GTX 900 series or newer.',
+  'gpu.what.driver_old': '{gpu} is supported, but its driver ({driver}) is too old for the AI engine.',
+  'gpu.what.wrong_build':
+    'The AI engine installed here ({build}) cannot run on {gpu}. This happens after a graphics card change.',
+  'gpu.what.cuda_error': '{gpu} failed a test calculation.',
+  'gpu.tried.search': 'Looked for NVIDIA cards with the NVIDIA driver tool: none found.',
+  'gpu.tried.buildOk': 'Installed the AI engine for {build}: the card ran it.',
+  'gpu.tried.buildFail': 'Installed the AI engine for {build}: the card still failed.',
+  'gpu.tried.start': 'Tested the card again when VTM Spark started: it failed.',
+  'gpu.next.no_nvidia':
+    'If this PC has an NVIDIA card, install its driver from nvidia.com/drivers and start VTM Spark again. Without one, this PC cannot run VTM Spark.',
+  'gpu.next.card_too_old': 'This PC cannot run VTM Spark with this card.',
+  'gpu.next.driver_old':
+    'Update the NVIDIA driver (nvidia.com/drivers or the NVIDIA app), then start VTM Spark again.',
+  'gpu.next.repair':
+    'Click Repair. It closes VTM Spark, installs the AI engine version for this card (about 2.5 GB) and tests it.',
+  'gpu.next.other':
+    'Restart the PC. If it keeps happening, reinstall the NVIDIA driver from nvidia.com/drivers.',
+  'gpu.details': 'Error: {error}',
+  'gpu.repair': 'Repair',
+  'gpu.repairing': 'Starting the repair…',
+  'gpu.repairStarted':
+    'The repair opened in its own window. VTM Spark closes while it works; start VTM Spark again when it says it finished.',
+  'gpu.repairFailed': 'Could not start the repair: {error}',
+
   // Metric strip
   'metric.fpsTitle': 'Frames shown on the preview per second, including in-betweens',
   'metric.fps': 'FPS',
@@ -184,6 +221,7 @@ const en = {
   'stream.startCam': 'Start cam',
   'stream.stopCam': 'Stop cam',
   'stream.camTitle': 'Send avatar frames to a virtual camera for OBS',
+  'stream.camSizeHint': 'Sending {size}. For no black bars in OBS, open the VTM Spark source, set Resolution/FPS Type to Custom and Resolution to {size}.',
   'stream.generateOnce': 'Generate once',
 
   // Settings: language
@@ -214,7 +252,7 @@ const en = {
   'perf.defaultsTitle': 'Max FPS auto, Batch auto, Interpolate on, Inbetweens auto',
   'perf.maxFps': 'Max FPS',
   'perf.maxFpsTitle':
-    'Cap on generated frames per second. The GPU idles between frames, so a lower cap leaves headroom for games or OBS. Auto generates just enough frames for the in-betweens to fill the 20 fps preview (1 in-between → 10), so no GPU goes on frames that would never be shown.',
+    'Cap on generated frames per second. The GPU idles between frames, so a lower cap leaves headroom for games or OBS. Auto generates just enough frames for the in-betweens to fill the 20 fps preview (1 in-between → 10), so no GPU goes on frames that would never be shown. Above 20 the preview speeds up to match the cap.',
   'perf.auto': 'Auto · {n}',
   'perf.batch': 'Batch',
   'perf.batchTitle':
@@ -235,6 +273,9 @@ const en = {
   'perf.compileTitle':
     'Speed boost: builds a version of the model tuned for your GPU when the stream starts. The first build can take a minute; off runs at normal speed.',
   'perf.boostBuilding': 'Building the speed boost',
+  'perf.decoderUltra': 'Ultra fast',
+  'perf.decoderNormal': 'Normal decoder (fallback)',
+  'perf.decoderEager': 'Slow path (fallback)',
 
   // Settings: overlay
   'overlay.title': 'Overlay',
@@ -331,10 +372,13 @@ const en = {
   'lib.importing': 'Importing…',
   'lib.import': 'Import .vtm',
   'lib.pickVtm': 'Only .vtm character files can be imported.',
-  'lib.dropHint': 'Drop .vtm to add',
+  'lib.dropHint': 'Drop an image or .vtm to add',
+  'lib.dropUnsupported': 'Drop an image (PNG, JPG, WebP, BMP) to create a character, or a .vtm file to import one.',
   'lib.imported': 'Imported {name}.',
   'lib.importedMany': 'Imported {count} characters.',
   'lib.importFailed': 'Import failed: {error}',
+  'lib.skippedNotVtm': 'Skipped {count} file(s) that are not .vtm.',
+  'lib.skippedOneImage': 'One character at a time: made from the first image, skipped {count} other file(s).',
   'lib.fitTitle': 'Fit character',
   'lib.creatingTitle': 'Creating character',
   'lib.details': 'Details',
@@ -452,6 +496,42 @@ const ja: Record<MessageKey, string> = {
   'splash.loading': 'リソースを読み込み中…',
   'splash.ready': '準備完了',
 
+  'gpu.title.no_nvidia': 'NVIDIA のグラフィックカードが見つかりません',
+  'gpu.title.card_too_old': 'このグラフィックカードは VTM Spark には古すぎます',
+  'gpu.title.driver_old': 'NVIDIA ドライバーが古すぎます',
+  'gpu.title.wrong_build': 'AI エンジンがこのグラフィックカードに合っていません',
+  'gpu.title.cuda_error': 'グラフィックカードで AI エンジンを実行できませんでした',
+  'gpu.whatHeading': '起きたこと',
+  'gpu.triedHeading': '試したこと',
+  'gpu.nextHeading': 'できること',
+  'gpu.what.no_nvidia':
+    'VTM Spark の AI は NVIDIA のグラフィックカード（GeForce GTX 900 シリーズ以降）で動きます。この PC では Windows がそのカードを認識していません。',
+  'gpu.what.card_too_old':
+    '{gpu}（CUDA {cap}）は AI エンジンが対応するどのカードよりも古い世代です。VTM Spark には GeForce GTX 900 シリーズ以降が必要です。',
+  'gpu.what.driver_old': '{gpu} には対応していますが、ドライバー（{driver}）が AI エンジンには古すぎます。',
+  'gpu.what.wrong_build':
+    'この PC に入っている AI エンジン（{build}）は {gpu} では動きません。グラフィックカードを交換したあとに起こります。',
+  'gpu.what.cuda_error': '{gpu} がテスト計算に失敗しました。',
+  'gpu.tried.search': 'NVIDIA ドライバーのツールで NVIDIA カードを探しました：見つかりませんでした。',
+  'gpu.tried.buildOk': '{build} 用の AI エンジンを入れました：カードで動きました。',
+  'gpu.tried.buildFail': '{build} 用の AI エンジンを入れました：それでもカードで失敗しました。',
+  'gpu.tried.start': 'VTM Spark の起動時にもう一度カードをテストしました：失敗しました。',
+  'gpu.next.no_nvidia':
+    'NVIDIA のカードがある場合は nvidia.com/drivers からドライバーを入れて、VTM Spark をもう一度起動してください。カードがない場合、この PC では VTM Spark を使えません。',
+  'gpu.next.card_too_old': 'このカードでは、この PC で VTM Spark を使えません。',
+  'gpu.next.driver_old':
+    'NVIDIA ドライバーを更新して（nvidia.com/drivers または NVIDIA アプリ）、VTM Spark をもう一度起動してください。',
+  'gpu.next.repair':
+    '「修復」を押してください。VTM Spark を閉じ、このカード用の AI エンジン（約 2.5 GB）を入れてテストします。',
+  'gpu.next.other':
+    'PC を再起動してください。それでも続く場合は nvidia.com/drivers から NVIDIA ドライバーを入れ直してください。',
+  'gpu.details': 'エラー: {error}',
+  'gpu.repair': '修復',
+  'gpu.repairing': '修復を開始しています…',
+  'gpu.repairStarted':
+    '修復を別のウィンドウで開きました。作業中は VTM Spark が閉じます。完了と表示されたら VTM Spark をもう一度起動してください。',
+  'gpu.repairFailed': '修復を開始できませんでした: {error}',
+
   'metric.fpsTitle': 'プレビューに表示される1秒あたりのフレーム数（中割りを含む）',
   'metric.fps': '表示',
   'metric.gen': '生成',
@@ -559,6 +639,7 @@ const ja: Record<MessageKey, string> = {
   'stream.startCam': 'カメラ開始',
   'stream.stopCam': 'カメラ停止',
   'stream.camTitle': 'アバター映像を仮想カメラに送り、OBS などで使えるようにします',
+  'stream.camSizeHint': '{size} で送信中。OBS で黒帯をなくすには、VTM Spark ソースのプロパティで「解像度/FPS タイプ」を「カスタム」、「解像度」を {size} にします。',
   'stream.generateOnce': '1枚だけ生成',
 
   'lang.title': '言語',
@@ -586,7 +667,7 @@ const ja: Record<MessageKey, string> = {
   'perf.defaultsTitle': '最大FPS 自動、バッチ 自動、フレーム補間 オン、中割り 自動',
   'perf.maxFps': '最大FPS',
   'perf.maxFpsTitle':
-    '1秒あたりに生成するフレーム数の上限です。フレームの合間は GPU が休むため、上限を下げるとゲームや OBS に余裕を残せます。自動では、中割りと合わせて 20 fps のプレビューがちょうど埋まる枚数だけ生成します（中割り 1 → 10）。表示されないフレームに GPU を使いません。',
+    '1秒あたりに生成するフレーム数の上限です。フレームの合間は GPU が休むため、上限を下げるとゲームや OBS に余裕を残せます。自動では、中割りと合わせて 20 fps のプレビューがちょうど埋まる枚数だけ生成します（中割り 1 → 10）。表示されないフレームに GPU を使いません。20 を超えると、プレビューも上限に合わせて速くなります。',
   'perf.auto': '自動 · {n}',
   'perf.batch': 'バッチ',
   'perf.batchTitle':
@@ -607,6 +688,9 @@ const ja: Record<MessageKey, string> = {
   'perf.compileTitle':
     '高速化：ストリーム開始時に、お使いの GPU 向けに最適化したモデルをビルドします。初回のビルドには1分ほどかかることがあります。オフの場合は通常の速度で動作します。',
   'perf.boostBuilding': '高速化をビルド中',
+  'perf.decoderUltra': 'ウルトラ高速',
+  'perf.decoderNormal': '通常デコーダー（フォールバック）',
+  'perf.decoderEager': '低速パス（フォールバック）',
 
   'overlay.title': 'オーバーレイ',
   'overlay.outline': '輪郭',
@@ -697,10 +781,13 @@ const ja: Record<MessageKey, string> = {
   'lib.importing': '読み込み中…',
   'lib.import': '.vtm を読み込む',
   'lib.pickVtm': '読み込めるのは .vtm キャラクターファイルだけです。',
-  'lib.dropHint': '.vtm をドロップして追加',
+  'lib.dropHint': '画像か .vtm をドロップして追加',
+  'lib.dropUnsupported': '画像（PNG・JPG・WebP・BMP）をドロップするとキャラクターを作成、.vtm ファイルなら読み込みます。',
   'lib.imported': '「{name}」を読み込みました。',
   'lib.importedMany': '{count} 件のキャラクターを読み込みました。',
   'lib.importFailed': '読み込みに失敗しました: {error}',
+  'lib.skippedNotVtm': '.vtm 以外の {count} 件のファイルはスキップしました。',
+  'lib.skippedOneImage': '作成は 1 体ずつです。最初の画像から作成し、ほかの {count} 件はスキップしました。',
   'lib.fitTitle': 'キャラクターの調整',
   'lib.creatingTitle': 'キャラクターを作成中',
   'lib.details': '詳細',

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-PATH = ROOT / "output" / "eye_bits.json"
+from .paths import OUTPUT
+
+PATH = OUTPUT / "eye_bits.json"
 
 # Artificial lid mids: 66 = (37+38)/2 (OSF "right" = image-left eye),
 # 67 = (43+44)/2 (image-right eye).

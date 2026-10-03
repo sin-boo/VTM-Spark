@@ -5,8 +5,9 @@ its rest head and body and the picture's edges. Turn and tilt keep ``base``'s
 amount (the mean of its two sides) but centre it on the pose the art is drawn
 in: a still drawn turned 8 deg to the right has 8 deg less room to turn right
 and 8 deg more to the left, so the view never goes further from straight on
-than a frontal still allows. Look up / down, eye range, size and On come from
-``base`` unchanged.
+than a frontal still allows. Fitting a box this fit already centred gives the
+same box back (see ``_amount``). Look up / down, eye range, size and On come
+from ``base`` unchanged.
 
 The margins reproduce limiters tuned by hand on a green-screen bust (face
 about a fifth of the picture high); other framings get the same margins to
@@ -61,6 +62,8 @@ ROOM_MAX = 1.2
 DRAWN_DEADBAND = 3.0
 DRAWN_MAX = 25.0
 TURN_MIN = 5.0
+# Sides are saved to 0.1 deg; a side this close to a limit is held there.
+FIT_TOL = 0.1
 
 MOUTH = tuple(range(20, 28))
 CHIN = 2
@@ -127,6 +130,32 @@ def _drawn(deg: float) -> float:
     if abs(deg) < DRAWN_DEADBAND:
         return 0.0
     return max(-DRAWN_MAX, min(DRAWN_MAX, deg))
+
+
+def _amount(left: float, right: float, drawn: float, cap: float) -> float:
+    """The turn / tilt amount ``left`` / ``right`` were centred from.
+
+    Usually their mean. A box this fit already centred on ``drawn`` may have a
+    side held at TURN_MIN (or the cap); its mean is then larger than the
+    amount, and fitting again from it crept that way on every press (tilt
+    22 / 12 on a still tilted 14 deg: 31 / 5, 32 / 5, 32.5 / 5 ...). Such a
+    side is read back from the other one, so a second fit changes nothing.
+    """
+    lo, hi = TURN_MIN, float(cap)
+
+    def held(v: float) -> bool:
+        return v <= lo + FIT_TOL or v >= hi - FIT_TOL
+
+    if held(left) == held(right):
+        return 0.5 * (left + right)
+    # left = amount + drawn, right = amount - drawn before the clamp.
+    amount = right + drawn if held(left) else left - drawn
+    side, free = (left, amount + drawn) if held(left) else (right, amount - drawn)
+    if side <= lo + FIT_TOL and free <= lo + FIT_TOL:
+        return amount
+    if side >= hi - FIT_TOL and free >= hi - FIT_TOL:
+        return amount
+    return 0.5 * (left + right)
 
 
 def green_screen_mask(image_bgr: np.ndarray | None) -> np.ndarray | None:
@@ -222,8 +251,8 @@ def fit_travel_box(
     pose = drawn_pose(k)
     yaw = _drawn(pose["yaw"])
     roll = _drawn(pose["roll"])
-    turn = 0.5 * (float(spec["turn_left"]) + float(spec["turn_right"]))
-    tilt = 0.5 * (float(spec["tilt_left"]) + float(spec["tilt_right"]))
+    turn = _amount(float(spec["turn_left"]), float(spec["turn_right"]), yaw, YAW_MAX_DEG)
+    tilt = _amount(float(spec["tilt_left"]), float(spec["tilt_right"]), roll, ROLL_MAX_DEG)
     # Right is positive: a still already facing right has less right to go.
     out["turn_left"] = round(max(TURN_MIN, min(YAW_MAX_DEG, turn + yaw)), 1)
     out["turn_right"] = round(max(TURN_MIN, min(YAW_MAX_DEG, turn - yaw)), 1)

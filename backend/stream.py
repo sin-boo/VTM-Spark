@@ -58,8 +58,9 @@ from .engine import (
     _clip_cfg,
     _clip_inbetweens,
     _clip_max_fps,
+    show_fps_max,
     effective_inbetweens,
-    face_pose_delta,
+    snap_move,
     gen_cap,
     gen_hold_s,
     interpolate_on,
@@ -68,7 +69,6 @@ from .engine import (
 from .load_timing import StageClock, StageMeter
 from .frame_interp import (
     PLAYOUT_QUEUE_MAX,
-    SHOW_FPS_MAX,
     SLOT_SLACK,
     TWEEN_MAX_S,
     ema_blend,
@@ -175,6 +175,16 @@ def pack_stream_batch(
     hairs = [lerp_stream_hair(prev_hair, hair, (i + 1) / n) for i in range(n - 1)] + [hair]
     return np.stack(poses, axis=0), np.stack(hairs, axis=0)
 
+
+def _place_rest_point(keypoints: np.ndarray, slot: int, x: float, y: float) -> np.ndarray:
+    """A copy of ``keypoints`` with ``slot`` placed at normalised (x, y) and shown."""
+    out = np.asarray(keypoints, dtype=np.float32).copy()
+    out[slot, 0] = x
+    out[slot, 1] = y
+    out[slot, 2] = max(float(out[slot, 2]), 0.85)
+    out[slot, 3] = 1.0
+    return out
+
 Listener = Callable[[dict[str, Any]], None]
 
 # Start stream's one bar: moving weights back to the GPU, then warmup, then
@@ -199,6 +209,9 @@ _LAB_SKELETON_NAMES = {
     35: "left_elbow",
     36: "chest",
 }
+# Rest points closer than this (character pixels) are the same point. Track Lab
+# sends points rounded to 0.01 px; a drag moves them whole pixels.
+REST_MATCH_PX = 0.05
 
 
 def _process_rss_bytes() -> int:
@@ -340,6 +353,15 @@ def fit_edit(method: Callable[..., Any]) -> Callable[..., Any]:
 class StreamRuntime:
     """Owns model, tracker, and background generate/stream loops for the API."""
 
+    # Orders Track Lab packets applied onto the overlay / hair (track poll,
+    # DiT feed, command acks all apply them) and guards the session / seq.
+    _lab_order_lock = threading.RLock()
+    # One character sync into Track Lab at a time, counted so a restart
+    # restore can tell another flow already synced the new tracker.
+    _lab_sync_lock = threading.RLock()
+    _lab_sync_n = 0
+    _lab_restore_sync_n = 0
+
     def __init__(self) -> None:
         default_ckpt = default_stream_checkpoint()
         self.engine = StreamEngine(
@@ -447,6 +469,9 @@ class StreamRuntime:
 
         save_ui_session(checkpoint=display_path(default_ckpt))
         self._last_overlay_kps: np.ndarray | None = None
+        # The character's rest mesh, nudges off (see _rest_keypoints). The
+        # overlay above is whatever was drawn last: live or generated poses.
+        self._rest_kps: np.ndarray | None = None
         self._travel_preview_kps: np.ndarray | None = None
         # After a desk edit, live frames must not put the old box back on the slider.
         self._travel_from_desk = False
@@ -475,6 +500,13 @@ class StreamRuntime:
         # None = this still is not in Track Lab yet; ignore leftover overlay/hair.
         self._lab_overlay_gen: int | None = 0
         self._lab_seen_generation: int = 0
+        # Track Lab tracker process (see _note_lab_session), sessions it
+        # replaced, the newest seq applied, and the frame now on the overlay.
+        self._lab_session = ""
+        self._lab_old_sessions: tuple[str, ...] = ()
+        self._lab_seq = -1
+        self._lab_overlay_frame: tuple[str, int] = ("", -1)
+        self._lab_session_restore = False
         # Live retarget state (webcam → character). Missing this made the mesh
         # draw raw webcam-scale keypoints and look tiny / "broken".
         self._live_origin_keypoints: np.ndarray | None = None
@@ -731,7 +763,7 @@ class StreamRuntime:
         with self._boot_lock:
             if self._boot["ready"]:
                 return snapshot_boot(self._boot)
-            if self._boot["running"]:
+            if self._boot["running"] or self._boot.get("gpu_problem"):
                 return snapshot_boot(self._boot)
             self._boot["running"] = True
             self._boot["error"] = ""
@@ -743,6 +775,15 @@ class StreamRuntime:
         return self.boot_snapshot()
 
     def _run_boot(self) -> None:
+        problem = self._boot_gpu_problem()
+        if problem is not None:
+            # Streaming on the CPU takes seconds a frame: stop on the splash and say why,
+            # what install tried, and what is left (Repair when another build fits).
+            with self._boot_lock:
+                self._boot["gpu_problem"] = problem
+                self._boot["running"] = False
+            self._publish_boot(busy=False, message="This PC's graphics card cannot run VTM Spark")
+            return
         lab_thread = threading.Thread(target=self._boot_lab, name="vtm-boot-lab", daemon=True)
         lab_thread.start()
         try:
@@ -762,6 +803,19 @@ class StreamRuntime:
         self._publish_boot(
             busy=False, message="Ready", progress=0.0, progress_label="", progress_kind=""
         )
+
+    def _boot_gpu_problem(self) -> dict[str, Any] | None:
+        """backend.gpu_check at launch; a broken checker never blocks the desk."""
+        try:
+            from .gpu_check import desk_problem
+
+            problem = desk_problem()
+        except Exception as exc:
+            print(f"[gpu] check skipped: {exc}")
+            return None
+        if problem is not None:
+            _runtime_log(f"[gpu] {problem.get('kind')}: {problem.get('gpu')} ({problem.get('error')})")
+        return problem
 
     def _boot_model(self) -> None:
         self._set_boot_stage(
@@ -942,7 +996,16 @@ class StreamRuntime:
 
         Track Lab is the authoring tool. Boot / Start tracking must not wipe
         mouth end-shapes. A new desk character still may replace them.
+
+        One at a time: a restart restore on the track poll thread and a
+        Start tracking / load / boot on another could interleave their
+        set_source / set_rest / track, and a late one stops live tracking.
         """
+        with self._lab_sync_lock:
+            self._lab_sync_n += 1
+            self._sync_lab_character_locked(replace=replace)
+
+    def _sync_lab_character_locked(self, *, replace: bool) -> None:
         from .lab_harness import lab as lab_harness
 
         probe = lab_harness.status(merge_frame=False)
@@ -956,7 +1019,8 @@ class StreamRuntime:
             self._accept_lab_overlay(probe)
             packet = self._lab_packet_from_ack({"status": probe})
             self._adopt_lab_hair(packet)
-            self.adopt_lab_overlay(packet, emit=True)
+            adopted = self.adopt_lab_overlay(packet, emit=True)
+            self._note_lab_rest(packet, adopted)
             return
         path = self._write_lab_source()
         if path is None:
@@ -982,16 +1046,18 @@ class StreamRuntime:
         packet = self._lab_packet_from_ack(track_ack)
         self._accept_lab_overlay(packet or track_ack)
         got_hair = self._adopt_lab_hair(packet)
-        self.adopt_lab_overlay(packet, emit=True)
+        adopted = self.adopt_lab_overlay(packet, emit=True)
         if rest is not None and "hair" not in rest and got_hair:
             # First load of a pack without hair: keep what the lab found so
             # the next load is fully packaged too.
             self._store_pack_hair()
-        overlay = self._last_overlay_kps
-        if overlay is not None:
+        # The model draws the still as Track Lab shows it: its rest with the
+        # nudges on. Never the overlay, which a GET /frame may have made live.
+        lab_rest = self._note_lab_rest(packet, adopted)
+        if lab_rest is not None:
             try:
                 self.engine.adopt_ref_keypoints(
-                    overlay, persist=False, pose_source="lab"
+                    self._with_nudges(lab_rest, packet), persist=False, pose_source="lab"
                 )
             except Exception:
                 pass
@@ -1015,9 +1081,12 @@ class StreamRuntime:
         if isinstance(commands, list) and "set_rest" not in commands:
             return None
         image = getattr(self, "_still_image", None)
-        # The pack's rest is the model's reference pose. The overlay is only
-        # the same thing until a stream or live tracking moves it.
-        kps = getattr(self.engine, "_ref_keypoints", None)
+        # The pack's rest, without nudges: they go along as point_offsets and
+        # Track Lab puts them on. The model's reference has them on already,
+        # and the overlay is only the rest until a stream or tracking moves it.
+        kps = getattr(self, "_rest_kps", None)
+        if kps is None:
+            kps = getattr(self.engine, "_ref_keypoints", None)
         if kps is None and image is not None and self._last_image is image:
             kps = self._last_overlay_kps
         if image is None or kps is None:
@@ -1109,10 +1178,19 @@ class StreamRuntime:
             batch_size = max(1, int(getattr(engine, "stream_batch_size", 1) or 1))
         except (TypeError, ValueError):
             batch_size = 1
+        # Read-only: what keys run on (ultra / normal frame graph, or eager)
+        # and whether the fast decoder is installed and healthy.
+        try:
+            speed_active = str(getattr(engine, "active_speed_mode", "eager") or "eager")
+            ultra_ok = bool(getattr(engine, "ultra_available", False))
+        except Exception:
+            speed_active, ultra_ok = "eager", False
         return {
             "compile_status": st,
             "compile_on": st == "on",
             "compile_model": wanted,
+            "speed_mode_active": speed_active,
+            "ultra_available": ultra_ok,
             "compile_detail": detail,
             "keypoint_layout": layout,
             "models_on_gpu": bool(getattr(engine, "_gpu_resident", False)),
@@ -1213,6 +1291,7 @@ class StreamRuntime:
         self._last_image = None
         self._still_image = None
         self._last_overlay_kps = None
+        self._rest_kps = None
         self._driven_keypoints = None
         self._last_good_keypoints = None
         self._mesh_edited = False
@@ -1480,6 +1559,7 @@ class StreamRuntime:
                 ref_face_latent=pack.ref_face_latent,
                 skip_crop=pack.skip_crop,
                 path=ref,
+                lower_lids=self._pack_lower_lids(ref, pack),
             )
             return
         from .paths import refs_dir
@@ -1680,6 +1760,7 @@ class StreamRuntime:
             kps = getattr(self.engine, "_ref_keypoints", None)
             if kps is not None:
                 self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+                self._rest_kps = self._last_overlay_kps.copy()
                 self._driven_keypoints = self._last_overlay_kps.copy()
                 self._last_good_keypoints = self._last_overlay_kps.copy()
             self._mesh_edited = False
@@ -1852,6 +1933,8 @@ class StreamRuntime:
 
     def _install_loaded_reference(self, preview: Image.Image, kps: np.ndarray) -> dict[str, Any]:
         self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+        # The pack's own mesh: its rest, with no nudges on it.
+        self._rest_kps = self._last_overlay_kps.copy()
         self._driven_keypoints = self._last_overlay_kps.copy()
         self._last_good_keypoints = self._last_overlay_kps.copy()
         self._mesh_edited = False
@@ -2017,6 +2100,7 @@ class StreamRuntime:
                     ref_face_latent=pack.ref_face_latent,
                     skip_crop=pack.skip_crop,
                     path=path,
+                    lower_lids=self._pack_lower_lids(path, pack),
                 )
             else:
                 # Made with another model (or size): re-encode, preferring the
@@ -2132,6 +2216,7 @@ class StreamRuntime:
             "_ref_keypoints_model",
             "_ref_keypoints_session_base",
             "_ref_rig",
+            "_lower_lids",
         ):
             try:
                 setattr(eng, attr, None)
@@ -2424,6 +2509,29 @@ class StreamRuntime:
             latent_shape=np.shape(pack.ref_latent),
         )
 
+    def _pack_lower_lids(self, path: Path, pack: Any) -> list[list[list[float]]] | None:
+        """The character's own lower eyelids: kept in its fit, else read once
+        from the still and kept there, so a blink can shut the eye."""
+        from .engine import detect_reference_lower_lids
+        from .model_layout import valid_lower_lids
+
+        lids = valid_lower_lids((getattr(pack, "fit", None) or {}).get("lower_lids"))
+        if lids is not None:
+            return lids
+        still = getattr(pack, "preview_rgb", None)
+        if still is None:
+            return None
+        lids = detect_reference_lower_lids(still)
+        if lids is not None:
+            from .character_pack import read_pack_fit, write_pack_fit
+
+            try:
+                # Fresh read: write_pack_fit replaces the whole fit.json.
+                write_pack_fit(path, {**read_pack_fit(path), "lower_lids": lids})
+            except Exception as exc:
+                print(f"Could not keep the lower eyelids in {path.name}: {exc}")
+        return lids
+
     def _store_reencoded_latents(self, path: Path) -> None:
         from .character_pack import replace_pack_latents
 
@@ -2570,7 +2678,14 @@ class StreamRuntime:
         st = self.status()
         steps = int(st.get("steps") or STREAM_DEFAULT_STEPS)
         boost = bool(st.get("fast_mode")) and bool(getattr(engine, "compile_model", False))
-        return profile_key(gpu, checkpoint_label(engine.checkpoint), steps, boost)
+        graph_ok = getattr(engine, "_graph_ok", None)
+        graph = ""
+        if callable(graph_ok) and graph_ok(steps):
+            graph = str(getattr(engine, "graph_mode", "normal") or "normal")
+            graph_dtype = getattr(engine, "graph_dtype", None)
+            if callable(graph_dtype) and graph_dtype(graph) == "fp32":
+                graph += "-fp32"
+        return profile_key(gpu, checkpoint_label(engine.checkpoint), steps, boost, graph)
 
     def _auto_batch_plan(self) -> int:
         """Batch Auto would stream at, from what this PC measured before."""
@@ -3026,8 +3141,19 @@ class StreamRuntime:
             self.engine._last_driven_body = None
         except Exception:
             pass
+        # The pose jumps here; the next key must not continue the last one.
+        self._drop_hold()
         if reason:
             print(f"[pose-diag] live origin reset ({reason})")
+
+    def _drop_hold(self) -> None:
+        """Start the next DiT call from noise, not from the last generated frame."""
+        clear = getattr(getattr(self, "engine", None), "clear_last_gen_latent", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
 
     @staticmethod
     def _snapshot_coord_key(snap: Any) -> tuple[Any, ...] | None:
@@ -3472,10 +3598,65 @@ class StreamRuntime:
         return lab_packet_from_ack(ack)
 
     def _note_lab_generation(self, packet: dict[str, Any] | None) -> None:
+        self._note_lab_session(packet)
         gen = self._lab_generation(packet)
         if gen:
             seen = int(getattr(self, "_lab_seen_generation", 0) or 0)
             self._lab_seen_generation = max(seen, gen)
+
+    def _note_lab_session(self, packet: dict[str, Any] | None) -> None:
+        """A restarted Track Lab tracker starts ``generation`` and ``seq`` at 0.
+
+        Held against the old counters, every packet it sent looked stale: the
+        overlay froze under "Tracking on" and a character sync failed. Forget
+        them, and let the track poll give the new tracker the character still
+        and start it again (``_restore_lab_session``).
+        """
+        from .lab_harness import lab_packet_session
+
+        session = lab_packet_session(packet)
+        if not session:
+            return
+        with self._lab_order_lock:
+            current = str(getattr(self, "_lab_session", "") or "")
+            retired = tuple(getattr(self, "_lab_old_sessions", ()) or ())
+            if session == current or session in retired:
+                return
+            self._lab_session = session
+            self._lab_seq = -1
+            if not current:
+                return  # first packet this desk has seen: nothing to restore
+            self._lab_old_sessions = (retired + (current,))[-4:]
+            self._lab_seen_generation = 0
+            if getattr(self, "_lab_overlay_gen", None) is not None:
+                self._lab_overlay_gen = 0
+            self._lab_restore_sync_n = self._lab_sync_n
+            self._lab_session_restore = True
+        print(f"[lab-harness] Track Lab restarted (session {current} -> {session})", flush=True)
+
+    def _lab_packet_fresh(self, packet: dict[str, Any] | None) -> bool:
+        """False for a packet older than one already applied. Hold ``_lab_order_lock``."""
+        from .lab_harness import lab_packet_order
+
+        order = lab_packet_order(packet)
+        if order is None:
+            return True
+        session, seq = order
+        if session != str(getattr(self, "_lab_session", "") or ""):
+            # A tracker that has since restarted.
+            return session not in tuple(getattr(self, "_lab_old_sessions", ()) or ())
+        return seq >= int(getattr(self, "_lab_seq", -1))
+
+    def _lab_mark_applied(self, packet: dict[str, Any] | None, *, overlay: bool) -> None:
+        """Remember the newest seq applied. Hold ``_lab_order_lock``."""
+        from .lab_harness import lab_packet_order
+
+        order = lab_packet_order(packet)
+        if order is None or order[0] != str(getattr(self, "_lab_session", "") or ""):
+            return
+        self._lab_seq = max(int(getattr(self, "_lab_seq", -1)), order[1])
+        if overlay:
+            self._lab_overlay_frame = order
 
     def _accept_lab_overlay(self, packet: dict[str, Any] | None) -> None:
         if not isinstance(packet, dict):
@@ -3485,6 +3666,8 @@ class StreamRuntime:
         # while blink / look meters kept updating.
         if "generation" not in packet and "keypoints" not in packet:
             return
+        # A restart resets the generation: note it before taking this one.
+        self._note_lab_session(packet)
         gen = self._lab_generation(packet)
         self._lab_overlay_gen = gen
         self._note_lab_generation(packet)
@@ -3493,6 +3676,10 @@ class StreamRuntime:
         want = getattr(self, "_lab_overlay_gen", 0)
         if want is None:
             return False
+        from .lab_harness import lab_packet_session
+
+        if lab_packet_session(packet) in tuple(getattr(self, "_lab_old_sessions", ()) or ()):
+            return False  # from a tracker that has since restarted
         gen = self._lab_generation(packet)
         if not gen:
             return int(want) <= 0
@@ -3518,6 +3705,8 @@ class StreamRuntime:
         fit_gen: int | None = None,
     ) -> bool:
         """Copy Track Lab overlay onto the desk cel. Authoring is not live-only."""
+        # Held or not, see a Track Lab restart (the idle status poll lands here).
+        self._note_lab_session(packet)
         with self._lock:
             frozen = bool(self._pose_frozen or self._mesh_edited)
         if frozen or self.fit_poll_stale(fit_gen):
@@ -3555,25 +3744,27 @@ class StreamRuntime:
         w, h = (image.size if image is not None else (0, 0))
         hair = hair_from_frame(frame, width=w, height=h)
         driven = overlay_from_frame(frame, width=w, height=h)
-        if driven is None:
+        if driven is not None:
+            driven = self._apply_drag_to_overlay(driven)
+        # The track poll, the DiT feed and command acks all land here. A frame
+        # fetched before a newer one was applied must not put the older pose
+        # (or hair) back: that was the twitch when a slider moved.
+        with self._lab_order_lock:
+            if not self._lab_packet_fresh(frame):
+                return None
+            self._lab_mark_applied(frame, overlay=driven is not None)
             if hair is not None:
                 self._last_lab_hair = hair
                 if self._lab_rest_hair is None and hair:
                     self._lab_rest_hair = [dict(seg) for seg in hair]
-            self.adopt_lab_travel_box(frame)
-            return None
+            if driven is not None:
+                self._last_overlay_kps = driven.copy()
+                self._driven_keypoints = driven.copy()
+                self._last_good_keypoints = driven.copy()
+                self._body_lost = False
         # Lab already limited walk / look / rotate. Do not re-clamp here —
         # a second apply_walk_box squashes the look the lab authored.
         self.adopt_lab_travel_box(frame)
-        driven = self._apply_drag_to_overlay(driven)
-        if hair is not None:
-            self._last_lab_hair = hair
-            if self._lab_rest_hair is None and hair:
-                self._lab_rest_hair = [dict(seg) for seg in hair]
-        self._last_overlay_kps = driven.copy()
-        self._driven_keypoints = driven.copy()
-        self._last_good_keypoints = driven.copy()
-        self._body_lost = False
         return driven
 
     def _apply_drag_to_overlay(self, driven: np.ndarray) -> np.ndarray:
@@ -3610,7 +3801,16 @@ class StreamRuntime:
     def _nudge_lab_point(self, idx: int, x: float, y: float) -> None:
         try:
             px, py = self._desk_px_to_lab(x, y)
-            ack = self._lab_ack("set_point", {"id": int(idx), "x": float(px), "y": float(py)})
+            body: dict[str, Any] = {"id": int(idx), "x": float(px), "y": float(py)}
+            # The point was lined up on the overlay on screen, not on Track
+            # Lab's newest pose: name that frame so the lab measures the nudge
+            # there and the preview latency is not saved into the offset.
+            with self._lab_order_lock:
+                session, seq = getattr(self, "_lab_overlay_frame", ("", -1))
+            if session and int(seq) >= 0:
+                body["session"] = str(session)
+                body["seq"] = int(seq)
+            ack = self._lab_ack("set_point", body)
         except Exception as exc:
             print(f"lab set_point failed: {exc}")
             return
@@ -3668,6 +3868,7 @@ class StreamRuntime:
             self._set_status(busy=True, message="Calibrating reference…")
             kps = self.engine.calibrate_reference(self._ref_path, flip_tta=True)
             self._last_overlay_kps = np.asarray(kps, dtype=np.float32).copy()
+            self._rest_kps = self._last_overlay_kps.copy()
             self._driven_keypoints = self._last_overlay_kps.copy()
             self._last_good_keypoints = self._last_overlay_kps.copy()
             self._mesh_edited = False
@@ -3693,6 +3894,8 @@ class StreamRuntime:
         with self._lock:
             self._pose_frozen = False
             self._mesh_edited = False
+        # Recenter moves the whole pose; do not carry the last frame across it.
+        self._drop_hold()
         nested = ack.get("status") if isinstance(ack, dict) and isinstance(ack.get("status"), dict) else {}
         packet = nested if nested.get("keypoints") else None
         self.adopt_lab_overlay(packet, emit=True)
@@ -4088,6 +4291,8 @@ class StreamRuntime:
         self._frame_in_flight = False
         self._last_gen_start = 0.0
         self._gen_hold_pending = False
+        # A new stream opens on a fresh key, not on the last stream's frame.
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4140,6 +4345,7 @@ class StreamRuntime:
                         pass
                     break
         self._frame_in_flight = False
+        self._drop_hold()
         self._prev_stream_kps = None
         self._prev_stream_hair = None
         self._ema_frame = None
@@ -4196,6 +4402,11 @@ class StreamRuntime:
         self._paused = False
         # The paused gap is not a key interval.
         self._last_call_done_t = 0.0
+        # Nor a step of motion: the first key after it neither continues the
+        # pre-pause frame nor tweens its batch from the pre-pause pose.
+        self._drop_hold()
+        self._prev_stream_kps = None
+        self._prev_stream_hair = None
         self._set_status(paused=False, message="Streaming")
         if not self._frame_in_flight:
             self._schedule_next_frame()
@@ -4274,6 +4485,10 @@ class StreamRuntime:
             self._status.get("inbetweens"),
         )
 
+    def _show_fps_max(self) -> float:
+        """Display rate: 20 fps, raised to Max FPS when the cap is set above it."""
+        return show_fps_max((getattr(self, "_status", None) or {}).get("max_fps"))
+
     def _resume_after_gen_hold(self) -> None:
         self._gen_hold_pending = False
         self._schedule_next_frame()
@@ -4327,7 +4542,7 @@ class StreamRuntime:
         if keypoints is not None:
             self._ema_kps = np.asarray(keypoints, dtype=np.float32).copy()
             if prev_kps is not None:
-                alpha = snap_alpha(alpha, face_pose_delta(prev_kps, self._ema_kps))
+                alpha = snap_alpha(alpha, snap_move(prev_kps, self._ema_kps))
         held = getattr(self, "_ema_frame", None)
         if (
             held is None
@@ -4436,9 +4651,11 @@ class StreamRuntime:
             # A batch spreads its keys over the call; a lone key only waits
             # for its mids, and that wait is capped (TWEEN_MAX_S).
             span_max = TWEEN_MAX_S if len(keys) == 1 else None
+            show_max = self._show_fps_max()
             count, gap_s = inbetween_pacing(
                 rate,
                 wanted,
+                fps_max=show_max,
                 mid_cost_s=float(self._last_interp_s or 0.0),
                 span_max=span_max,
             )
@@ -4449,7 +4666,7 @@ class StreamRuntime:
             ahead = time.perf_counter() + gap_s
             if float(getattr(self, "_playout_next", 0.0) or 0.0) > ahead:
                 self._playout_next = ahead
-            if count < inbetween_pacing(rate, wanted, span_max=span_max)[0]:
+            if count < inbetween_pacing(rate, wanted, fps_max=show_max, span_max=span_max)[0]:
                 # Skipped for render cost: nothing re-measures it while mids
                 # are off, so let it decay or one slow first mid (cv2 warm-up)
                 # turns them off for the whole stream.
@@ -4459,8 +4676,8 @@ class StreamRuntime:
                     image = self._blend_display_frame(image, keypoints)
                 behind = self._display_behind(interval)
                 if behind:
-                    # A newer call is waiting: drop mids, catch up at 20 fps.
-                    count, gap_s = inbetween_pacing(0.0, 0)
+                    # A newer call is waiting: drop mids, catch up at display rate.
+                    count, gap_s = inbetween_pacing(0.0, 0, fps_max=show_max)
                 if prev is not None and count > 0:
                     make = inbetween_maker(prev, image)
                     for amount in inbetween_ts(count):
@@ -4508,20 +4725,21 @@ class StreamRuntime:
         queued_at = float(first.get("queued_at") or 0.0)
         if queued_at <= 0.0:
             return True
-        return time.perf_counter() - queued_at > max(float(key_interval), 0.05)
+        return time.perf_counter() - queued_at > max(float(key_interval), 1.0 / self._show_fps_max())
 
     def _pace_display(self, gap_s: float = 0.0) -> None:
         """Hold until the next shown picture is due: ``gap_s`` after the last one
-        (20 fps, or a touch over within SLOT_SLACK)."""
+        (20 fps or the Max FPS cap, or a touch over within SLOT_SLACK)."""
         now = time.perf_counter()
-        fps_max = (1.0 / gap_s) if gap_s > 0.0 else SHOW_FPS_MAX
+        show_max = self._show_fps_max()
+        fps_max = (1.0 / gap_s) if gap_s > 0.0 else show_max
         wait, nxt = playout_gap(
             now,
             float(getattr(self, "_playout_next", 0.0) or 0.0),
             # Flooring at 50 ms stretched the 45-47.5 ms gaps inbetween_pacing
             # plans, so a job filled its whole key interval and call jitter
             # piled up as display lag instead of landing in the 5 % margin.
-            fps_max=min(SHOW_FPS_MAX / SLOT_SLACK, fps_max),
+            fps_max=min(show_max / SLOT_SLACK, fps_max),
         )
         self._playout_next = nxt
         if wait <= 0:
@@ -4860,11 +5078,13 @@ class StreamRuntime:
         from .lab_harness import hair_from_frame, lab as lab_harness
 
         packet = frame if isinstance(frame, dict) else lab_harness.frame()
+        self._note_lab_session(packet)
         if not self._lab_overlay_current(packet):
             return False
         self._note_lab_generation(packet)
         w, h = self._lab_hair_wh(packet)
         hair = hair_from_frame(packet, width=w, height=h)
+        source = packet
         if hair is None and frame is None:
             status = lab_harness.status(merge_frame=True)
             if isinstance(status, dict) and self._lab_overlay_current(status):
@@ -4876,9 +5096,15 @@ class StreamRuntime:
                     pass
                 hair = hair_from_frame(status, width=w, height=h)
                 self._note_lab_generation(status)
+                source = status
         if not hair:
             return False
-        self._last_lab_hair = hair
+        with self._lab_order_lock:
+            # Older than the hair the live overlay already put up.
+            if not self._lab_packet_fresh(source):
+                return False
+            self._lab_mark_applied(source, overlay=False)
+            self._last_lab_hair = hair
         if not self._lab_drive or getattr(self, "_lab_rest_hair", None) is None:
             self._lab_rest_hair = [dict(seg) for seg in hair]
         self._hair_capture_done = True
@@ -5016,7 +5242,7 @@ class StreamRuntime:
         from .character_fit import SKELETON_LABELS, update_character_fit
 
         image = self._last_image
-        kps = self._last_overlay_kps
+        kps = self._rest_keypoints()
         if image is None or kps is None:
             raise RuntimeError("Create a character before moving the skeleton")
         slot = int(idx)
@@ -5024,38 +5250,30 @@ class StreamRuntime:
             raise ValueError("Only the neck, shoulders, elbows, and chest can be moved here")
         width, height = image.size
         nx, ny = pixels_to_normalized(float(x), float(y), width, height)
-        edited = np.asarray(kps, dtype=np.float32).copy()
-        edited[slot, 0] = nx
-        edited[slot, 1] = ny
-        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
-        edited[slot, 3] = 1.0
+        edited = _place_rest_point(kps, slot, nx, ny)
         self._install_fit_keypoints(edited)
         try:
             px, py = self._desk_px_to_lab(float(x), float(y))
             ack = self._lab_ack("set_skeleton_point", {"id": slot, "x": float(px), "y": float(py)})
             packet = self._lab_packet_from_ack(ack)
-            self.adopt_lab_overlay(packet, emit=False)
-            merged = (
-                np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
-                if self._last_overlay_kps is not None
-                else edited
-            )
-            merged[slot, 0] = nx
-            merged[slot, 1] = ny
-            merged[slot, 2] = max(float(merged[slot, 2]), 0.85)
-            merged[slot, 3] = 1.0
-            self._install_fit_keypoints(merged)
+            adopted = self.adopt_lab_overlay(packet, emit=False)
+            lab_rest = self._lab_rest(packet, adopted)
+            merged = _place_rest_point(edited if lab_rest is None else lab_rest, slot, nx, ny)
+            self._install_fit_keypoints(merged, self._with_nudges(merged, packet))
         except Exception as exc:
             print(f"Skeleton move kept on the desk; Track Lab did not store it: {exc}")
         ident = str(self._status.get("character_id") or "")
-        if ident and self._last_overlay_kps is not None:
+        rest = self._rest_keypoints()
+        if ident and rest is not None:
+            # From the rest: the overlay has the nudges on (or a live pose), and
+            # a restore sends these to Track Lab as rest joints.
             body = []
             for joint in SKELETON_LABELS:
                 body.append(
                     {
                         "id": joint,
-                        "x": round(float(self._last_overlay_kps[joint, 0]), 5),
-                        "y": round(float(self._last_overlay_kps[joint, 1]), 5),
+                        "x": round(float(rest[joint, 0]), 5),
+                        "y": round(float(rest[joint, 1]), 5),
                     }
                 )
             update_character_fit(ident, {"skeleton": body})
@@ -5082,32 +5300,30 @@ class StreamRuntime:
         if slot in SKELETON_LABELS:
             return self.move_character_skeleton(slot, x, y)
         image = self._last_image
-        kps = self._last_overlay_kps
-        if image is None or kps is None:
+        rest = self._rest_keypoints()
+        if image is None or rest is None:
             raise RuntimeError("Create a character before moving its points")
         if slot not in POINT_SLOTS:
             raise ValueError(f"Point {slot} cannot be moved here")
         width, height = image.size
         nx, ny = pixels_to_normalized(float(x), float(y), width, height)
-        rest = np.asarray(kps, dtype=np.float32)
+        packet = None
         try:
             px, py = self._desk_px_to_lab(float(x), float(y))
             ack = self._lab_ack("set_rest_point", {"id": slot, "x": float(px), "y": float(py)})
             # Save Track Lab's whole rest as it stands after this move, like the
             # skeleton path, so the pack never misses an earlier edit.
-            self.adopt_lab_overlay(self._lab_packet_from_ack(ack), emit=False)
+            packet = self._lab_packet_from_ack(ack)
+            adopted = self.adopt_lab_overlay(packet, emit=False)
             # The move dropped any nudge on this point.
             self._save_lab_offsets(ack)
-            if self._last_overlay_kps is not None:
-                rest = np.asarray(self._last_overlay_kps, dtype=np.float32)
+            lab_rest = self._lab_rest(packet, adopted)
+            if lab_rest is not None:
+                rest = lab_rest
         except Exception as exc:
             print(f"Point move kept on the desk; Track Lab did not store it: {exc}")
-        edited = rest.copy()
-        edited[slot, 0] = nx
-        edited[slot, 1] = ny
-        edited[slot, 2] = max(float(edited[slot, 2]), 0.85)
-        edited[slot, 3] = 1.0
-        self._install_fit_keypoints(edited)
+        edited = _place_rest_point(rest, slot, nx, ny)
+        self._install_fit_keypoints(edited, self._with_nudges(edited, packet))
         self._save_user_points([slot], edited)
         if self._last_image is not None:
             self._emit(
@@ -5158,15 +5374,22 @@ class StreamRuntime:
         except Exception as exc:
             print(f"Nudge not remembered in the character: {exc}")
 
-    def _install_fit_keypoints(self, keypoints: np.ndarray) -> None:
+    def _install_fit_keypoints(self, keypoints: np.ndarray, shown: np.ndarray | None = None) -> None:
+        """Make ``keypoints`` the character's rest: the .vtm's mesh and the Reset base.
+
+        ``shown`` is that rest as Track Lab draws it (nudges on); the overlay
+        and the model's reference take it. Without it they take the rest.
+        """
         from .character_fit import replace_pack_keypoints
 
         kps = np.asarray(keypoints, dtype=np.float32).copy()
-        self._last_overlay_kps = kps
-        self._driven_keypoints = kps.copy()
-        self._last_good_keypoints = kps.copy()
+        view = kps if shown is None else np.asarray(shown, dtype=np.float32).copy()
+        self._rest_kps = kps.copy()
+        self._last_overlay_kps = view
+        self._driven_keypoints = view.copy()
+        self._last_good_keypoints = view.copy()
         try:
-            self.engine.adopt_ref_keypoints(kps, persist=False, pose_source="fit")
+            self.engine.adopt_ref_keypoints(view, persist=False, pose_source="fit")
             # The fitted rest is the new base: a mesh reset must not put the pre-fit pose back.
             self.engine._ref_keypoints_session_base = kps.copy()
         except Exception as exc:
@@ -5177,6 +5400,105 @@ class StreamRuntime:
                 replace_pack_keypoints(path, kps)
             except Exception as exc:
                 print(f"Fit pose did not save into the character: {exc}")
+
+    def _rest_keypoints(self) -> np.ndarray | None:
+        """The character's rest mesh, nudges off: fit edits start here and the .vtm keeps it.
+
+        Only rest sources set it: a load, Track Lab's rest (see _lab_rest) and
+        the user's own rest edits. The overlay is whatever was drawn last, the
+        live or generated pose while tracking or streaming, and saving that
+        made a pose (or the nudges, twice) the character's rest.
+        """
+        rest = getattr(self, "_rest_kps", None)
+        if rest is None:
+            # Nothing came through a rest source yet.
+            rest = getattr(getattr(self, "engine", None), "_ref_keypoints", None)
+        if rest is None:
+            rest = getattr(self, "_last_overlay_kps", None)
+        return None if rest is None else np.asarray(rest, dtype=np.float32).copy()
+
+    def _lab_canvas(self, packet: dict[str, Any] | None = None) -> tuple[float, float]:
+        """Track Lab's character-pixel canvas (width, height)."""
+        from .lab_harness import frame_image_wh
+
+        wh = frame_image_wh(packet) or getattr(self, "_lab_image_wh", None)
+        if not wh:
+            image = getattr(self, "_last_image", None)
+            wh = image.size if image is not None else (768, 768)
+        return max(float(wh[0]), 1.0), max(float(wh[1]), 1.0)
+
+    def _with_nudges(self, rest: np.ndarray, packet: dict[str, Any] | None, *, sign: float = 1.0) -> np.ndarray:
+        """``rest`` with a Track Lab reply's overlay nudges on (``sign`` -1: taken off)."""
+        out = np.asarray(rest, dtype=np.float32).copy()
+        rows = packet.get("point_offsets") if isinstance(packet, dict) else None
+        if not isinstance(rows, list):
+            return out
+        w, h = self._lab_canvas(packet)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                idx = int(row.get("id", -1))
+                dx = float(row.get("dx", 0.0))
+                dy = float(row.get("dy", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(out):
+                out[idx, 0] += sign * dx * 2.0 / w
+                out[idx, 1] += sign * dy * 2.0 / h
+        return out
+
+    def _lab_rest(self, packet: dict[str, Any] | None, adopted: Any = False) -> np.ndarray | None:
+        """Track Lab's rest mesh from a command reply, nudges off.
+
+        ``adopted``: adopt_lab_overlay took this reply (it is current and the
+        desk is not frozen). Its frame counts only when the reply carries one
+        and Track Lab is not live: a GET /frame stand-in, or a live frame, is
+        the performer's pose. Face points come from the status ``rest`` (no
+        nudges) when sent. Points within REST_MATCH_PX of the rest held keep
+        the held value, so Track Lab's rounding never reads as a move.
+        """
+        held = self._rest_keypoints()
+        own = isinstance(packet, dict) and "keypoints" in packet and not packet.get("live")
+        # Read the reply itself, not _last_overlay_kps: the stream thread
+        # writes generated poses there at any moment.
+        frame = self._lab_overlay_keypoints(packet) if adopted and own else None
+        if frame is not None:
+            rest = self._with_nudges(frame, packet, sign=-1.0)
+        elif held is not None:
+            rest = held.copy()
+        else:
+            return None
+        if rest.ndim != 2 or rest.shape[0] < 28:
+            return None
+        # Only from a reply for the still the desk holds: a late one for the
+        # previous character (or a restarted tracker) is that face's rest.
+        current = isinstance(packet, dict) and self._lab_overlay_current(packet)
+        rows = packet.get("rest") if current else None
+        if isinstance(rows, list) and len(rows) >= 28:
+            w, h = self._lab_canvas(packet)
+            for i, row in enumerate(rows[:28]):
+                try:
+                    rest[i, 0] = float(row[0]) / w * 2.0 - 1.0
+                    rest[i, 1] = float(row[1]) / h * 2.0 - 1.0
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if held is not None and held.shape == rest.shape:
+            w, h = self._lab_canvas(packet)
+            same = (
+                (np.abs(rest[:, 0] - held[:, 0]) <= REST_MATCH_PX * 2.0 / w)
+                & (np.abs(rest[:, 1] - held[:, 1]) <= REST_MATCH_PX * 2.0 / h)
+                & ((rest[:, 3] >= 0.5) == (held[:, 3] >= 0.5))
+            )
+            rest[same] = held[same]
+        return rest
+
+    def _note_lab_rest(self, packet: dict[str, Any] | None, adopted: Any = False) -> np.ndarray | None:
+        """Keep Track Lab's rest (after set_rest / track / a load) as the character's."""
+        rest = self._lab_rest(packet, adopted)
+        if rest is not None:
+            self._rest_kps = rest.copy()
+        return rest
 
     def _apply_character_fit(self) -> bool:
         """Put the user's saved edits back after Track Lab re-detects.
@@ -5218,30 +5540,31 @@ class StreamRuntime:
             for e in edits
             if (0 <= e[0] < 30 and e[3] == "set_rest_point") or (31 <= e[0] <= 36 and e[3] == "set_skeleton_point")
         ]
-        if edits and self._last_overlay_kps is not None:
-            kps = np.asarray(self._last_overlay_kps, dtype=np.float32).copy()
+        offsets = saved.get("point_offsets")
+        # The rest, not the overlay: that has the nudges on, or a live pose.
+        rest = self._rest_keypoints() if edits else None
+        if rest is not None:
+            kps = rest
+            w, h = self._lab_canvas()
             moved = False
             for slot, nx, ny, op in edits:
                 if (
-                    abs(float(kps[slot, 0]) - nx) <= 1e-5
-                    and abs(float(kps[slot, 1]) - ny) <= 1e-5
+                    abs(float(kps[slot, 0]) - nx) <= REST_MATCH_PX * 2.0 / w
+                    and abs(float(kps[slot, 1]) - ny) <= REST_MATCH_PX * 2.0 / h
                     and float(kps[slot, 3]) >= 0.5
                 ):
                     continue  # already where the user put it
                 moved = True
-                kps[slot, 0] = nx
-                kps[slot, 1] = ny
-                kps[slot, 2] = max(float(kps[slot, 2]), 0.85)
-                kps[slot, 3] = 1.0
+                kps = _place_rest_point(kps, slot, nx, ny)
                 try:
                     px, py = self._norm_to_lab_px(nx, ny)
                     self._lab_ack(op, {"id": slot, "x": px, "y": py})
                 except Exception:
                     pass
             if moved:
-                self._install_fit_keypoints(kps)
+                nudges = {"point_offsets": offsets} if isinstance(offsets, list) else None
+                self._install_fit_keypoints(kps, self._with_nudges(kps, nudges))
                 changed = True
-        offsets = saved.get("point_offsets")
         if isinstance(offsets, list):
             # After the points: moving a rest point drops its nudge in the lab.
             try:
@@ -5532,8 +5855,15 @@ class StreamRuntime:
                     self._mesh_edited = False
                 return
             new_rest = apply_overlay_drag_to_rest(rest, base, edited, slots)
-            saved = self.engine.adopt_ref_keypoints(new_rest, persist=True)
-            self._save_user_points(slots, new_rest)
+            # The model's reference has Track Lab's nudges on; the saved rest
+            # must not, or the next load puts them on twice.
+            held = getattr(self, "_rest_kps", None)
+            kept = new_rest if held is None else apply_overlay_drag_to_rest(held, base, edited, slots)
+            saved = self.engine.adopt_ref_keypoints(kept, persist=True)
+            if held is not None:
+                self.engine.adopt_ref_keypoints(new_rest, persist=False)
+                self._rest_kps = np.asarray(kept, dtype=np.float32).copy()
+            self._save_user_points(slots, kept)
             driven = None
             if self._tracking:
                 try:
@@ -5621,6 +5951,7 @@ class StreamRuntime:
             with self._lock:
                 self._mesh_edited = False
                 self._last_overlay_kps = np.asarray(rest, dtype=np.float32).copy()
+                self._rest_kps = self._last_overlay_kps.copy()
                 self._driven_keypoints = self._last_overlay_kps.copy()
                 image = self._last_image
                 overlay = self._last_overlay_kps
@@ -5706,9 +6037,48 @@ class StreamRuntime:
         )
         return self.status()
 
+    def _restore_lab_session(self) -> None:
+        """Track Lab restarted: give the new tracker the character still again
+        and, when the desk was tracking through it, start it again.
+
+        Run on the track poll thread; the commands can take a while. The new
+        tracker reloads its saved rest, parts, nudges and limiters itself.
+        """
+        self._lab_session_restore = False
+        with self._lab_sync_lock:
+            if self._lab_sync_n != self._lab_restore_sync_n:
+                # Start tracking, a load or boot already gave the new tracker
+                # its still: syncing again would stop the tracking it started
+                # and re-detect over the fit it put back.
+                return
+            tracking = bool(self._tracking and self._lab_drive)
+            if tracking:
+                # Not "Tracking on" while nothing drives the pose.
+                self._set_track_status(track_message="Track Lab restarted — resuming…")
+            try:
+                self._sync_lab_character()
+            except Exception as exc:
+                print(f"[lab-harness] restarted Track Lab did not take the character: {exc}", flush=True)
+        if not (tracking and self._tracking and self._lab_drive):
+            return
+        from .lab_harness import lab as lab_harness
+
+        probe = lab_harness.status(merge_frame=False)
+        source = "ifm" if str(probe.get("source") or "") == "ifm" else "camera"
+        try:
+            # Fails into Tracking off, never "Tracking on" over a frozen pose.
+            self.restart_tracking_on_input(source)
+        except Exception as exc:
+            print(f"[lab-harness] tracking did not resume after the restart: {exc}", flush=True)
+
     def _track_poll_loop(self) -> None:
         while not self._track_stop.is_set():
             time.sleep(0.05)
+            if getattr(self, "_lab_session_restore", False):
+                try:
+                    self._restore_lab_session()
+                except Exception as exc:
+                    print(f"[lab-harness] restore after restart failed: {exc}", flush=True)
             if not self._tracking:
                 continue
             try:

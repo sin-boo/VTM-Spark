@@ -486,6 +486,28 @@ function Write-InstallStep {
   }
 }
 
+# build.ps1 tested the graphics card (backend.gpu_check verify). OK, or the one-line
+# problem and what is left; the desk shows the full story when it starts.
+function Get-GpuSummary {
+  if (-not (Test-Path -LiteralPath $VenvPy)) { return @{ Ok = $false; Hint = "No .venv-build Python - run install.bat again." } }
+  $prevPyPath = $env:PYTHONPATH
+  $env:PYTHONPATH = $Root
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $out = & $VenvPy -m backend.gpu_check summary 2>$null
+    $code = [int]$LASTEXITCODE
+  } catch {
+    $out = @()
+    $code = 1
+  } finally {
+    $ErrorActionPreference = $prev
+    if ($null -eq $prevPyPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $prevPyPath }
+  }
+  $hint = (@($out) | ForEach-Object { "$_" } | Where-Object { $_.Trim() } | Select-Object -Last 1)
+  return @{ Ok = ($code -eq 0); Hint = "$hint" }
+}
+
 function Invoke-SmartBuild {
   # Sets $script:InstallExitCode: 0 all OK, 1 app build failed,
   # 2 app built but a later step (models / virtual cam / Track Lab) needs attention.
@@ -545,10 +567,14 @@ function Invoke-SmartBuild {
   # Register bundled DirectShow virtual camera (VTM Spark) once.
   $vcamOk = [bool](@(Invoke-EnsureVtmSparkCam)[-1])
 
-  $allOk = $webviewOk -and $modelsOk -and $vcamOk -and $trackLabOk
+  $gpuSummary = Get-GpuSummary
+  $gpuOk = [bool]$gpuSummary.Ok
+
+  $allOk = $webviewOk -and $modelsOk -and $vcamOk -and $trackLabOk -and $gpuOk
   Write-Host ""
   Write-Ansi "==> Install summary" cyan
   Write-InstallStep "App build" $true
+  Write-InstallStep "Graphics card" $gpuOk $gpuSummary.Hint
   Write-InstallStep "WebView2" $webviewOk "Check your internet. run.exe installs it automatically on the next start."
   Write-InstallStep "Models" $modelsOk "Check your internet. Missing models download automatically when you start the app."
   Write-InstallStep "Virtual camera" $vcamOk "Click Virtual camera in the app to add it (Windows asks for admin once)."

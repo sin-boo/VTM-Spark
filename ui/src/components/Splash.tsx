@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { BootStatus } from '../api'
 import { useI18n } from '../i18n'
 import { dragIfPrimary } from '../nativeWindow'
+import { GpuProblem } from './GpuProblem'
 
 const EMPTY: BootStatus = {
   ready: false,
@@ -49,6 +50,7 @@ export function Splash(props: Props) {
   const boot = props.boot ?? EMPTY
   const bar = overall(boot)
   const notice = props.error || boot.error
+  const problem = boot.gpu_problem ?? null
   const peak = useRef(0)
   const target = boot.ready ? 100 : bar.pct
   peak.current = Math.max(peak.current, target)
@@ -65,11 +67,11 @@ export function Splash(props: Props) {
       className="krita-splash"
       role="status"
       aria-live="polite"
-      aria-busy={!boot.ready}
+      aria-busy={!boot.ready && !problem}
       onMouseDown={(e) => dragIfPrimary(e.button)}
     >
       <div className="krita-splash-art" aria-hidden="true" />
-      <aside className="krita-splash-panel">
+      <aside className={problem ? 'krita-splash-panel is-problem' : 'krita-splash-panel'}>
         <div className="krita-splash-plate">
           <header className="krita-splash-brand">
             <h1>
@@ -77,6 +79,9 @@ export function Splash(props: Props) {
             </h1>
             <p className="krita-splash-ver">{APP_VERSION}</p>
           </header>
+          {problem ? (
+            <GpuProblem problem={problem} />
+          ) : (
           <div className="krita-splash-status">
             <p className="krita-splash-line">{tr(bar.label)}</p>
             <div className="krita-splash-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
@@ -84,6 +89,7 @@ export function Splash(props: Props) {
             </div>
             {notice ? <p className="status-error">{tr(notice)}</p> : null}
           </div>
+          )}
         </div>
       </aside>
     </div>

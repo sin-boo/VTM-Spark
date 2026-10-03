@@ -621,6 +621,43 @@ def detect_face37_pixels(
     return merged
 
 
+def detect_lower_lids(
+    image_rgb: np.ndarray,
+    *,
+    device: str | None = None,
+) -> list[list[list[float]]] | None:
+    """The still's lower eyelids as ``model_layout.lower_lid_shape``.
+
+    The project schema keeps only the upper lids; the model was trained with
+    both, so the lower ones are read here from the native HRNet rows. Each is
+    kept in its eye's corner frame, so any uniformly scaled copy of the still
+    (the source, the crop, the preview) gives the same shape. None when no
+    face or no clear lower lid is found.
+    """
+    import cv2
+
+    from .model_layout import EYE_LIDS, lower_lid_shape
+
+    arr = np.asarray(image_rgb)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    bgr = cv2.cvtColor(arr[..., :3].astype(np.uint8), cv2.COLOR_RGB2BGR)
+    results = get_anime_face_detector(device=device)(bgr)
+    faces = [r for r in results or [] if r.get("bbox") is not None and len(r["bbox"]) >= 5]
+    if not faces:
+        return None
+    best = max(faces, key=lambda r: float(r["bbox"][4]))
+    if float(best["bbox"][4]) < FACE_SCORE_THRESHOLD:
+        return None
+    pts = np.asarray(best["keypoints"], dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[0] < 28:
+        return None
+    rows = [i for upper, lower in EYE_LIDS for i in upper + lower]
+    if pts.shape[1] > 2 and float(np.min(pts[rows, 2])) < 0.3:
+        return None
+    return lower_lid_shape(pts)
+
+
 def _crop_params_for_ref(
     image_rgb: np.ndarray,
     *,

@@ -76,3 +76,29 @@ def test_http_sources_are_https_with_dest() -> None:
         assert str(job["url"]).startswith("https://")
         assert str(job["dest"]).startswith("models/trackers/")
         assert int(job["min_bytes"]) >= 1_000_000
+
+
+def test_checklist_reports_the_fast_decoder(tmp_path, monkeypatch) -> None:
+    from backend import model_checklist as mc
+    from backend.engine import fast_decoder_path
+    from backend.paths import package_root
+
+    item = next(x for x in mc.CHECKLIST if x.id == "fast_decoder")
+    # Downloaded with the models; optional (the stream falls back to TinyVAE).
+    assert not item.required and item.auto_download
+    assert item.candidates[0] == fast_decoder_path().relative_to(package_root()).as_posix()
+
+    dit = tmp_path / "models" / "dit"
+    dit.mkdir(parents=True)
+    monkeypatch.setattr(mc, "package_root", lambda: tmp_path)
+    monkeypatch.setattr(mc, "models_dir", lambda: dit)
+
+    def entry() -> dict:
+        return next(x for x in mc.scan_models()["items"] if x["id"] == "fast_decoder")
+
+    assert entry()["ok"] is False
+    path = tmp_path / item.candidates[0]
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x" * item.min_bytes)
+    assert entry()["ok"] is True
+    assert entry()["bytes"] == item.min_bytes

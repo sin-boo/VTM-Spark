@@ -10,12 +10,11 @@ import json
 import math
 import threading
 import time
-from pathlib import Path
 
+from .paths import OUTPUT
 from .presets import FORM_IDS, MOUTH_BANKS, PRESET_LABELS, VOWEL_IDS, empty_weights
 
-ROOT = Path(__file__).resolve().parents[1]
-CALIB_PATH = ROOT / "output" / "webcam_calibration.json"
+CALIB_PATH = OUTPUT / "webcam_calibration.json"
 
 CAPTURE_SEC = 1.2
 WARMUP_SEC = 0.18

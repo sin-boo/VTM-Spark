@@ -34,6 +34,7 @@ DEFAULT_SECONDS: dict[str, float] = {
     "warm_run": 0.3,
     "decode": 7.0,
     "verify": 0.3,
+    "graph": 20.0,
 }
 
 # Stages whose time grows with the checkpoint file are stored per GB.

@@ -76,12 +76,19 @@ def stamp_hair_stroke(
     height: int,
     erase: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return hair polygons after painting ``points`` with a round brush."""
+    """Return hair polygons after painting ``points`` with a round brush.
+
+    Only parts the stroke changed are traced again. The others keep their
+    polygons exactly: re-tracing every part on every stroke snapped them to
+    whole pixels and simplified them again, so untouched locks crept and thin
+    ones wore away stroke by stroke.
+    """
     w = int(width)
     h = int(height)
     if w < 2 or h < 2:
         return [dict(seg) for seg in (segments or []) if isinstance(seg, dict)]
     layers = {name: np.zeros((h, w), dtype=np.uint8) for name in HAIR_PARTS}
+    kept: dict[str, list[dict[str, Any]]] = {name: [] for name in HAIR_PARTS}
     for seg in segments or []:
         if not isinstance(seg, dict):
             continue
@@ -92,6 +99,8 @@ def stamp_hair_stroke(
         if len(poly) < 3:
             continue
         cv2.fillPoly(layers[name], [np.round(poly).astype(np.int32)], 255)
+        kept[name].append(dict(seg))
+    before = {name: layer.copy() for name, layer in layers.items()}
     stroke = np.zeros((h, w), dtype=np.uint8)
     _paint_stroke(stroke, _points(points), max(1, int(round(float(radius)))))
     if int(stroke.max()) == 0:
@@ -110,5 +119,8 @@ def stamp_hair_stroke(
                 layers[name] = cv2.bitwise_and(layers[name], keep)
     out: list[dict[str, Any]] = []
     for name in HAIR_PARTS:
-        out.extend(_polygons(layers[name], name))
+        if np.array_equal(layers[name], before[name]):
+            out.extend(kept[name])
+        else:
+            out.extend(_polygons(layers[name], name))
     return out

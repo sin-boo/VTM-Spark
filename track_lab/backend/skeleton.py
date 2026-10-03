@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+import time
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -13,10 +14,31 @@ import numpy as np
 PARENT = {32: 31, 33: 32, 34: 31, 35: 34, 36: 31}
 CHAIN = (32, 34, 36, 33, 35)
 SKELETON_IDS = (31, 32, 33, 34, 35, 36)
-# The torso shares the face place: walk and size. The neck base (31) is on
-# the torso; the rest hangs from it and takes only part of a tilt. A head
-# turn or nod never turns or moves the torso.
+# Without a locked rig the torso shares the face place (walk and size) and
+# takes part of a tilt. With one it turns in 3D with the head: see
+# _follow_with_rig.
 _TORSO_ROLL = 0.45
+# How far each joint sits in front (+) of the shoulder line, in shoulder
+# widths: the neck base a little, the chest well in front, the elbows hang
+# a little behind.
+TORSO_DEPTH = {31: 0.08, 32: 0.0, 34: 0.0, 33: -0.05, 35: -0.05, 36: 0.28}
+# The body turns on an oval round the neck base: as wide as the widest rest
+# joint from the neck times BODY_HALF, BODY_DEPTH of that deep. The desk
+# bends the drawn body on the same oval (backend/body_warp.py); keep these
+# in step with it.
+BODY_HALF = 1.35
+BODY_DEPTH = 0.40
+_FOCAL = 8.0  # weak perspective, in shoulder widths
+# Past these the shoulders read as folding (cos 45 deg = 0.71 of their
+# width) and a lean hides the arms.
+_MAX_BODY_TURN = math.radians(45.0)
+_MAX_BODY_LEAN = math.radians(30.0)
+_MAX_BODY_TILT = math.radians(40.0)
+# Upper arms swing this share of the way back to hanging after the
+# shoulders turn, over about ARM_EASE_S.
+ARM_GRAVITY = 0.8
+ARM_EASE_S = 0.12
+ARMS = ((32, 33), (34, 35))  # shoulder, elbow
 _SHOULDER_FROM_MOUTH = 0.50
 _SHOULDER_HALF = 0.58
 _ELBOW_OUT = 0.08
@@ -237,14 +259,76 @@ def _torso_roll(head_roll_deg: float) -> float:
     return math.radians(float(np.clip(head_roll_deg, -25.0, 25.0))) * _TORSO_ROLL
 
 
-def _follow_with_rig(rest: list[dict[str, Any]], rig: Any) -> list[dict[str, Any]]:
-    """The torso walks and grows with the body; the head turns on top of it.
+def body_oval(rest_by: dict[int, Any]) -> tuple[float, float]:
+    """Half width and depth of the body's oval, from the rest joints."""
+    neck = _xy(rest_by[31])
+    reach = max(abs(float(_xy(j)[0] - neck[0])) for idx, j in rest_by.items() if idx in SKELETON_IDS)
+    half = BODY_HALF * max(reach, 1.0)
+    return half, BODY_DEPTH * half
 
-    Joint 31 is the base of the neck, on the torso: a turn or nod swings the
-    head round it and leaves it put. Riding the head's slide dragged the
-    shoulders down on every look-down and sideways on every turn, until the
-    body wall stopped them. Mapping every joint through the face card also
-    turned the torso: a big look folded the shoulders into a line.
+
+def turn_on_oval(x: float, half: float, depth: float, turn: float) -> float:
+    """A point ``x`` from the neck base on the front of the oval, turned.
+
+    The neck base stays: the front of the chest barely moves, the far side
+    closes toward its edge and the near side opens out.
+    """
+    th = math.asin(max(-1.0, min(1.0, float(x) / half)))
+    return (
+        half * math.sin(th) * math.cos(turn)
+        + depth * math.cos(th) * math.sin(turn)
+        - depth * math.sin(turn)
+    )
+
+
+class ArmEase:
+    """Soft gravity: each elbow eases to where it hangs over ~ARM_EASE_S."""
+
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self._clock = clock
+        self._dirs: dict[int, np.ndarray] = {}
+        self._t: float | None = None
+
+    def reset(self) -> None:
+        self._dirs = {}
+        self._t = None
+
+    def step(self, targets: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+        now = float(self._clock())
+        dt = 0.0 if self._t is None else min(max(now - self._t, 0.0), 0.25)
+        self._t = now
+        keep = math.exp(-dt / ARM_EASE_S)
+        out: dict[int, np.ndarray] = {}
+        for idx, target in targets.items():
+            prev = self._dirs.get(idx)
+            cur = target if prev is None else keep * prev + (1.0 - keep) * target
+            cur = cur / max(float(np.linalg.norm(cur)), 1e-6)
+            self._dirs[idx] = cur
+            out[idx] = cur
+        return out
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    return v / max(float(np.linalg.norm(v)), 1e-6)
+
+
+def _follow_with_rig(
+    rest: list[dict[str, Any]],
+    rig: Any,
+    *,
+    share: float = 1.5,
+    gravity: float = ARM_GRAVITY,
+    arms: ArmEase | None = None,
+) -> list[dict[str, Any]]:
+    """The torso walks and grows with the body and turns in 3D with the head.
+
+    Joint 31 is the base of the neck, on the torso. It walks and sizes with
+    the body and stays the pivot: a turn swings the head round it while the
+    torso takes ``share`` of the turn on its oval (turn_on_oval), of the nod
+    as a lean and of the tilt, all round the neck base. Riding the head's
+    slide dragged the shoulders down on every look-down and sideways on
+    every turn. The upper arms then swing back toward hanging (``gravity``),
+    eased by ``arms``: rigid on a turned torso, a tilt swung an elbow up.
     """
     place = rig.place()
     cx = float(place["cx"])
@@ -265,12 +349,54 @@ def _follow_with_rig(rest: list[dict[str, Any]], rig: Any) -> list[dict[str, Any
         ],
         dtype=np.float32,
     )
-    roll = _torso_roll(math.degrees(float(rig.turn()["roll"])))
+    head = rig.turn()
+    turn = max(-_MAX_BODY_TURN, min(_MAX_BODY_TURN, share * float(head["yaw"])))
+    lean = max(-_MAX_BODY_LEAN, min(_MAX_BODY_LEAN, share * float(head["pitch"])))
+    roll = max(-_MAX_BODY_TILT, min(_MAX_BODY_TILT, share * float(head["roll"])))
+    span = 1.0
+    if 32 in rest_by and 34 in rest_by:
+        span = float(np.linalg.norm(_xy(rest_by[32]) - _xy(rest_by[34])))
+    width = max(span, 1.0) * scale
+    half, depth = body_oval(rest_by)
+    half, depth = half * scale, depth * scale
+    cl, sl = math.cos(lean), math.sin(lean)
+    cr, sr = math.cos(roll), math.sin(roll)
+    def posed(idx: int, off: np.ndarray) -> np.ndarray:
+        x = turn_on_oval(float(off[0]), half, depth, turn)
+        y = float(off[1])
+        z0 = TORSO_DEPTH.get(idx, 0.0) * width
+        # Lean: a look down brings the top toward the camera.
+        y, z = cl * y + sl * z0, -sl * y + cl * z0
+        x, y = cr * x - sr * y, sr * x + cr * y
+        # Only a change of depth changes the size: the still already shows
+        # the chest in front of the shoulders.
+        persp = (_FOCAL * width - z0) / max(_FOCAL * width - z, 1e-3)
+        return persp * np.array([x, y], dtype=np.float32)
+
+    # The neck base is the pivot exactly: in front of the shoulder line, a
+    # lean alone would have carried it.
+    pivot = posed(31, np.zeros(2, dtype=np.float32))
+    placed: dict[int, np.ndarray] = {}
+    for idx, joint in rest_by.items():
+        placed[idx] = neck_xy + posed(idx, (_xy(joint) - neck_rest) * scale) - pivot
+    targets: dict[int, np.ndarray] = {}
+    for sh, el in ARMS:
+        if sh in placed and el in placed:
+            arm = placed[el] - placed[sh]
+            hang = _unit(_xy(rest_by[el]) - _xy(rest_by[sh]))
+            targets[el] = _unit((1.0 - gravity) * _unit(arm) + gravity * hang)
+    eased = arms.step(targets) if arms is not None else targets
+    for sh, el in ARMS:
+        if el in eased:
+            # A hanging arm hangs across the view: gravity brings back its
+            # length too, or a lean foreshortened it into the shoulder.
+            turned = float(np.linalg.norm(placed[el] - placed[sh]))
+            hanging = float(np.linalg.norm(_xy(rest_by[el]) - _xy(rest_by[sh]))) * scale
+            length = (1.0 - gravity) * turned + gravity * hanging
+            placed[el] = placed[sh] + length * eased[el]
     out: list[dict[str, Any]] = []
     for joint in joints:
-        point = neck_xy
-        if int(joint["id"]) != 31:
-            point = neck_xy + _tilt_offset((_xy(joint) - neck_rest) * scale, roll)
+        point = placed[int(joint["id"])]
         record = dict(joint)
         record["x"] = round(float(point[0]), 1)
         record["y"] = round(float(point[1]), 1)
@@ -286,13 +412,20 @@ def follow_skeleton(
     head: dict[str, float] | None = None,
     place: dict[str, float] | None = None,
     rig: Any = None,
+    *,
+    share: float = 1.5,
+    arms: ArmEase | None = None,
 ) -> list[dict[str, Any]]:
-    """Parent the manual skeleton to the face. Ignore camera body pose."""
+    """Parent the manual skeleton to the face. Ignore camera body pose.
+
+    ``share``: of the head's turn / nod / tilt the torso takes (feel
+    body_turn); ``arms`` eases the elbows' gravity over time.
+    """
     del live_face, cam_rest, cam_live
     if not rest:
         return []
     if rig is not None and getattr(rig, "locked", False):
-        return _follow_with_rig(rest, rig)
+        return _follow_with_rig(rest, rig, share=share, arms=arms)
     rest_by = {int(joint["id"]): joint for joint in rest}
     neck = rest_by.get(31)
     if neck is None:

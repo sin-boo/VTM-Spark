@@ -7,9 +7,20 @@ each ``feel.update`` rewrote that file.
 
 from __future__ import annotations
 
-import pytest
+import atexit
+import os
+import shutil
+import tempfile
 
-from backend.feel import DEFAULTS, feel
+# Before any backend import: saved lab state goes to a temp dir, never the
+# performer's track_lab/output (rest, shapes, feel, limiters, camera).
+_OUTPUT = tempfile.mkdtemp(prefix="track_lab_test_output_")
+os.environ["TRACK_LAB_OUTPUT"] = _OUTPUT
+atexit.register(shutil.rmtree, _OUTPUT, True)
+
+import pytest  # noqa: E402
+
+from backend.feel import DEFAULTS, feel  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

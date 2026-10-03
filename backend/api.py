@@ -324,6 +324,19 @@ def boot_start() -> dict[str, Any]:
     return get_runtime().start_boot()
 
 
+@app.post("/api/gpu/repair")
+def gpu_repair() -> dict[str, Any]:
+    """Open install.bat in its own window: it closes the desk, installs the AI engine
+    build for this graphics card and tests it (backend.gpu_check)."""
+    from .gpu_check import launch_repair
+
+    try:
+        launch_repair()
+    except (OSError, FileNotFoundError) as exc:
+        raise HTTPException(500, f"Could not start the repair: {exc}") from exc
+    return {"ok": True}
+
+
 @app.post("/api/boot/character")
 def boot_character(body: BootCharacterBody) -> dict[str, Any]:
     try:

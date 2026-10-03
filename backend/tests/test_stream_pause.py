@@ -50,6 +50,69 @@ def test_pause_stream_holds_and_resume_reschedules() -> None:
     assert scheduled == [1]
 
 
+def test_resume_does_not_continue_the_pre_pause_frame() -> None:
+    """After a pause the first key held on the pre-pause frame and its batch
+    tweened from the pre-pause pose."""
+    from types import SimpleNamespace
+
+    rt = _bare_stream()
+    cleared: list[int] = []
+    rt.engine = SimpleNamespace(clear_last_gen_latent=lambda: cleared.append(1))
+    rt._schedule_next_frame = lambda: None  # type: ignore[method-assign]
+    rt._prev_stream_kps = np.zeros((37, 4), dtype=np.float32)
+    rt._prev_stream_hair = np.zeros((3, 4, 4), dtype=np.float32)
+    StreamRuntime.pause_stream(rt)
+    StreamRuntime.resume_stream(rt)
+    assert cleared == [1]
+    assert rt._prev_stream_kps is None
+    assert rt._prev_stream_hair is None
+
+
+def test_hold_is_dropped_where_the_pose_jumps() -> None:
+    """Stop / start, tracking stop / start, recenter and calibrate each left
+    the last generated latent for the next key to continue."""
+    import inspect
+    from types import SimpleNamespace
+
+    cleared: list[int] = []
+    rt = _bare_stream()
+    rt.engine = SimpleNamespace(clear_last_gen_latent=lambda: cleared.append(1))
+    rt._pose_frozen = False
+    rt._mesh_edited = False
+    StreamRuntime._reset_live_origin(rt)
+    assert cleared == [1]
+    rt.adopt_lab_overlay = lambda packet=None, emit=False: False  # type: ignore[method-assign]
+    rt._set_status = lambda **kw: None  # type: ignore[method-assign]
+    StreamRuntime.apply_lab_calibrate(rt, {"ok": True, "status": {}})
+    assert cleared == [1, 1]
+    # Start / stop tracking and non-lab recenter go through _reset_live_origin.
+    for name in ("start_tracking", "stop_tracking", "recenter"):
+        src = inspect.getsource(getattr(StreamRuntime, name))
+        assert "_reset_live_origin" in src or "calibrate_lab_rest" in src, name
+
+    import queue as _queue
+
+    for name in (
+        "_reset_display_clock",
+        "_drain_display_queue",
+        "_save_live_rate",
+        "_end_first_frame_wait",
+        "_maybe_offload_after_stop",
+        "_ensure_compile_ready",
+        "_schedule_next_frame",
+    ):
+        setattr(rt, name, lambda *a, **k: None)
+    rt._gen_queue = _queue.Queue()
+    rt.status = lambda: {}  # type: ignore[method-assign]
+    rt._set_progress = lambda *a, **k: None  # type: ignore[method-assign]
+    rt._ensure_ref = lambda: True  # type: ignore[method-assign]
+    rt.ensure_model = lambda **k: None  # type: ignore[method-assign]
+    StreamRuntime.stop_stream(rt)
+    assert len(cleared) == 3
+    StreamRuntime.start_stream(rt)
+    assert len(cleared) == 4
+
+
 def test_on_frame_starts_next_gen_before_display() -> None:
     rt = _bare_stream()
     rt._frame_in_flight = True

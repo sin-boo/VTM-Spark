@@ -214,7 +214,10 @@ def test_start_lab_tracking_fits_rest_before_live() -> None:
     boot = inspect.getsource(StreamRuntime._boot_lab_source)
     assert "_sync_lab_character" in boot
     assert "replace=True" not in boot
-    sync = inspect.getsource(StreamRuntime._sync_lab_character)
+    # The sync takes a lock and runs its body in _sync_lab_character_locked.
+    sync = inspect.getsource(StreamRuntime._sync_lab_character) + inspect.getsource(
+        StreamRuntime._sync_lab_character_locked
+    )
     assert "put_source" in src or "put_source" in sync
     assert "lab_keeps_authored" in sync
     assert "_same_lab_still" in sync

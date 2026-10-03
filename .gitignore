@@ -30,6 +30,8 @@ models/cache/
 models/dit/**
 !models/dit/.gitkeep
 models/iamge/
+# Fast stream decoder (downloads from the Hub with the DiT)
+models/decoder/**
 
 # User refs + local picker state
 models/refs/**
@@ -46,6 +48,7 @@ models/load_timings.json
 # Per-PC picks and measurements: language, GPU, model speed per batch size
 models/ui_prefs.json
 models/gpu.json
+models/gpu_check.json
 models/hw_profile.json
 
 # Leftover pre-layout folder

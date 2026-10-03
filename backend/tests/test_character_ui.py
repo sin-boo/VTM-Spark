@@ -102,3 +102,42 @@ def test_character_fit_screen() -> None:
     assert ".char-create.is-fit" in css
     assert ".char-fit" in css
     assert ".fit-frame" in css
+
+
+def test_drop_routes_images_to_create_and_vtm_to_import() -> None:
+    lib = _ui("components", "CharacterLibrary.tsx")
+    words = _ui("i18n.ts")
+    drop = lib.split("function dropFiles")[1].split("function dropZone")[0]
+    # Image only: create from the first image and say what was skipped.
+    assert "if (!hasPack && still)" in drop
+    assert "beginCreate(still, skipped ? t('lib.skippedOneImage'" in drop
+    # Neither kind: explain what can be dropped.
+    assert "t('lib.dropUnsupported')" in drop
+    # Any .vtm: import; beginImport reports the files it skipped.
+    assert drop.rstrip().endswith("void beginImport(files)\n  }")
+    assert "t('lib.skippedNotVtm'" in lib.split("async function beginImport")[1]
+    assert "dropFiles(zone, Array.from(ev.dataTransfer.files))" in lib
+    for key in ("lib.dropUnsupported", "lib.skippedNotVtm", "lib.skippedOneImage"):
+        assert words.count(f"'{key}':") == 2  # English and Japanese
+
+
+def test_create_closes_library_and_clears_its_notice() -> None:
+    lib = _ui("components", "CharacterLibrary.tsx")
+    create = lib.split("async function beginCreate")[1].split("function pickImport")[0]
+    assert "closeLibrary()" in create
+    assert "setLibraryOpen(false)" not in create
+
+
+def test_ui_still_types_match_backend(tmp_path) -> None:
+    import re
+
+    from backend.character_pack import stage_create_still
+
+    lib = _ui("components", "CharacterLibrary.tsx")
+    exts = re.findall(r"'(\.\w+)'", lib.split("const STILL_EXTS = [")[1].split("]")[0])
+    assert exts
+    for ext in exts:
+        assert stage_create_still(b"x", suffix=ext, dest_dir=tmp_path).suffix == ext
+    # The Create picker offers the same list as drag and drop.
+    assert "accept={[...STILL_EXTS, ...STILL_TYPES].join(',')}" in lib
+    assert 'accept="image/*"' not in lib

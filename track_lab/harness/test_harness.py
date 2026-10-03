@@ -255,6 +255,43 @@ def test_packet_mailbox_keeps_status_beside_newer_frame() -> None:
     assert box.take(0.0) == []
 
 
+def test_packet_mailbox_drops_a_frame_packed_before_a_newer_one() -> None:
+    """Camera and command threads pack frames outside any lock. The older one
+    landing last used to win, and the character twitched back a frame."""
+    box = PacketMailbox()
+
+    def frame(session: str, seq: int) -> dict:
+        return {"type": "packet", "packet": {"type": "frame", "session": session, "seq": seq}}
+
+    box.put(frame("s1", 5))
+    box.put(frame("s1", 4))
+    assert [item["packet"]["seq"] for item in box.take(0.0)] == [5]
+    # Already sent: an older one arriving now is still older.
+    box.put(frame("s1", 3))
+    assert box.take(0.0) == []
+    box.put(frame("s1", 5))
+    assert [item["packet"]["seq"] for item in box.take(0.0)] == [5]
+    # A new tracker process starts over; unordered packets always pass.
+    box.put(frame("s2", 0))
+    assert [item["packet"]["seq"] for item in box.take(0.0)] == [0]
+    box.put({"type": "packet", "packet": {"type": "frame", "n": 1}})
+    assert box.take(0.0)[0]["packet"]["n"] == 1
+
+
+def test_pack_frame_and_status_carry_session_and_seq() -> None:
+    live = {"points": _face_points(), "live": True, "session": "abc", "seq": 42, "pose_t": 12.5}
+    frame = pack_frame(live, image_wh=(800, 800))
+    assert (frame["session"], frame["seq"], frame["pose_t"]) == ("abc", 42, 12.5)
+    status = pack_status({"ok": True, "session": "abc", "seq": 42})
+    assert (status["session"], status["seq"]) == ("abc", 42)
+    # An older bench without them: unordered, not an error.
+    old = pack_frame({"points": _face_points()}, image_wh=(800, 800))
+    assert (old["session"], old["seq"]) == ("", 0)
+    from harness.pack import warming_frame
+
+    assert warming_frame()["session"] == ""
+
+
 def test_hub_command_requires_bind() -> None:
     local = HarnessHub()
     reply = local.command({"op": "stop"})

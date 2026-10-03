@@ -451,7 +451,8 @@ def _part_pose(
     """Posed anchor, left/right width, head zoom, roll for one part."""
     ax = np.asarray([part.anchor[0]], dtype=np.float64)
     ay = np.asarray([part.anchor[1]], dtype=np.float64)
-    posed_x, posed_y = face_rig.map_plane(ax, ay, max_turn=max_turn)
+    # A pinned part keeps the wide lens: its silhouette holds on a big turn.
+    posed_x, posed_y = face_rig.map_hair(ax, ay, max_turn=max_turn, wide=True)
     turn = face_rig.turn()
     yaw_r, _pitch = _clip_turn(turn["yaw"], turn["pitch"], max_turn)
     width = _part_width(part, yaw_r, rest_ms, gain)
@@ -524,7 +525,7 @@ def follow_hair(
         width = 1.0
         if use_head and face_rig is not None:
             ax, ay, width, scale, roll = _part_pose(part, face_rig, rest_ms, max_turn, gain)
-            xs, ys = face_rig.map_plane(part.local[:, 0], part.local[:, 1], max_turn=max_turn)
+            xs, ys = face_rig.map_hair(part.local[:, 0], part.local[:, 1], max_turn=max_turn)
             # Left / right visibility applies in both modes; pin only picks
             # card (0) vs rigid part (1).
             xs, ys = _widen(xs, ys, ax, ay, width, roll)

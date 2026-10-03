@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-PATH = ROOT / "output" / "mouth_bits.json"
+from .paths import OUTPUT
+
+PATH = OUTPUT / "mouth_bits.json"
 
 MOUTH_ALL = tuple(range(48, 66))
 ANIME_SLOTS = tuple(range(28))

@@ -38,6 +38,10 @@ _FRAME_INTO_STATUS = (
     "calib",
     "image_wh",
     "generation",
+    # The frame's order, with its points: a status's own would not match them.
+    "session",
+    "seq",
+    "pose_t",
     "head",
     "blink",
     "iris",
@@ -493,6 +497,27 @@ def lab_packet_generation(packet: dict[str, Any] | None) -> int:
         return int(packet.get("generation") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def lab_packet_session(packet: dict[str, Any] | None) -> str:
+    """Track Lab tracker process the packet came from ("" = an older lab, or warming)."""
+    if not isinstance(packet, dict):
+        return ""
+    return str(packet.get("session") or "")
+
+
+def lab_packet_order(packet: dict[str, Any] | None) -> tuple[str, int] | None:
+    """(session, seq): within one session a lower seq is an older live pose.
+
+    None when the packet carries no order (an older Track Lab, or warming).
+    """
+    session = lab_packet_session(packet)
+    if not session:
+        return None
+    try:
+        return session, int(packet.get("seq"))  # type: ignore[union-attr]
+    except (TypeError, ValueError):
+        return None
 
 
 def lab_packet_from_ack(ack: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -23,12 +26,21 @@ def _same_index(cam: dict[str, object], index: int) -> bool:
         return False
 
 
+def _stand_in_camera(name: str) -> bool:
+    """No real device name: the listing failed and cameras.py fell back to
+    "Camera n" ("#n" in files saved while this used its own). The same
+    webcam can come back under its real name next time, so a stand-in says
+    nothing about which it is."""
+    return not name or re.fullmatch(r"(Camera |#)\d+", name) is not None
+
+
 def _camera_name(cameras: list[dict[str, object]], index: int) -> str:
     for cam in cameras:
         if _same_index(cam, index):
             return str(cam.get("name") or "").strip()
     return ""
-from .calibrate import calibrator
+from .calibrate import WARMUP_SEC, calibrator
+from .ease import frame_dt, timed_alpha
 from .feel import feel
 from .hair import HAIR_CLASSES, build_hair_rig, detect_hair, follow_hair, rig_rest_hair
 from .eye_bits import bits as eye_bits
@@ -46,7 +58,7 @@ from .offsets import dump as dump_offsets
 from .offsets import nudge as nudge_offset
 from .offsets import parse as parse_offsets
 from .osf_cam import OsfCam, OsfFrame
-from .skeleton import follow_skeleton, skeleton_from_still
+from .skeleton import ArmEase, follow_skeleton, skeleton_from_still
 from .travel_box import (
     apply_limits,
     default_travel_box,
@@ -61,6 +73,7 @@ from .travel_box import (
 from .travel_fit import fit_travel_box
 from harness.hub import hub
 from harness.pack import frame_from_bench, status_from_bench
+from harness.protocol import NUM_KEYPOINTS
 
 from .presets import (
     EYE_SLOTS,
@@ -73,14 +86,18 @@ from .record import MovementRecorder
 from .retarget import FaceExpr
 from .rig import FaceRig
 from .sides import ifm_canonical, ifm_look_canonical, selfie_of, to_screen
+from .paths import OUTPUT
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_DIR = ROOT / "input"
-OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR = OUTPUT
 SOURCE_NAME = "source.png"
 PREVIEW_MAX = 960
 PARTS_PATH = OUTPUT_DIR / "overlay_parts.json"
 IFM_PATH = OUTPUT_DIR / "ifm.json"
+# Live poses kept by seq, so a nudge is measured on the frame the user saw
+# (~10 s at 60 fps). An older seq falls back to the current pose.
+POSE_HISTORY = 600
 
 
 def source_path() -> Path:
@@ -144,6 +161,86 @@ def _encode_jpeg(bgr: np.ndarray) -> bytes:
 # moves the lid, not the eye).
 _PUPIL_CORNERS = {28: (11, 13), 29: (17, 19)}
 
+# Each source's usual seconds a frame. The expression and pupil eases are
+# timed in seconds (ease.timed_alpha): at this rate they blend by Smooth's
+# per-frame share as they always did; a slower rate no longer stretches
+# their trail (counted in frames, 15 fps dragged twice as long as 30).
+_FRAME_S = {"osf": 1.0 / 30.0, "ifm": 1.0 / 60.0}
+
+
+def _frame_share(alpha: float, last: float | None, now: float, source: str) -> float:
+    """``alpha`` for a frame at the source's usual rate or faster (a burst,
+    a 60 fps webcam: as before, never held back more); for a slower one,
+    the share that leaves the same trail in seconds."""
+    frame_s = _FRAME_S.get(source, _FRAME_S["osf"])
+    return timed_alpha(alpha, max(frame_dt(last, now), frame_s), frame_s)
+
+
+# The live gaze zero is learnt from this many frames in a row that hold still
+# near the eye's centre, then their median; not from the first frame with
+# pupils, which could be a glance aside and was kept for good.
+_REST_LOOK_FRAMES = 10
+# Webcam pupil, as a fraction of its eye box (rest_look_from_cam): furthest
+# from the centre a rest may sit (x, y), and the most the window may wander
+# (median distance from its median). A look into the eye's corner reads
+# ~0.3; a camera beside the screen can hold a plain look near 0.2, and with
+# no zero at all the pupils never move. A lid is shut past _REST_LOOK_BLINK.
+_REST_LOOK_CENTRE = (0.25, 0.35)
+_REST_LOOK_STEADY = (0.03, 0.10)
+_REST_LOOK_BLINK = 0.35
+# iPhone look (-1..1): look_quiet already holds it near 0.
+_REST_LOOK_STEADY_IFM = (0.05, 0.05)
+
+
+def _rest_look_sample(frame: OsfFrame) -> dict[str, object]:
+    """One frame's gaze as Set Rest keeps it: look x/y, webcam pupils."""
+    out: dict[str, object] = {}
+    look = getattr(frame, "look", None)
+    if isinstance(look, dict):
+        try:
+            out["x"] = float(look.get("x") or 0.0)
+            out["y"] = float(look.get("y") or 0.0)
+        except (TypeError, ValueError):
+            out = {}
+    lms = getattr(frame, "lms_xy", None)
+    iris = getattr(frame, "iris_cam", None)
+    if lms is not None and iris:
+        right, left = payload_to_hits(iris)
+        out.update(rest_look_from_cam(lms, right, left))
+    return out
+
+
+def _median_rest_look(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Per part median of Set Rest's gaze samples (a part missing on a frame is skipped)."""
+    out: dict[str, object] = {}
+    xy = [(float(row["x"]), float(row["y"])) for row in rows if "x" in row and "y" in row]
+    if xy:
+        out["x"] = float(np.median([p[0] for p in xy]))
+        out["y"] = float(np.median([p[1] for p in xy]))
+    for side in ("r", "l"):
+        fracs = [row[side] for row in rows if isinstance(row.get(side), dict)]
+        if fracs:
+            out[side] = {
+                "nx": round(float(np.median([float(f["nx"]) for f in fracs])), 4),
+                "ny": round(float(np.median([float(f["ny"]) for f in fracs])), 4),
+            }
+    return out
+
+
+def _steady_rest(
+    window: list[tuple[float, float]],
+    steady: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Median of a full window whose readings held still, else None."""
+    if len(window) < _REST_LOOK_FRAMES:
+        return None
+    arr = np.asarray(window[-_REST_LOOK_FRAMES:], dtype=np.float64)
+    med = np.median(arr, axis=0)
+    wander = np.median(np.abs(arr - med), axis=0)
+    if wander[0] > steady[0] or wander[1] > steady[1]:
+        return None
+    return float(med[0]), float(med[1])
+
 
 @dataclass
 class FaceBench:
@@ -167,9 +264,19 @@ class FaceBench:
         self._expr = FaceExpr()
         self._lids = LidFilter()
         self._live_pts: np.ndarray | None = None
+        # One id per tracker process: generation and seq restart with it.
+        self.session = uuid.uuid4().hex[:12]
+        # Bumped (under _lock) every time _live_pts changes. Frames carry it,
+        # so one built before a newer pose can be told apart and dropped.
+        self._seq = 0
+        self._pose_t = 0.0
+        self._pose_history: OrderedDict[int, np.ndarray] = OrderedDict()
         # The eased expression (mouth, brows) in the still's frame, before
         # the rig. The head's own ease lives in the rig (FaceRig / ease.py).
         self._smooth_mesh: np.ndarray | None = None
+        # When the expression / pupils last eased (their eases are timed).
+        self._mesh_t: float | None = None
+        self._iris_t: float | None = None
         self._finishing = False
         self._live_pose: tuple[str, object, np.ndarray | None, np.ndarray | None] | None = None
         self._iris: list[dict[str, object]] = []
@@ -180,14 +287,34 @@ class FaceBench:
         self._iris_rest_method = "none"
         self._iris_cam: list[dict[str, object]] = []
         self._look: dict[str, float] | None = None
+        # Set Rest's gaze zero (saved). Its webcam pupils ("r" / "l") belong
+        # to the camera they were taken on (_look_rest_cam, "" = not known).
         self._look_rest: dict[str, object] = {}
+        self._look_rest_cam = ""
+        # This session's camera is not the one they were taken on: skip them
+        # (kept on disk for when that camera is back).
+        self._look_rest_other = False
+        # Set Rest's gaze, gathered over its capture window like the mouth
+        # and head (None = not capturing); the calibrate rest it started from.
+        self._rest_look_hold: list[dict[str, object]] | None = None
+        self._rest_look_hold_t = 0.0
+        self._rest_look_before: dict[str, float] | None = None
+        # This session's own gaze zero, learnt from a steady look while Set
+        # Rest's has none; never saved. _look_seen: its windows by side.
+        self._look_auto: dict[str, object] = {}
+        self._look_seen: dict[str, list[tuple[float, float]]] = {}
         self._point_offsets: dict[int, tuple[float, float]] = {}
         self._mouth_box: list[float] | None = None
         self._mouth_cage: list[float] | None = None
+        # _hair is what is drawn: while live, the followed and clamped pose.
+        # _hair_still is the still's own polygons, never live output.
         self._hair: list[dict[str, object]] = []
+        self._hair_still: list[dict[str, object]] = []
         self._hair_rig = None
         self._skeleton: list[dict[str, object]] = []
         self._skeleton_rest: list[dict[str, object]] = []
+        # Elbows ease back toward hanging (soft gravity) across frames.
+        self._arms = ArmEase()
         self._weights = empty_weights()
         self._head = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
         self._blink = {"l": 0.0, "r": 0.0}
@@ -248,6 +375,8 @@ class FaceBench:
         tracker = "ifm" if self._ifm.running else "osf" if self._osf.running else self.last_tracker
         with self._lock:
             pts = self._live_pts if live else None
+            seq = self._seq
+            pose_t = self._pose_t
             box = list(self._mouth_box) if live and self._mouth_box else []
             cage = list(self._mouth_cage) if live and self._mouth_cage else []
             hair = list(self._hair)
@@ -267,6 +396,9 @@ class FaceBench:
         return {
             "live": live,
             "tracker": tracker,
+            "session": self.session,
+            "seq": seq,
+            "pose_t": pose_t,
             "weights": weights,
             "head": head,
             "blink": blink,
@@ -382,6 +514,9 @@ class FaceBench:
             "ok": True,
             "live": live["live"],
             "tracker": live["tracker"],
+            "session": live["session"],
+            "seq": live["seq"],
+            "pose_t": live["pose_t"],
             "faces": self.last_faces,
             "ms": round(self.last_ms, 2),
             "error": self.last_error,
@@ -463,6 +598,7 @@ class FaceBench:
         self.rest_pts = None
         book.clear()
         self._hair = []
+        self._hair_still = []
         self._hair_rig = None
         self._skeleton = []
         self._skeleton_rest = []
@@ -477,6 +613,7 @@ class FaceBench:
         self.overlay_bgr = None
         self.rest_pts = book.template(None)
         self._hair = []
+        self._hair_still = []
         self._hair_rig = None
         self._skeleton = []
         self._skeleton_rest = []
@@ -521,6 +658,7 @@ class FaceBench:
             self.last_faces = 0
             self.rest_pts = None
             self._hair = []
+            self._hair_still = []
             self._hair_rig = None
             self._skeleton = []
             self._skeleton_rest = []
@@ -531,6 +669,7 @@ class FaceBench:
             self.last_faces = 0
             self.rest_pts = None
             self._hair = []
+            self._hair_still = []
             self._hair_rig = None
             self._skeleton = []
             self._skeleton_rest = []
@@ -581,12 +720,14 @@ class FaceBench:
                 segs = []
                 self.last_error = f"Hair: {exc}"
         self._hair = segs
+        self._hair_still = [dict(seg) for seg in segs]
         self._hair_rig = build_hair_rig(segs, pts)
         skeleton = [dict(j) for j in body.get("skeleton") or [] if isinstance(j, dict)]
         if not skeleton:
             skeleton = skeleton_from_still(pts, frame)
         self._skeleton = skeleton
         self._skeleton_rest = [dict(j) for j in skeleton]
+        self._arms.reset()
         self._save_parts()
         self.last_ms = (time.perf_counter() - started) * 1000.0
         vis = draw_label28(frame, pts)
@@ -675,6 +816,7 @@ class FaceBench:
             return self.status(publish=True)
         self.rest_pts = rest
         self._hair = []
+        self._hair_still = []
         self._hair_rig = None
         if not self._hair or not self._skeleton_rest:
             self._load_parts()
@@ -695,6 +837,7 @@ class FaceBench:
             self._rig.reset()
             self._expr.reset()
             self._lids.reset()
+            self._forget_look_auto()
             try:
                 self._ifm.start(self._on_osf, host=self._ifm.host, port=self._ifm.port)
             except Exception as exc:
@@ -711,12 +854,14 @@ class FaceBench:
         self._rig.reset()
         self._expr.reset()
         self._lids.reset()
+        self._forget_look_auto()
         if camera is not None:
             self.set_camera(int(camera))
             if self.last_error:
                 return self.status(publish=True)
         # Indices shift when a device comes or goes; re-find the pick by name.
         self._refresh_cameras()
+        self._look_rest_for_camera()
         try:
             self._osf.start(self._on_osf, index=int(self.camera_index))
         except Exception as exc:
@@ -944,7 +1089,7 @@ class FaceBench:
             if pts.shape[1] > 2:
                 pts[idx, 2] = max(float(pts[idx, 2]), 0.85)
             book.rebase(pts)
-            rest_hair = rig_rest_hair(self._hair_rig) or list(self._hair)
+            rest_hair = rig_rest_hair(self._hair_rig) or list(self._hair_still)
             with self._lock:
                 self.rest_pts = pts
                 self._hair_rig = build_hair_rig(rest_hair, pts)
@@ -992,6 +1137,7 @@ class FaceBench:
         rig = build_hair_rig(cleaned, self.rest_pts) if self.rest_pts is not None else None
         with self._lock:
             self._hair = cleaned
+            self._hair_still = [dict(seg) for seg in cleaned]
             self._hair_rig = rig
         self._save_parts()
         self.last_error = ""
@@ -1007,13 +1153,29 @@ class FaceBench:
         except (TypeError, ValueError):
             self.last_error = "Invalid overlay point"
             return self.status(publish=True)
+        # The user lined the point up on a picture of frame ``seq``, not on
+        # the newest pose: measure the nudge there, or the preview latency is
+        # saved into the offset. Without a seq (the lab's own page, an older
+        # desk) the current pose is all there is.
+        session = str(body.get("session") or "")
+        if session and session != self.session:
+            # Made on the tracker before a restart (a replayed command): that
+            # pose is gone, and measuring on this one would save the wrong offset.
+            self.last_error = "Track Lab restarted — drag the point again"
+            return self.status(publish=True)
+        try:
+            seq = int(body["seq"]) if body.get("seq") is not None else None
+        except (TypeError, ValueError):
+            seq = None
         with self._lock:
-            cur = self._unoffset_xy(idx)
-            if cur is None:
-                self.last_error = "No overlay point to nudge"
-                return self.status(publish=True)
-            self._point_offsets = nudge_offset(self._point_offsets, idx, cur, (x, y))
-            self.last_error = ""
+            cur = self._unoffset_xy(idx, seq)
+            if cur is not None:
+                self._point_offsets = nudge_offset(self._point_offsets, idx, cur, (x, y))
+        # status() takes _lock itself: answer only once it is released.
+        if cur is None:
+            self.last_error = "No overlay point to nudge"
+            return self.status(publish=True)
+        self.last_error = ""
         self._save_parts()
         return self.status(publish=True)
 
@@ -1050,12 +1212,9 @@ class FaceBench:
             self.last_error = str(exc)
             return self.status(publish=True)
         if str(name) == "rest":
-            if self._ifm.running:
-                frame = self._canonical_ifm(self._ifm.latest)
-            else:
-                frame = self._osf.latest
-            self._capture_rest_look(frame, force=True)
-            self._save_parts()
+            # The gaze zero is taken over the capture window with the mouth
+            # and head (_hold_rest_look), not from the frame at the click.
+            self._rest_look_hold = None
         self.last_error = ""
         return self.status(publish=True)
 
@@ -1097,12 +1256,16 @@ class FaceBench:
         self._rig.reset()
         self._expr.reset()
         self._lids.reset()
+        self._arms.reset()
         with self._lock:
             self._live_pose = None
             self._live_pts = None
             self._smooth_mesh = None
             self._iris_cam = []
             self._look = None
+            # The next session (maybe another seat) learns its own.
+            self._look_auto = {}
+            self._look_seen = {}
             self._restore_iris_rest()
             self._mouth_box = None
             self._mouth_cage = None
@@ -1110,6 +1273,8 @@ class FaceBench:
             # A blink held at Stop would keep hiding the rest pose's irises.
             self._blink = {"l": 0.0, "r": 0.0}
             self.camera_bgr = None
+            # A live frame packed before Stop must not come back after it.
+            self._bump_live()
         pts = book.current()
         if pts is None:
             pts = self.rest_pts
@@ -1117,6 +1282,8 @@ class FaceBench:
             self._paint(pts)
             if self._hair_rig is not None:
                 self._hair = follow_hair(self._hair_rig, pts)
+            else:
+                self._hair = [dict(seg) for seg in self._hair_still]
             if self._skeleton_rest:
                 self._skeleton = [dict(j) for j in self._skeleton_rest]
         if self.last_tracker in ("osf", "ifm"):
@@ -1173,7 +1340,8 @@ class FaceBench:
                 frame.weights,
                 to_screen(getattr(frame, "brow", None), selfie),
                 mixed=mixed,
-            )
+            ),
+            "ifm",
         )
         self._live_pose = ("ifm", frame, None if driven is None else driven.copy(), self.rest_pts)
         posed = self._rig.apply(driven, self.rest_pts, frame.head, frame.pose)
@@ -1192,7 +1360,8 @@ class FaceBench:
                 frame.pts_3d,
                 mouth_pts=frame.mouth_2d,
                 keep_mouth=use_visemes,
-            )
+            ),
+            "osf",
         )
         self._live_pose = ("osf", frame, None if mixed is None else mixed.copy(), self.rest_pts)
         posed = self._rig.apply(mixed, self.rest_pts, frame.head, frame.pose)
@@ -1218,20 +1387,24 @@ class FaceBench:
         out[slots, :2] += moved
         return out
 
-    def _ease_mesh(self, mesh: np.ndarray | None) -> np.ndarray | None:
-        """Ease the expression (mouth, brows) in the still's frame, per frame.
+    def _ease_mesh(self, mesh: np.ndarray | None, source: str) -> np.ndarray | None:
+        """Ease the expression (mouth, brows) in the still's frame.
 
         The head's turn, slide and size are eased once, in the rig, by
         Smooth. Easing the drawn points again after it dragged every move a
-        second time. This stays the light per-frame ease, so a strong Smooth
-        does not blur lip sync.
+        second time. This stays the light ease (feel.alpha a frame at the
+        source's usual rate), so a strong Smooth does not blur lip sync; it
+        is timed, so a lower frame rate does not drag it longer.
         """
         if mesh is None:
             return None
+        now = time.perf_counter()
         if self._smooth_mesh is None or self._smooth_mesh.shape != mesh.shape:
             self._smooth_mesh = mesh.copy()
         else:
-            self._smooth_mesh += feel.alpha() * (mesh - self._smooth_mesh)
+            weight = _frame_share(feel.alpha(), self._mesh_t, now, source)
+            self._smooth_mesh += weight * (mesh - self._smooth_mesh)
+        self._mesh_t = now
         return self._smooth_mesh.copy()
 
     def _finish_live(self, frame: OsfFrame, posed: np.ndarray | None) -> None:
@@ -1255,20 +1428,11 @@ class FaceBench:
         posed = self._blink_eyes(posed, blink_screen)
         look = getattr(frame, "look", None)
         if isinstance(look, dict) or (frame.lms_xy is not None and frame.iris_cam):
-            with self._lock:
-                missing_look = "x" not in self._look_rest and "y" not in self._look_rest
-                missing_cam = (
-                    frame.lms_xy is not None
-                    and frame.iris_cam
-                    and not self._has_cam_rest()
-                )
-            # Do not lock a look-up as rest. Set Rest still force-captures.
-            if missing_look and look_quiet(look if isinstance(look, dict) else None):
-                self._capture_rest_look(frame, force=False)
-            elif missing_cam:
-                self._capture_rest_look(frame, force=False)
+            self._hold_rest_look(frame, blink_screen)
+            self._learn_rest_look(frame, blink_screen)
         rest_iris = [dict(row) for row in self._iris_rest]
-        rest_look = dict(self._look_rest)
+        with self._lock:
+            rest_look = self._rest_look()
         rest_pts = None if self.rest_pts is None else self.rest_pts.copy()
         iris_rows, iris_method = retarget_iris(
             posed,
@@ -1295,9 +1459,12 @@ class FaceBench:
             if posed is not None:
                 # Hair and the skeleton follow the rig's eased turn and place,
                 # so they ease with the head and need no ease of their own.
+                # Hair with no rig to follow is the still's own polygons. Both
+                # are built afresh each frame: the limiter's clamp below must
+                # never be fed back in, or hair re-clamped every frame the
+                # head sat at a wall slid further and further.
                 followed = follow_hair(self._hair_rig, opened, self._rig)
-                if followed:
-                    self._hair = followed
+                self._hair = followed or [dict(seg) for seg in self._hair_still]
                 if self._skeleton_rest:
                     self._skeleton = follow_skeleton(
                         self._skeleton_rest,
@@ -1309,9 +1476,17 @@ class FaceBench:
                         },
                         place=self._rig.place(),
                         rig=self._rig,
+                        share=feel.body_turn(),
+                        arms=self._arms,
                     )
             if iris_rows:
-                self._iris = self._ease_pupils(iris_rows, posed, feel.gaze_alpha())
+                # Timed like the mesh: a slower frame rate does not drag the
+                # pupils longer.
+                now = time.perf_counter()
+                source = "ifm" if getattr(frame, "source", "") == "ifm" else "osf"
+                weight = _frame_share(feel.gaze_alpha(), self._iris_t, now, source)
+                self._iris_t = now
+                self._iris = self._ease_pupils(iris_rows, posed, weight)
                 self._iris_method = iris_method
             else:
                 self._iris = []
@@ -1326,6 +1501,7 @@ class FaceBench:
                 measure=opened,
             )
             self._live_pts = posed
+            self._bump_live()
             debug = raw_debug(frame.iris_cam, look)
             self._iris_cam = list(debug["iris_cam"])
             packed_look = debug["look"]
@@ -1425,7 +1601,48 @@ class FaceBench:
         self._iris_ease = ease
         return out
 
-    def _unoffset_xy(self, idx: int) -> tuple[float, float] | None:
+    def _bump_live(self) -> None:
+        """Next seq for a changed ``_live_pts``. Call under ``_lock``.
+
+        Frames read seq with the pose they pack, so two built on different
+        threads are ordered by it. The live pose is kept by seq for set_point.
+        """
+        self._seq += 1
+        self._pose_t = time.time()
+        if self._live_pts is None:
+            return
+        self._pose_history[self._seq] = self._pose_rows()
+        while len(self._pose_history) > POSE_HISTORY:
+            self._pose_history.popitem(last=False)
+
+    def _pose_rows(self) -> np.ndarray:
+        """Every overlay point before its nudge, on the live pose (NaN = none).
+
+        The same points ``_unoffset_xy`` reads: face from the live mesh, the
+        pupils (or their rest), the followed skeleton.
+        """
+        rows = np.full((NUM_KEYPOINTS, 2), np.nan, dtype=np.float64)
+        pts = self._live_pts
+        if pts is not None:
+            n = min(28, len(pts))
+            rows[:n] = np.asarray(pts[:n, :2], dtype=np.float64)
+        for kind, source in (("iris", self._iris or self._iris_rest), ("body", self._skeleton)):
+            for row in source:
+                try:
+                    idx = int(row.get("id", -1))
+                    x, y = float(row.get("x") or 0.0), float(row.get("y") or 0.0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                wanted = idx in (28, 29) if kind == "iris" else 29 < idx < NUM_KEYPOINTS
+                if wanted and np.isnan(rows[idx, 0]):
+                    rows[idx] = (x, y)
+        return rows
+
+    def _unoffset_xy(self, idx: int, seq: int | None = None) -> tuple[float, float] | None:
+        if seq is not None:
+            rows = self._pose_history.get(int(seq))
+            if rows is not None and 0 <= idx < len(rows) and not np.isnan(rows[idx, 0]):
+                return float(rows[idx, 0]), float(rows[idx, 1])
         if 0 <= idx < 28:
             live = self._osf.running or self._ifm.running
             pts = self._live_pts if live and self._live_pts is not None else None
@@ -1455,30 +1672,142 @@ class FaceBench:
                 continue
         return None
 
-    def _has_cam_rest(self) -> bool:
-        r = self._look_rest.get("r")
-        l = self._look_rest.get("l")
-        return isinstance(r, dict) or isinstance(l, dict)
+    def _camera_key(self) -> str:
+        """The webcam in use, by name (indices shift as devices come and go).
+        "" when only a stand-in name is known (see _stand_in_camera)."""
+        name = _camera_name(self._cameras or [], self.camera_index)
+        return "" if _stand_in_camera(name) else name
 
-    def _capture_rest_look(self, frame: OsfFrame, *, force: bool = False) -> None:
-        changed = False
-        look = getattr(frame, "look", None)
+    def _rest_look(self) -> dict[str, object]:
+        """The gaze zero in use: Set Rest's, else what this session learnt.
+        Call with the lock held."""
+        out = dict(self._look_auto)
+        keys = ("x", "y") if self._look_rest_other else ("x", "y", "r", "l")
+        out.update({key: self._look_rest[key] for key in keys if key in self._look_rest})
+        return out
+
+    def _forget_look_auto(self) -> None:
         with self._lock:
-            if isinstance(look, dict) and (force or ("x" not in self._look_rest and "y" not in self._look_rest)):
-                try:
-                    self._look_rest["x"] = float(look.get("x") or 0.0)
-                    self._look_rest["y"] = float(look.get("y") or 0.0)
-                    changed = True
-                except (TypeError, ValueError):
-                    pass
-            lms = getattr(frame, "lms_xy", None)
-            iris = getattr(frame, "iris_cam", None)
-            if lms is not None and iris and (force or not self._has_cam_rest()):
-                right, left = payload_to_hits(iris)
-                snap = rest_look_from_cam(lms, right, left)
-                if snap:
-                    self._look_rest.update(snap)
-                    changed = True
+            self._look_auto = {}
+            self._look_seen = {}
+
+    def _look_rest_for_camera(self) -> None:
+        """Set Rest's webcam pupils are only right for the camera they were
+        taken on: on another the same look sits elsewhere in the eye. Skip
+        them there for this session (it learns its own) but keep them on
+        disk: a listing that failed once must not cost the performer their
+        Set Rest. A rest saved before the camera was recorded is taken as
+        this one's; with only a stand-in name, nothing is compared."""
+        key = self._camera_key()
+        with self._lock:
+            self._look_rest_other = False
+            has_cam = isinstance(self._look_rest.get("r"), dict) or isinstance(self._look_rest.get("l"), dict)
+            if not has_cam or not key or self._look_rest_cam == key:
+                return
+            if self._look_rest_cam:
+                self._look_rest_other = True
+                return
+            self._look_rest_cam = key
+        self._save_parts()
+
+    def _learn_rest_look(self, frame: OsfFrame, blink: dict[str, float]) -> None:
+        """Learn this session's gaze zero where Set Rest's has none.
+
+        It used to be the first frame with pupils, saved for good: a glance
+        aside on that frame, or a camera or seat changed since, held both
+        eyes off to one side until Set Rest. Now each part waits for
+        _REST_LOOK_FRAMES frames in a row that hold still near the centre,
+        takes their median, and keeps it for this session only.
+        """
+        look = getattr(frame, "look", None)
+        lms = getattr(frame, "lms_xy", None)
+        iris = getattr(frame, "iris_cam", None)
+        with self._lock:
+            rest = self._rest_look()
+            if isinstance(look, dict) and "x" not in rest and "y" not in rest:
+                seen = self._look_seen.setdefault("xy", [])
+                # Do not lock a look-up as rest. Set Rest still captures any.
+                if look_quiet(look):
+                    seen.append((float(look.get("x") or 0.0), float(look.get("y") or 0.0)))
+                    del seen[:-_REST_LOOK_FRAMES]
+                    got = _steady_rest(seen, _REST_LOOK_STEADY_IFM)
+                    if got is not None:
+                        self._look_auto["x"], self._look_auto["y"] = got
+                else:
+                    seen.clear()
+            if lms is None or not iris:
+                return
+            # A lid on its way shut squashes the eye box: skip, not restart.
+            if max(float(blink.get("l") or 0.0), float(blink.get("r") or 0.0)) > _REST_LOOK_BLINK:
+                return
+            right, left = payload_to_hits(iris)
+            snap = rest_look_from_cam(lms, right, left)
+            for side in ("r", "l"):
+                frac = snap.get(side)
+                if isinstance(rest.get(side), dict) or not isinstance(frac, dict):
+                    continue
+                seen = self._look_seen.setdefault(side, [])
+                nx, ny = float(frac["nx"]), float(frac["ny"])
+                if abs(nx) > _REST_LOOK_CENTRE[0] or abs(ny) > _REST_LOOK_CENTRE[1]:
+                    seen.clear()
+                    continue
+                seen.append((nx, ny))
+                del seen[:-_REST_LOOK_FRAMES]
+                got = _steady_rest(seen, _REST_LOOK_STEADY)
+                if got is not None:
+                    self._look_auto[side] = {"nx": round(got[0], 4), "ny": round(got[1], 4)}
+
+    def _hold_rest_look(self, frame: OsfFrame, blink: dict[str, float]) -> None:
+        """Set Rest's gaze: every frame of its capture window past the
+        warm-up, blinks skipped, and the median kept once the capture
+        succeeds. It used to be the one frame at the click (a blink there
+        was the zero), saved even when the capture then failed and the mouth
+        and head kept their old zero."""
+        if calibrator.capturing == "rest":
+            now = time.perf_counter()
+            if self._rest_look_hold is None:
+                self._rest_look_hold = []
+                self._rest_look_hold_t = now
+                self._rest_look_before = calibrator.rest_snapshot()
+            if now - self._rest_look_hold_t < WARMUP_SEC:
+                return
+            if max(float(blink.get("l") or 0.0), float(blink.get("r") or 0.0)) > _REST_LOOK_BLINK:
+                return
+            sample = _rest_look_sample(frame)
+            if sample:
+                self._rest_look_hold.append(sample)
+            return
+        rows = self._rest_look_hold
+        if rows is None:
+            return
+        self._rest_look_hold = None
+        # Only a capture that stored a new mouth rest: not one that failed,
+        # was cleared, or was replaced by another pose.
+        after = calibrator.rest_snapshot()
+        if not rows or after is None or after == self._rest_look_before:
+            return
+        self._set_rest_look(_median_rest_look(rows))
+
+    def _set_rest_look(self, sample: dict[str, object]) -> None:
+        """Set Rest's gaze zero, saved; webcam pupils with the camera they
+        were taken on."""
+        changed = False
+        with self._lock:
+            if "x" in sample and "y" in sample:
+                self._look_rest["x"] = float(sample["x"])
+                self._look_rest["y"] = float(sample["y"])
+                changed = True
+            snap = {side: sample[side] for side in ("r", "l") if isinstance(sample.get(side), dict)}
+            if snap:
+                key = self._camera_key()
+                if key != self._look_rest_cam or self._look_rest_other:
+                    # A side not seen now was another camera's.
+                    self._look_rest.pop("r", None)
+                    self._look_rest.pop("l", None)
+                self._look_rest.update(snap)
+                self._look_rest_cam = key
+                self._look_rest_other = False
+                changed = True
         if changed:
             self._save_parts()
 
@@ -1513,6 +1842,7 @@ class FaceBench:
             if not self.last_error:
                 self.last_error = f"Hair: {exc}"
         self._hair = segs
+        self._hair_still = [dict(seg) for seg in segs]
         self._hair_rig = build_hair_rig(segs, pts)
         locked = skeleton_from_still(pts, frame)
         self._skeleton = locked
@@ -1520,17 +1850,21 @@ class FaceBench:
         self._save_parts()
 
     def _save_parts(self) -> None:
+        # Set Rest's only: what a session learnt for itself is not saved.
+        look_rest = dict(self._look_rest)
+        if self._look_rest_cam:
+            look_rest["camera"] = self._look_rest_cam
         try:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             PARTS_PATH.write_text(
                 json.dumps(
                     {
                         # _hair is the followed pose while live. Save rest.
-                        "hair": rig_rest_hair(self._hair_rig) or list(self._hair),
+                        "hair": rig_rest_hair(self._hair_rig) or list(self._hair_still),
                         "skeleton": list(self._skeleton_rest),
                         "iris": list(self._iris_rest),
                         "iris_method": self._iris_rest_method,
-                        "look_rest": dict(self._look_rest),
+                        "look_rest": look_rest,
                         "point_offsets": dump_offsets(self._point_offsets),
                     },
                     indent=2,
@@ -1553,6 +1887,7 @@ class FaceBench:
         body = data.get("skeleton")
         if isinstance(hair, list) and hair and not self._hair:
             self._hair = hair
+            self._hair_still = [dict(seg) for seg in hair if isinstance(seg, dict)]
             if self.rest_pts is not None:
                 self._hair_rig = build_hair_rig(hair, self.rest_pts)
         if isinstance(body, list) and body and not self._skeleton_rest:
@@ -1602,6 +1937,11 @@ class FaceBench:
                 pass
             if packed:
                 self._look_rest = packed
+                # Missing in files saved before it was recorded: "" is taken
+                # as the first camera used (_look_rest_for_camera).
+                camera = look_rest.get("camera")
+                camera = camera if isinstance(camera, str) else ""
+                self._look_rest_cam = "" if _stand_in_camera(camera) else camera
         if not self._point_offsets:
             self._point_offsets = parse_offsets(data.get("point_offsets"))
 

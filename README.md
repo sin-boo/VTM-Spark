@@ -162,6 +162,7 @@ Shapes are edited with tracking stopped.
 | Model | What it does | Size | Local path | Licence | Commercial use |
 |---|---|---|---|---|---|
 | `VTM-1.5.1.pt` | Draws your character (DiT) | 360 MB | `models/dit/` | Apache-2.0 (ours) | Yes |
+| `vtm-fast-decoder.pt` | Fast picture decode for the live stream | 3.9 MB | `models/decoder/` | Ours, distilled from `cqyan/hybrid-sd-tinyvae`, whose licence is not stated ([notices](THIRD_PARTY_NOTICES.md)) | Unclear |
 | `animeseg_hair3.pt` | Hair parts, so hair follows the head | 432 MB | `models/trackers/` | Our fine-tune of Meta Mask2Former, **CC BY-NC 4.0** | **No** |
 | `dwpose_v2.pt` | Body keypoints on your picture | 23 MB | `models/trackers/` | Our fine-tune of Ultralytics YOLO-pose, **AGPL-3.0** | Under AGPL terms |
 | `iris_pose.pt` | Iris / pupils on your picture | 6.4 MB | `models/trackers/` | Our fine-tune of Ultralytics YOLO-pose, **AGPL-3.0** | Under AGPL terms |
@@ -172,7 +173,7 @@ Shapes are edited with tracking stopped.
 | `stabilityai/sd-vae-ft-mse` | Turns the model's output into a picture | 335 MB | Hugging Face cache | MIT | Yes |
 | `cqyan/hybrid-sd-tinyvae` | Faster picture decode | 9.8 MB | Hugging Face cache | Not stated by the publisher | Unclear |
 
-The first six come from our Hugging Face repo, [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). The rest come straight from their original publishers. In total that's about 1.24 GB; Python and PyTorch are downloaded separately.
+The first seven come from our Hugging Face repo, [sinBoo1/VTM-Spark](https://huggingface.co/sinBoo1/VTM-Spark). The rest come straight from their original publishers. In total that's about 1.24 GB; Python and PyTorch are downloaded separately.
 
 If the DiT weights are missing when you press Start, they download before launch.
 

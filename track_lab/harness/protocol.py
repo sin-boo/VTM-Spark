@@ -25,6 +25,10 @@ from .points import (
 PROTOCOL = "track_lab.harness.v1"
 SCHEMA = "KEYPOINT_SCHEMA"
 
+# Frames and status carry ``session`` (one id per tracker process; generation
+# restarts with it) and ``seq`` (bumped each time the live pose changes). In
+# one session a lower seq is an older pose. Packets without them are unordered.
+
 # Slot 28 / IRIS.L sits in EYE.L (11-13). Person-left blink drives that eye.
 # The old packet name right_iris is in Point.legacy only.
 
@@ -46,7 +50,7 @@ COMMANDS: dict[str, str] = {
     "set_input": "Choose camera or iFacialMocap. body: source (camera|ifm)",
     "set_ifm": "iFacialMocap bind. body: host?, port?",
     "set_mirror": "Left/right rule. off = reflection (person-left on screen-left), on = anatomical copy. Swaps L/R pairs and negates X for every source; no recenter. body: on (bool)",
-    "set_feel": "Live feel / overlay flags. body: response, smoothing, mouth, hair_pin, hair_width, gaze_gain, gaze_smooth, use_visemes, show_face, show_skeleton, show_hair, show_ids, max_yaw_left, max_yaw_right, max_roll_left, max_roll_right (max_yaw / max_roll set both sides), max_pitch_up, max_pitch_down, max_size, max_look_x, max_look_y, head_sway (iFacialMocap: 0 rotates the head in place, 1 swings it round the neck like a webcam sees, 2 double)",
+    "set_feel": "Live feel / overlay flags. body: response, smoothing, mouth, hair_pin, hair_width, gaze_gain, gaze_smooth, use_visemes, show_face, show_skeleton, show_hair, show_ids, max_yaw_left, max_yaw_right, max_roll_left, max_roll_right (max_yaw / max_roll set both sides), max_pitch_up, max_pitch_down, max_size, max_look_x, max_look_y, head_sway (webcam and iFacialMocap: 0 rotates the head in place, 1 swings it round the neck like a webcam sees, 2 double), body_turn (share of the head's turn / nod / tilt the torso takes, 0..3)",
     "set_travel": "Character limiters, fixed to the rest still. body (partial ok): enabled, left, right, up, down (head room), body_left, body_right, body_up, body_down (body room), yaw, roll, pitch_up, pitch_down, eye, size. Room 0..1.2 face heights, eye 0..1, yaw/roll 0..80, pitch_up 0..50, pitch_down 0..32, size 0..0.7 (grow / shrink from rest when you step toward or away from the camera). The whole character moves as one piece and stops at the first wall. Merges onto current; no-op when unchanged. Ack status includes full travel_box; feel caps follow.",
     "fit_travel": "Fit the limiters to the loaded still: head and body room from the free space to the picture's edges, turn / tilt centred on the pose the still is drawn in. body: from? (default = start from the built-in limits, for a character with none yet; otherwise look up / down, eye range, size and enabled stay as they are). Ack status includes full travel_box; feel caps follow.",
     "calibrate": "Hold and capture a shape. body: id (rest|smile|sad|A|I|U|E|O|...)",
@@ -60,7 +64,7 @@ COMMANDS: dict[str, str] = {
     "set_skeleton_point": "Nudge a rest skeleton joint. body: id, x, y",
     "set_rest_point": "Move one rest face point (0-27) or iris (28-29) on the still and drop its overlay nudge. body: id, x, y (character pixels).",
     "set_hair": "Replace rest hair polygons. body: hair: [{class, polygon}] in character pixels.",
-    "set_point": "Nudge any overlay point. body: id, x, y (character pixels). Offset rides on live tracking.",
+    "set_point": "Nudge any overlay point. body: id, x, y (character pixels), seq? + session? (the frame the point was lined up on: the offset is measured on that frame's pose, else on the current one; another session's nudge is refused). Offset rides on live tracking.",
     "reset_points": "Clear overlay nudges. body: id? (omit = all).",
     "set_offsets": "Replace every overlay nudge, e.g. the ones a character saved. body: point_offsets: [{id, dx, dy}] (character pixels).",
     "generate": "Run the DiT once on the current overlay (still + points + hair). body: points?, hair?, skeleton?, iris?",
@@ -90,6 +94,7 @@ FEEL_KEYS = (
     "gaze_gain",
     "gaze_smooth",
     "head_sway",
+    "body_turn",
 )
 
 

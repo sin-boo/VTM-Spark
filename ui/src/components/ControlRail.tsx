@@ -225,6 +225,15 @@ export function ControlRail(props: Props) {
   const batchTitle = batchRates.length
     ? `${t('perf.batchTitle')}\n${t('perf.batchRates', { list: batchRates.join(' · ') })}`
     : t('perf.batchTitle')
+  // Which decoder is really running (read-only; shown on the Compile light).
+  const decoderNote =
+    s?.speed_mode_active === 'ultra'
+      ? t('perf.decoderUltra')
+      : s?.speed_mode_active === 'normal'
+        ? t('perf.decoderNormal')
+        : s?.speed_mode_active === 'eager'
+          ? t('perf.decoderEager')
+          : ''
   const ifm = props.lab?.ifm
   const destIp = ifm?.primary || ''
   const ifmLine = ifmListenLine(t, ifm)
@@ -681,6 +690,15 @@ export function ControlRail(props: Props) {
                 {t('stream.generateOnce')}
               </button>
             </div>
+            {virtualCam && s?.virtual_cam_width && s?.virtual_cam_height ? (
+              // The camera driver offers 1920x1080 by default and pads our square
+              // frame with black; only the receiving app can ask for our size.
+              <p className="hint">
+                {t('stream.camSizeHint', {
+                  size: `${s.virtual_cam_width}x${s.virtual_cam_height}`,
+                })}
+              </p>
+            ) : null}
             {s?.virtual_cam_error ? (
               <p className="status-error">{tr(s.virtual_cam_error)}</p>
             ) : null}
@@ -786,7 +804,7 @@ export function ControlRail(props: Props) {
                   <input
                     type="range"
                     min={0}
-                    max={20}
+                    max={100}
                     step={1}
                     value={s?.max_fps ?? STREAM_DEFAULTS.max_fps}
                     title={t('perf.maxFpsTitle')}
@@ -885,7 +903,7 @@ export function ControlRail(props: Props) {
                             : 'off'
                   }
                   lightTitle={
-                    s?.compile_detail
+                    (s?.compile_detail
                       ? tr(s.compile_detail)
                       : s?.fast_warming && !s?.compile_on
                         ? t('perf.boostBuilding')
@@ -899,7 +917,7 @@ export function ControlRail(props: Props) {
                                   : s?.compile_model
                                     ? 'Speed boost builds when the stream starts'
                                     : 'Speed boost off',
-                          )
+                          )) + (decoderNote ? ` · ${decoderNote}` : '')
                   }
                 />
               </div>

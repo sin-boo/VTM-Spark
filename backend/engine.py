@@ -67,6 +67,87 @@ STREAM_COMPILE_MODE_LADDER = (STREAM_COMPILE_MODE, "default")
 STREAM_COMPILE_WARMUP_RUNS = 2
 # Fast decode: Hybrid TinyVAE (same SD latents). SD-VAE stays for ref encode.
 STREAM_FAST_TINY_VAE = True
+# Fast + 1 step + no CFG: run the whole frame (pose map, DiT, decode) as one
+# CUDA graph (backend.graph_frame). ~10x fewer ms per key on a 5060 Ti.
+# VTM_GRAPH_FRAME=0 falls back to the eager path.
+STREAM_GRAPH_FRAME = os.environ.get("VTM_GRAPH_FRAME", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+# Graph decode ("ultra"): a PixelShuffle decoder distilled from the Hybrid
+# TinyVAE (backend.pixel_decoder, shipped in models/decoder) skips the 768^2
+# conv stage, ~11 ms a key instead of ~17 on a 5060 Ti. Without the file, or
+# once it fails, the graph decodes with the TinyVAE itself ("normal", the
+# eager picture); after that, keys run eager. VTM_FAST_DECODER=0 forces the
+# TinyVAE.
+STREAM_FAST_DECODER_NAME = "vtm-fast-decoder.pt"
+STREAM_FAST_DECODER = os.environ.get("VTM_FAST_DECODER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+# Graph precision: fp16 from Volta (sm_70) on; Pascal and older run fp16 at a
+# fraction of their fp32 rate, so they get an fp32 graph.
+# VTM_GRAPH_DTYPE=fp16|fp32 overrides.
+GRAPH_DTYPES = {"fp16": torch.float16, "fp32": torch.float32}
+STREAM_GRAPH_DTYPE = os.environ.get("VTM_GRAPH_DTYPE", "").strip().lower()
+
+
+def fast_decoder_path() -> Path:
+    from .paths import models_root
+
+    return models_root() / "decoder" / STREAM_FAST_DECODER_NAME
+
+
+def graph_dtype_name(capability: tuple[int, int] | None, override: str = "") -> str:
+    """'fp16' | 'fp32' for the frame graph on a GPU of this compute capability."""
+    if override in GRAPH_DTYPES:
+        return override
+    return "fp16" if capability is not None and tuple(capability) >= (7, 0) else "fp32"
+
+
+def nonfinite_frame_plan(dtype: str, mode: str = "normal") -> str:
+    """Next step after a frame graph returned NaN/Inf.
+
+    'fp32':   fp16 overflowed -- rebuild that mode's graph in fp32 and re-run the frame.
+    'normal': Ultra is bad in fp32 too, so suspect the fast decoder -- drop it for the
+              session and re-run on the TinyVAE graph (~17 ms/key, not eager's ~130).
+    'eager':  the Normal graph is bad in fp32 too -- keys leave the graph for the session.
+    """
+    if dtype == "fp16":
+        return "fp32"
+    return "normal" if mode == "ultra" else "eager"
+
+
+def finite_stream_inputs(
+    kps: np.ndarray, hair: np.ndarray | torch.Tensor | None
+) -> tuple[np.ndarray, np.ndarray | torch.Tensor | None]:
+    """Hide NaN/Inf keypoints and zero NaN/Inf hair before a key enters the frame graph.
+
+    A bad tracker frame would otherwise come out of the graph non-finite and be taken
+    for an fp16 overflow or a broken decoder, costing graph rebuilds and Ultra fast.
+    """
+    k = np.asarray(kps, dtype=np.float32)
+    if not np.isfinite(k).all():
+        k = k.copy()
+        k[~np.isfinite(k).all(axis=-1)] = 0.0  # (x, y, score, visible) = 0: point hidden
+    if hair is None:
+        return k, None
+    if isinstance(hair, torch.Tensor):
+        return k, torch.nan_to_num(hair, nan=0.0, posinf=0.0, neginf=0.0)
+    h = np.asarray(hair, dtype=np.float32)
+    if not np.isfinite(h).all():
+        h = np.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
+    return k, h
+
+
+def _is_oom(exc: BaseException) -> bool:
+    return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
+
+
 STREAM_FIXED_SEED = 42
 # Poses denoised per DiT call (better GPU occupancy, more keys/s, more lag).
 # Past 4 a 5060 Ti gains ~10% keys/s for 50% more VRAM, and the display
@@ -85,9 +166,12 @@ STREAM_INTERPOLATE = True
 # Cap on generated keys per second (0 = Auto). Idle time between keys is real
 # idle time, so a cap leaves GPU for other apps.
 STREAM_MAX_GEN_FPS = 0
-# = frame_interp.SHOW_FPS_MAX. The preview / virtual cam show at most this many
-# pictures a second, so any key past it is drawn and then thrown away.
-STREAM_MAX_GEN_FPS_LIMIT = 20
+# = frame_interp.SHOW_FPS_MAX. Auto fills this many shown pictures a second.
+STREAM_SHOW_FPS = 20.0
+# Highest Max FPS the slider allows. Above STREAM_SHOW_FPS the display speeds
+# up to the cap (show_fps_max), so the extra keys are shown, not thrown away.
+# The graph + Ultra decoder reaches ~70-80 keys/s on a 5060 Ti.
+STREAM_MAX_GEN_FPS_LIMIT = 100
 STREAM_MIN_BLEND = 0.05
 STREAM_MAX_BLEND = 1.0
 # Start the next DiT sample from the last generated latent (img2img hold).
@@ -97,6 +181,10 @@ STREAM_HOLD_LAST = True
 STREAM_HOLD_LAST_T = 0.28
 # Each hold also blends this much of the still latent so identity cannot drift.
 STREAM_HOLD_REF_PULL = 0.22
+# Held calls in a row before one starts from noise again. Each hold starts from
+# the last output with the same seed, so without a break a held face never
+# returns to what the still and pose alone give.
+STREAM_HOLD_MAX_CHAIN = 16
 IMAGE_SIZE = 768
 INFERENCE_TIMESTEP_SHIFT = 0.3
 NUM_KEYPOINTS = 37
@@ -201,13 +289,18 @@ def auto_gen_fps(enabled: object, count: object) -> float:
     """
     if interpolate_on(enabled) and _clip_inbetweens(count) < 0:
         return STREAM_AUTO_KEY_FPS
-    return float(STREAM_MAX_GEN_FPS_LIMIT) / float(effective_inbetweens(enabled, count) + 1)
+    return STREAM_SHOW_FPS / float(effective_inbetweens(enabled, count) + 1)
 
 
 def gen_cap(max_fps: object, enabled: object, count: object) -> float:
     """The key rate the stream is held to: the user's cap, else Auto."""
     cap = _clip_max_fps(max_fps)
     return float(cap) if cap > 0 else auto_gen_fps(enabled, count)
+
+
+def show_fps_max(max_fps: object) -> float:
+    """Pictures a second the display may show: 20, or the Max FPS cap above that."""
+    return max(STREAM_SHOW_FPS, float(_clip_max_fps(max_fps)))
 
 
 # Face travel in norm_crop. Below tight = full hold. Above loose = drop hold
@@ -237,6 +330,91 @@ def face_pose_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
     return float(np.mean(np.linalg.norm(delta, axis=1)))
 
 
+# A blink moves 2 of the 28 face points, so the mean travel above never sees
+# it: the hold kept starting shut frames from the open one and Snap laid the
+# open eye over them. lid_delta is the share of a blink made in one step;
+# a quarter of a blink counts as the loose travel of whatever reads it (the
+# hold's or Snap's, which is ~4x tighter). Under a tenth of a blink a step is
+# tracker wobble: a pixel on a shallow lid is that much, and counting it kept
+# Snap from ever blending a still face.
+_LID_MOVE_FULL = 0.25
+_LID_NOISE = 0.10
+_LIDS = ((11, 12, 13), (17, 18, 19))  # upper lids, as in model_layout.EYE_LIDS
+
+
+def lid_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Largest share of a blink one lid made between two poses: the change in
+    its mid's height over its corner line, per the more open of the two."""
+    if a is None or b is None:
+        return 0.0
+    left = np.asarray(a, dtype=np.float32)
+    right = np.asarray(b, dtype=np.float32)
+    if left.ndim != 2 or right.ndim != 2 or left.shape[0] < 20 or right.shape[0] < 20:
+        return 0.0
+
+    def height(k: np.ndarray, eye: tuple[int, int, int]) -> float | None:
+        """Lid mid above its corner line, in corner-line lengths."""
+        outer, mid, inner = eye
+        if min(float(k[i, 3]) for i in eye) <= 0.35:
+            return None
+        chord = k[inner, :2] - k[outer, :2]
+        span2 = float(chord[0] * chord[0] + chord[1] * chord[1])
+        if span2 < 1e-10:
+            return None
+        d = k[mid, :2] - k[outer, :2]
+        return float(chord[1] * d[0] - chord[0] * d[1]) / span2
+
+    out = 0.0
+    for eye in _LIDS:
+        ha, hb = height(left, eye), height(right, eye)
+        if ha is not None and hb is not None:
+            out = max(out, abs(hb - ha) / max(abs(ha), abs(hb), 0.05))
+    return out
+
+
+# A shut eye drawn over the still's own (front-on) pose copies the still's open
+# eye in: a one-step sample averages it with the lid into pale grey patches. A
+# head turned off the still draws clean skin, so while the eyes shut the model
+# is told the still was turned this many degrees. Only the reference keypoints
+# move; where the face is drawn does not. A squint wants the still's eye, so
+# the turn starts at SHUT_REF_TURN_FROM shut and is whole at SHUT_REF_TURN_AT.
+SHUT_REF_TURN_DEG = 20.0
+SHUT_REF_TURN_FROM = 0.6
+SHUT_REF_TURN_AT = 0.95
+
+
+def shut_ref_turn(shut: float) -> float:
+    """Degrees to turn the reference for eyes ``shut`` (0 open .. 1 shut)."""
+    t = (float(shut) - SHUT_REF_TURN_FROM) / (SHUT_REF_TURN_AT - SHUT_REF_TURN_FROM)
+    t = min(max(t, 0.0), 1.0)
+    return SHUT_REF_TURN_DEG * t * t * (3.0 - 2.0 * t)
+
+
+def turned_ref(ref_model: np.ndarray, degrees: float) -> np.ndarray:
+    """``ref_model`` rows turned ``degrees`` in the image plane about the face's centre."""
+    out = np.asarray(ref_model, dtype=np.float32).copy()
+    if abs(float(degrees)) < 1e-6:
+        return out
+    seen = out[:, 3] >= 0.5
+    face = out[:28][seen[:28]]
+    if not len(face):
+        return out
+    centre = face[:, :2].astype(np.float64).mean(axis=0)
+    t = np.radians(float(degrees))
+    rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    out[seen, :2] = (centre + (out[seen, :2].astype(np.float64) - centre) @ rot.T).astype(np.float32)
+    return out
+
+
+def pose_move(
+    a: np.ndarray | None, b: np.ndarray | None, *, loose: float = _HOLD_MOVE_LOOSE
+) -> float:
+    """Face travel between two poses, with a blink counted as a move: a
+    quarter of a blink in one step is ``loose`` travel."""
+    lid = max(lid_delta(a, b) - _LID_NOISE, 0.0) / (_LID_MOVE_FULL - _LID_NOISE)
+    return max(face_pose_delta(a, b), float(loose) * lid)
+
+
 def hold_ease(delta: float, *, tight: float = _HOLD_MOVE_TIGHT, loose: float = _HOLD_MOVE_LOOSE) -> float:
     """1 = keep hold, 0 = drop it. Linear between ``tight`` and ``loose``."""
     span = max(float(loose) - float(tight), 1e-6)
@@ -255,6 +433,11 @@ def snap_alpha(alpha: float, move: float) -> float:
     """Share of the new key to show: ``alpha`` when still, 1 once the face moves."""
     ease = hold_ease(move, tight=_SNAP_MOVE_TIGHT, loose=_SNAP_MOVE_LOOSE)
     return 1.0 - (1.0 - float(alpha)) * ease
+
+
+def snap_move(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """``pose_move`` on Snap's scale, for ``snap_alpha``."""
+    return pose_move(a, b, loose=_SNAP_MOVE_LOOSE)
 
 
 def hold_plan(move: float, drift: float) -> tuple[float, float]:
@@ -288,11 +471,17 @@ def anchor_hold_latent(
     return (1.0 - amount) * last + amount * still
 
 
-def keypoints_for_model(keypoints: np.ndarray, layout: str) -> np.ndarray:
+def keypoints_for_model(
+    keypoints: np.ndarray,
+    layout: str,
+    *,
+    ref: np.ndarray | None = None,
+    lower_lids: Any = None,
+) -> np.ndarray:
     """Map KEYPOINT_SCHEMA rows to the layout a checkpoint expects."""
     from .model_layout import keypoints_for_model as _convert
 
-    return _convert(_as_keypoints37(keypoints), layout)
+    return _convert(_as_keypoints37(keypoints), layout, ref=ref, lower_lids=lower_lids)
 
 
 def _keypoints_for_model(
@@ -791,6 +980,22 @@ def _replace_legacy_sidecar(
         return loaded, sidecar, "legacy-sidecar"
 
 
+def detect_reference_lower_lids(
+    image_rgb: np.ndarray, device: str | None = "cpu"
+) -> list[list[list[float]]] | None:
+    """The still's own lower eyelids, or None (the model then gets each upper
+    lid mirrored, which cannot close a tall eye). Never raises."""
+    try:
+        from .ref_pose_fit import detect_lower_lids
+
+        lids = detect_lower_lids(image_rgb, device=device)
+    except Exception as exc:
+        print(f"[ref-fit] lower eyelids not found: {exc}")
+        return None
+    print(f"[ref-fit] lower eyelids: {'found' if lids else 'not found (mirrored upper lids)'}")
+    return lids
+
+
 def resolve_ref_keypoints(
     image_path: Path,
     keypoints: np.ndarray | Path | str | None = None,
@@ -1279,6 +1484,8 @@ class StreamEngine:
         self._ref_face_latent: torch.Tensor | None = None
         self._ref_keypoints: np.ndarray | None = None
         self._ref_keypoints_model: np.ndarray | None = None
+        # The reference still's own lower eyelids (model_layout.lower_lid_shape).
+        self._lower_lids: list[list[list[float]]] | None = None
         # Rest pose at apply/calibrate time — mesh reset restores this, not the
         # last drag (which is already baked into ``_ref_keypoints``).
         self._ref_keypoints_session_base: np.ndarray | None = None
@@ -1297,6 +1504,8 @@ class StreamEngine:
         self.hold_last = STREAM_HOLD_LAST
         self._last_gen_latent: torch.Tensor | None = None
         self._last_hold_kps: np.ndarray | None = None
+        # Calls in a row that started from the last output (see STREAM_HOLD_MAX_CHAIN).
+        self._hold_chain = 0
         self._body_skel_method: str = "unknown"
         self._body_lost: bool = False
         self._last_driven_body: np.ndarray | None = None
@@ -1306,6 +1515,18 @@ class StreamEngine:
         self._decode_lock = threading.Lock()
         self._decode_stream: "torch.cuda.Stream | None" = None
         self.image_size = IMAGE_SIZE
+        # Whole-frame CUDA graph (Fast, 1 step, no CFG), one per graph mode.
+        # Built at warmup or on the first eligible key; dropped whenever
+        # weights move or change.
+        self._graph_frames: dict[str, Any] = {}
+        # Whether models/decoder/vtm-fast-decoder.pt exists; read once per load, not per key.
+        self._fast_decoder_present: bool | None = None
+        self._graph_failed = False
+        self._ultra_failed = False
+        # A compiled graph failed: build the rest of this session's graphs uncompiled.
+        self._graph_skip_compile = False
+        # Modes whose fp16 graph gave a NaN/Inf frame: rebuilt in fp32.
+        self._graph_fp32_modes: set[str] = set()
 
     def set_stream_batch_size(self, batch_size: int) -> None:
         """Poses per DiT forward (1..STREAM_BATCH_MAX)."""
@@ -1323,7 +1544,7 @@ class StreamEngine:
         kps = np.asarray(self._ref_keypoints, dtype=np.float32)
         if bsz > 1:
             kps = np.stack([kps] * bsz, axis=0)
-        saved = (self.hold_last, self._last_gen_latent, self._last_hold_kps)
+        saved = (self.hold_last, self._last_gen_latent, self._last_hold_kps, self._hold_chain)
         self.hold_last = False
         times: list[float] = []
         try:
@@ -1332,7 +1553,7 @@ class StreamEngine:
                 self.generate_batch_from_keypoints(kps, sanitize="constrained")
                 times.append(time.perf_counter() - t0)
         finally:
-            self.hold_last, self._last_gen_latent, self._last_hold_kps = saved
+            self.hold_last, self._last_gen_latent, self._last_hold_kps, self._hold_chain = saved
         # The first run pays leftover lazy setup; the median ignores stalls.
         timed = sorted(times[1:])
         return timed[len(timed) // 2]
@@ -1341,8 +1562,10 @@ class StreamEngine:
         self.hold_last = bool(enabled)
 
     def clear_last_gen_latent(self) -> None:
+        """The next call starts from noise: the frame it would continue is gone."""
         self._last_gen_latent = None
         self._last_hold_kps = None
+        self._hold_chain = 0
 
     @property
     def fast_status(self) -> str:
@@ -1356,6 +1579,11 @@ class StreamEngine:
         else:
             parts.append("cpu")
         parts.append(f"compile:{self.compile_status}")
+        gf = self._graph_frame
+        if gf is not None:
+            parts.append(f"graph:{getattr(gf, 'decoder_name', 'tinyvae')}/{getattr(gf, 'dtype_name', 'fp16')}")
+        elif self._graph_failed:
+            parts.append("graph-fail")
         if self.vae_tiny is not None:
             label = (self._tiny_vae_id or "tiny").split("/")[-1]
             parts.append(f"tinyvae:{label}")
@@ -1379,6 +1607,8 @@ class StreamEngine:
         if not _triton_available():
             return "fail"
         if self._model_compiled and self._compile_verified:
+            return "on"
+        if self._graph_frame is not None and self._graph_frame.compiled:
             return "on"
         return "pending"
 
@@ -1408,6 +1638,8 @@ class StreamEngine:
                 self._restore_eager_model()
             except Exception:
                 pass
+            with self._cuda_lock:  # not mid-capture on the stream thread
+                self._drop_graph_frame()
             self._compile_failed = False
             self._compile_verified = False
 
@@ -1421,6 +1653,12 @@ class StreamEngine:
             self._restore_eager_model()
         except Exception:
             pass
+        with self._cuda_lock:  # not mid-capture on the stream thread
+            self._drop_graph_frame()
+            # A compile failure may be what turned the graph or Ultra off: retry both.
+            self._graph_failed = False
+            self._ultra_failed = False
+            self._graph_skip_compile = False
         self._compile_failed = False
         self._compile_verified = False
 
@@ -1519,6 +1757,245 @@ class StreamEngine:
         if self.fast_mode and self._ensure_tiny_vae():
             return decode_tiny_vae(self.vae_tiny, latents), "tiny"
         return decode_sd_vae(self.vae, latents), "sd"
+
+    def _graph_ok(
+        self,
+        steps: int | None = None,
+        pose_cfg: float | None = None,
+        id_cfg: float | None = None,
+    ) -> bool:
+        """Whether keys go through the whole-frame CUDA graph (see graph_frame)."""
+        if not (STREAM_GRAPH_FRAME and self.fast_mode and self.device.type == "cuda"):
+            return False
+        if self._graph_failed or not STREAM_FAST_TINY_VAE:
+            return False
+        if self._tiny_vae_failed and not self.ultra_available:
+            # Normal decodes with the TinyVAE; Ultra has its own local decoder, so an
+            # offline PC whose TinyVAE download failed still gets the graph.
+            return False
+        if int(steps if steps is not None else self.num_steps) != 1:
+            return False
+        if STREAM_FAST_DISABLE_CFG:
+            pose_cfg = id_cfg = 1.0
+        pose = float(pose_cfg if pose_cfg is not None else self.pose_cfg_scale)
+        ident = float(id_cfg if id_cfg is not None else self.id_cfg_scale)
+        return abs(pose - 1.0) < 1e-6 and abs(ident - 1.0) < 1e-6
+
+    @property
+    def ultra_available(self) -> bool:
+        """The distilled fast decoder is installed and has not failed this session."""
+        if self._fast_decoder_present is None:
+            self._fast_decoder_present = fast_decoder_path().is_file()
+        return bool(STREAM_FAST_DECODER and not self._ultra_failed and self._fast_decoder_present)
+
+    @property
+    def graph_mode(self) -> str:
+        """Decoder the frame graph runs: 'ultra' (fast decoder) or 'normal' (TinyVAE fallback)."""
+        return "ultra" if self.ultra_available else "normal"
+
+    @property
+    def active_speed_mode(self) -> str:
+        """What keys run on right now: the graph mode, or 'eager' when they skip the graph."""
+        return self.graph_mode if self._graph_ok() else "eager"
+
+    def graph_dtype(self, mode: str) -> str:
+        """'fp16' | 'fp32' for this mode's frame graph."""
+        if mode in self._graph_fp32_modes:
+            return "fp32"
+        cap = None
+        if self.device.type == "cuda":
+            try:
+                cap = torch.cuda.get_device_capability(self.device)
+            except Exception:
+                cap = None
+        return graph_dtype_name(cap, STREAM_GRAPH_DTYPE)
+
+    @property
+    def _graph_frame(self):
+        return self._graph_frames.get(self.graph_mode)
+
+    def _graph_decoder(self, mode: str):
+        """(decoder module, label) for a graph mode."""
+        from .graph_frame import TinyVaeDecode
+
+        if mode == "ultra":
+            from .pixel_decoder import PixelShuffleDecoder
+
+            path = fast_decoder_path()
+            return PixelShuffleDecoder.load(path).to(self.device), path.name
+        return TinyVaeDecode(self.vae_tiny), "tinyvae"
+
+    def _graph_compile_mode(self) -> str | None:
+        """torch.compile mode for the frame graph, or None to capture it uncompiled."""
+        if self._graph_skip_compile or not self.compile_model or not hasattr(torch, "compile"):
+            return None
+        if self.device.type != "cuda":
+            return None
+        if not _triton_available():
+            return None
+        try:
+            if torch.cuda.get_device_capability(self.device) < (7, 0):
+                return None
+        except Exception:
+            return None
+        return STREAM_COMPILE_MODE
+
+    def _build_graph_frame(self, mode: str, dtype: str):
+        from .graph_frame import GraphedFrame
+
+        compile_mode = self._graph_compile_mode()
+        decoder, decoder_name = self._graph_decoder(mode)
+        print(f"[graph] building {mode} frame graph ({dtype}, decoder={decoder_name}, "
+              f"compile={compile_mode or 'off'}) ...")
+        gf = GraphedFrame(
+            self._eager_model if self._eager_model is not None else self.model,
+            decoder,
+            seed=STREAM_FIXED_SEED,
+            dtype=GRAPH_DTYPES[dtype],
+            compile_mode=compile_mode,
+        )
+        gf.mode, gf.dtype_name, gf.decoder_name = mode, dtype, decoder_name
+        return gf
+
+    def _ensure_graph_frame(self, batch_size: int | None = None):
+        """Build (and capture ``batch_size``) the frame graph for the current graph mode.
+
+        None if it cannot run. Ultra that fails drops to Normal; Normal that fails
+        drops to the eager path.
+        """
+        if self._graph_failed:
+            return None
+        mode = self.graph_mode
+        gf = self._graph_frames.get(mode)
+        failure: BaseException | None = None
+        if gf is None:
+            if self.model is None or (mode == "normal" and not self._ensure_tiny_vae()):
+                return None
+            try:
+                gf = self._build_graph_frame(mode, self.graph_dtype(mode))
+                self._graph_frames[mode] = gf
+            except Exception as exc:
+                failure = exc.with_traceback(None)
+        if failure is None and batch_size is not None:
+            try:
+                t0 = time.perf_counter()
+                with torch.inference_mode():
+                    gf.prepare(int(batch_size))
+                print(f"[graph] {mode} batch={int(batch_size)} captured in {time.perf_counter() - t0:.1f}s")
+            except Exception as exc:
+                failure = exc.with_traceback(None)
+        if failure is None:
+            return gf
+        # Out of the `except` (and its traceback) so the failed graph's pool can be freed.
+        gf = None
+        return self._graph_mode_failed(mode, failure, batch_size)
+
+    def _graph_mode_failed(self, mode: str, exc: BaseException, batch_size: int | None):
+        self._drop_graph_frame(mode)
+        if _is_oom(exc):
+            if batch_size is not None and int(batch_size) > 1:
+                # Not a broken mode: let the batch tuner / OOM recovery step the batch down.
+                raise exc
+            # Batch 1 cannot step down: the graph's own fp16 copies do not fit next to
+            # the eager model (small GPU, or OBS / a game holding VRAM). Rebuilding on
+            # every key would fail every key, so keys run eager for the session.
+            self._graph_fallback(f"out of GPU memory at batch 1: {exc}")
+            return None
+        if self._graph_compile_mode() is not None:
+            # Inductor / Triton break with some drivers and toolchains; that is not the
+            # decoder's or the graph's fault, so rebuild uncompiled before blaming them.
+            self._graph_skip_compile = True
+            _clear_cuda_errors()
+            print(f"[graph] compiled {mode} graph failed, rebuilding without compile: {exc}")
+            return self._ensure_graph_frame(batch_size)
+        if mode == "ultra":
+            self._ultra_failed = True
+            _clear_cuda_errors()
+            print(f"[graph] fast decoder unavailable, using the TinyVAE graph: {exc}")
+            return self._ensure_graph_frame(batch_size)
+        self._graph_fallback(exc)
+        return None
+
+    def _graph_fallback(self, reason: BaseException | str) -> None:
+        """Stay on the eager path for this session after a graph build/replay error."""
+        self._graph_failed = True
+        self._drop_graph_frame()
+        _clear_cuda_errors()
+        print(f"[graph] disabled, using the eager path: {reason}")
+
+    def _run_graph_frame(
+        self,
+        kps_model: np.ndarray,
+        hair_maps: np.ndarray | torch.Tensor | None,
+        prev: torch.Tensor | None,
+        start_t: float,
+        kps_ref: np.ndarray | None = None,
+    ) -> tuple[torch.Tensor, np.ndarray, float] | None:
+        """One key through the frame graph: (latents, uint8 images, seconds), or None.
+
+        None means run this key eager. A NaN/Inf frame goes by ``nonfinite_frame_plan``:
+        an fp16 graph is rebuilt in fp32 and the key re-run; a bad fp32 Ultra graph hands
+        over to Normal; a bad fp32 Normal graph turns the graph off.
+        """
+        kps_model, hair_maps = finite_stream_inputs(kps_model, hair_maps)
+        gf = self._ensure_graph_frame()
+        if gf is None:
+            return None
+        mode, dtype = gf.mode, gf.dtype_name
+        failure: BaseException | None = None
+        try:
+            t0 = time.perf_counter()
+            latents, images, finite = gf.run(
+                kps_target=kps_model,
+                kps_ref=self._ref_keypoints_model if kps_ref is None else kps_ref,
+                ref_latent=self._ref_latent,
+                ref_face_latent=self._ref_face_latent,
+                hair_maps=hair_maps,
+                last_latent=prev,
+                start_t=start_t,
+            )
+            seconds = time.perf_counter() - t0
+        except Exception as exc:
+            failure = exc.with_traceback(None)
+        if failure is not None:
+            gf = None  # outside `except`, so the drop below can free its memory pool
+            # A new batch size is captured inside run(), so compile and OOM failures land
+            # here too; _graph_mode_failed sorts them out.
+            bsz = int(kps_model.shape[0]) if np.ndim(kps_model) == 3 else 1
+            if self._graph_mode_failed(mode, failure, bsz) is None:
+                return None
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
+        if finite:
+            return latents, images, seconds
+        del gf
+        plan = nonfinite_frame_plan(dtype, mode)
+        if plan == "fp32":
+            print(f"[graph] {mode} frame came out NaN/Inf in fp16, rebuilding that graph in fp32")
+            self._graph_fp32_modes.add(mode)
+            self._drop_graph_frame(mode)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
+        if plan == "normal":
+            print("[graph] Ultra frame came out NaN/Inf in fp32, using the Normal decoder")
+            self._ultra_failed = True
+            self._drop_graph_frame(mode)
+            return self._run_graph_frame(kps_model, hair_maps, prev, start_t, kps_ref)
+        self._graph_fallback(f"{mode} frame came out NaN/Inf in {dtype}")
+        return None
+
+    def _drop_graph_frame(self, mode: str | None = None) -> None:
+        """Free one mode's frame graph, or all of them."""
+        if mode is None:
+            if not self._graph_frames:
+                return
+            self._graph_frames.clear()
+        elif self._graph_frames.pop(mode, None) is None:
+            return
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     def _restore_eager_model(self) -> None:
         eager = self._eager_model
@@ -1666,6 +2143,12 @@ class StreamEngine:
             self._restore_eager_model()
         except Exception:
             pass
+        self._drop_graph_frame()
+        self._graph_failed = False
+        self._ultra_failed = False
+        self._graph_skip_compile = False
+        self._fast_decoder_present = None
+        self._graph_fp32_modes.clear()
         self.model = None
         self._eager_model = None
         self._model_compiled = False
@@ -1708,6 +2191,7 @@ class StreamEngine:
                 self._restore_eager_model()
             except Exception:
                 pass
+            self._drop_graph_frame()
             cpu = torch.device("cpu")
             self.model = _mod_to(self.model, cpu)
             self._eager_model = self.model
@@ -1786,7 +2270,7 @@ class StreamEngine:
                 and self._ref_keypoints is not None
                 and Path(ref).suffix.lower() != ".vtm"
             ):
-                self._set_reference_locked(ref, self._ref_keypoints)
+                self._set_reference_locked(ref, self._ref_keypoints, lower_lids=self._lower_lids)
             return path
 
     def checkpoint_name(self) -> str:
@@ -1839,6 +2323,8 @@ class StreamEngine:
             path, keypoints, skip_crop=bool(skip_crop), fit_device="cpu"
         )
 
+        lower_lids = detect_reference_lower_lids(arr)
+
         print(f"Waiting for GPU lock to encode reference {path.name} …")
         _tick(0.55, "Encoding reference…")
         with self._cuda_lock:
@@ -1849,6 +2335,7 @@ class StreamEngine:
                 pose_source=pose_source,
                 skip_crop=bool(skip_crop),
                 image_arr=arr,
+                lower_lids=lower_lids,
             )
         _tick(0.92, "Building preview…")
         return out
@@ -1862,6 +2349,7 @@ class StreamEngine:
         kps_path: Path | None = None,
         pose_source: str | None = None,
         image_arr: np.ndarray | None = None,
+        lower_lids: Any = None,
     ) -> Path:
         if not self._ready:
             self.load()
@@ -1886,6 +2374,10 @@ class StreamEngine:
                 path, keypoints, skip_crop=bool(skip_crop), fit_device="cpu"
             )
         used_neutral = pose_source == "neutral"
+        from .model_layout import valid_lower_lids
+
+        # Installed with the reference: a failed encode keeps the old still's lids.
+        lids = valid_lower_lids(lower_lids)
 
         if (
             self._ref_path == path
@@ -1894,6 +2386,11 @@ class StreamEngine:
             and self._ref_keypoints_model is not None
             and np.allclose(self._ref_keypoints, kps, atol=1e-5)
         ):
+            if lids != self._lower_lids:
+                # The last frame was drawn against the old lids; do not continue it.
+                self.clear_last_gen_latent()
+            self._lower_lids = lids
+            self._ref_keypoints_model = self._model_keypoints(kps, ref=kps)
             if self._ref_rig is None:
                 from .live_retarget import build_reference_rig
 
@@ -1923,7 +2420,7 @@ class StreamEngine:
             )
         use_face = bool(self._cfg.get("use_ref_face_tokens", True))
         face_size = int(self._cfg.get("ref_face_size", 32))
-        kps_model = keypoints_for_model(kps, self.keypoint_layout)
+        kps_model = keypoints_for_model(kps, self.keypoint_layout, ref=kps, lower_lids=lids)
         print(
             f"[pose-diag] model keypoint layout: {self.keypoint_layout} "
             "(runtime mesh remains KEYPOINT_SCHEMA)"
@@ -1957,6 +2454,7 @@ class StreamEngine:
         # replace them with encode_reference's tensor after a bad pixel remap.
         self._ref_keypoints = kps
         self._ref_keypoints_model = kps_model
+        self._lower_lids = lids
         self._ref_keypoints_session_base = kps.copy()
         from .live_retarget import build_reference_rig
 
@@ -2022,6 +2520,7 @@ class StreamEngine:
         skip_crop: bool,
         path: Path | str,
         pose_source: str = "character_pack",
+        lower_lids: Any = None,
     ) -> Path:
         """Install a pre-encoded reference without running the VAE."""
         if not self._ready:
@@ -2030,7 +2529,10 @@ class StreamEngine:
                     self.load()
         dest = Path(path)
         kps = sanitize_normalized_keypoints(np.asarray(keypoints, dtype=np.float32))
-        kps_model = keypoints_for_model(kps, self.keypoint_layout)
+        from .model_layout import valid_lower_lids
+
+        lids = valid_lower_lids(lower_lids)
+        kps_model = keypoints_for_model(kps, self.keypoint_layout, ref=kps, lower_lids=lids)
         latent = torch.from_numpy(np.asarray(ref_latent, dtype=np.float32))
         if latent.ndim == 3:
             latent = latent.unsqueeze(0)
@@ -2053,6 +2555,7 @@ class StreamEngine:
         self.clear_last_gen_latent()
         self._ref_keypoints = kps
         self._ref_keypoints_model = kps_model
+        self._lower_lids = lids
         self._ref_keypoints_session_base = kps.copy()
         from .live_retarget import build_reference_rig
 
@@ -2069,6 +2572,37 @@ class StreamEngine:
         )
         return dest
 
+    def _model_keypoints(self, kps: np.ndarray, *, ref: np.ndarray | None = None) -> np.ndarray:
+        """``kps`` in the checkpoint's layout, lower lids from the reference."""
+        return keypoints_for_model(
+            kps,
+            self.keypoint_layout,
+            ref=self._ref_keypoints if ref is None else ref,
+            lower_lids=self._lower_lids,
+        )
+
+    def _shut_eye_ref(self, kps_batch: np.ndarray) -> np.ndarray | None:
+        """Model-layout reference for this call: turned while the eyes shut
+        (``shut_ref_turn``), so the still's open eye is not copied in. One
+        reference per call, by the most shut key in the batch."""
+        ref = self._ref_keypoints_model
+        if ref is None or self._ref_keypoints is None:
+            return ref
+        from .model_layout import eye_shut
+
+        shut = max(eye_shut(kps_batch[i], self._ref_keypoints) for i in range(kps_batch.shape[0]))
+        degrees = shut_ref_turn(shut)
+        return turned_ref(ref, degrees) if degrees > 0.0 else ref
+
+    def set_lower_lids(self, lower_lids: Any) -> None:
+        """Install the reference's own lower eyelids (``lower_lid_shape``)."""
+        from .model_layout import valid_lower_lids
+
+        self._lower_lids = valid_lower_lids(lower_lids)
+        if self._ref_keypoints is not None:
+            self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
+            self.clear_last_gen_latent()
+
     def adopt_ref_keypoints(
         self,
         keypoints: np.ndarray,
@@ -2084,7 +2618,9 @@ class StreamEngine:
         """
         kps = _as_keypoints37(keypoints).copy()
         self._ref_keypoints = kps
-        self._ref_keypoints_model = keypoints_for_model(kps, self.keypoint_layout)
+        self._ref_keypoints_model = self._model_keypoints(kps)
+        # The last frame was drawn against the old rest; do not continue it.
+        self.clear_last_gen_latent()
         from .live_retarget import build_reference_rig
 
         self._ref_rig = build_reference_rig(kps)
@@ -2161,11 +2697,13 @@ class StreamEngine:
         kps = sanitize_normalized_keypoints(
             fitted, repair_mouth=False, repair_nose=False
         )
+        # The same still keeps its lower lids; another is read afresh.
+        lids = self._lower_lids if ref_path == self._ref_path else detect_reference_lower_lids(arr)
         with self._cuda_lock:
             # Force encode even if path matches (keypoints changed).
             self._ref_path = None
             self._set_reference_locked(
-                ref_path, kps, skip_crop=bool(skip_crop), image_arr=arr
+                ref_path, kps, skip_crop=bool(skip_crop), image_arr=arr, lower_lids=lids
             )
             self._ref_pose_source = "calibrated"
             saved = save_sidecar_keypoints(ref_path, kps)
@@ -2185,6 +2723,9 @@ class StreamEngine:
         keys: list[str] = []
         if self.fast_mode and STREAM_FAST_TINY_VAE and self.vae_tiny is None:
             keys.append("tiny_vae")
+        if self._graph_ok():
+            keys.append("graph")
+            return keys
         will_compile = (
             self.fast_mode
             and self.compile_model
@@ -2232,17 +2773,17 @@ class StreamEngine:
             if self._ref_keypoints is None:
                 return
             if self._ref_keypoints_model is None:
-                self._ref_keypoints_model = keypoints_for_model(
-                    self._ref_keypoints, self.keypoint_layout
-                )
+                self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
             if self.fast_mode:
                 if "tiny_vae" in stages:
                     _stage("tiny_vae", "Loading fast decoder")
                 self._ensure_tiny_vae()
+            use_graph = self._graph_ok(*self._resolve_generate_settings(num_steps))
 
         # Compile outside the lock — inductor can take a long time and was
         # blocking Apply ref ("Encoding reference…") the whole time.
-        if self.fast_mode:
+        # The frame graph compiles its own fp16 copy, so skip the fp32 wrap.
+        if self.fast_mode and not use_graph:
             if "compile_wrap" in stages:
                 _stage("compile_wrap", "Compiling model")
             self._maybe_compile_model(STREAM_COMPILE_MODE)
@@ -2257,6 +2798,20 @@ class StreamEngine:
             self.ensure_gpu()
             steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
             warm_steps = max(1, min(steps, 4))
+
+            if use_graph and self._graph_ok(steps, pose_cfg, id_cfg):
+                _stage("graph", "Preparing fast path")
+                if self._ensure_graph_frame(warm_batch) is not None:
+                    # One key now, so a NaN/Inf (fp16 overflow, bad decoder) is rebuilt
+                    # here rather than freezing the first streamed key.
+                    probe = self._ref_keypoints_model
+                    if warm_batch > 1:
+                        probe = np.stack([probe] * warm_batch, axis=0)
+                    with torch.inference_mode():
+                        ok = self._run_graph_frame(probe, None, None, 0.0) is not None
+                    if ok:
+                        _stage("done", "Ready")
+                        return
 
             def _run_denoise_warmups(
                 runs: int, *, batch_size: int = 1
@@ -2473,10 +3028,14 @@ class StreamEngine:
         )
 
         t1 = time.perf_counter()
-        with torch.inference_mode():
-            images_arr, decode_kind = self._decode_latents(result["latents"])
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
+        if result.get("images_u8") is not None:
+            # Frame graph decoded inside the same replay; its time is in denoise_s.
+            images_arr, decode_kind = result["images_u8"], "tiny-graph"
+        else:
+            with torch.inference_mode():
+                images_arr, decode_kind = self._decode_latents(result["latents"])
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
         decode_s = time.perf_counter() - t1
 
         elapsed = time.perf_counter() - result["start"]
@@ -2640,15 +3199,14 @@ class StreamEngine:
 
         kps_model = np.stack(
             [
-                keypoints_for_model(block_model_slots(kps_batch[i]), self.keypoint_layout)
+                self._model_keypoints(block_model_slots(kps_batch[i]))
                 for i in range(kps_batch.shape[0])
             ],
             axis=0,
         )
         if self._ref_keypoints_model is None:
-            self._ref_keypoints_model = keypoints_for_model(
-                self._ref_keypoints, self.keypoint_layout
-            )
+            self._ref_keypoints_model = self._model_keypoints(self._ref_keypoints)
+        ref_model = self._shut_eye_ref(kps_batch)
 
         steps, pose_cfg, id_cfg = self._resolve_generate_settings(num_steps)
 
@@ -2663,9 +3221,14 @@ class StreamEngine:
         hold_last = bool(self.hold_last)
         now_kps = kps_batch[-1]
         prev = self._last_gen_latent if hold_last else None
+        chain = int(getattr(self, "_hold_chain", 0) or 0)
+        if chain >= STREAM_HOLD_MAX_CHAIN:
+            # A long hold starts over once from noise, so its error cannot compound.
+            prev = None
         start_t = 0.0
         if prev is not None:
-            move = face_pose_delta(self._last_hold_kps, now_kps)
+            move = pose_move(self._last_hold_kps, now_kps)
+            # Not pose_move: eyes held shut are a still face, fine to hold.
             drift = face_pose_delta(self._ref_keypoints, now_kps)
             start_t, pull = hold_plan(move, drift)
             if start_t <= 1e-4:
@@ -2673,13 +3236,32 @@ class StreamEngine:
                 start_t = 0.0
             else:
                 prev = anchor_hold_latent(prev, self._ref_latent, pull=pull)
+        if self._graph_ok(steps, pose_cfg, id_cfg):
+            graphed = self._run_graph_frame(kps_model, hair_maps, prev, start_t, ref_model)
+            if graphed is not None:
+                latents, images_u8, denoise_s = graphed
+                self._last_gen_latent = latents[-1:].detach().clone()
+                self._last_hold_kps = now_kps.copy()
+                self._hold_chain = chain + 1 if prev is not None else 0
+                return {
+                    "latents": latents,
+                    "images_u8": images_u8,
+                    "denoise_s": denoise_s,
+                    "start": start,
+                    "steps": steps,
+                    "pose_cfg": pose_cfg,
+                    "id_cfg": id_cfg,
+                    "keypoints_used": kps_batch,
+                    "batch": int(kps_batch.shape[0]),
+                    "hold_last": bool(prev is not None),
+                }
         with torch.inference_mode():
             t0 = time.perf_counter()
             latents = denoise_keypoint(
                 self.model,
                 keypoints_target=kps_model,
                 ref_latent=self._ref_latent,
-                ref_keypoints=self._ref_keypoints_model,
+                ref_keypoints=ref_model,
                 ref_face_latent=self._ref_face_latent,
                 num_steps=steps,
                 pose_cfg_scale=pose_cfg,
@@ -2696,9 +3278,12 @@ class StreamEngine:
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
             denoise_s = time.perf_counter() - t0
-        # Clone so decode (side CUDA stream) does not race the next mix.
-        self._last_gen_latent = latents[-1:].detach().clone()
+        # Clone so decode (side CUDA stream) does not race the next mix. A NaN/Inf key
+        # is not held, or every later hold-last key would inherit it.
+        last = latents[-1:].detach()
+        self._last_gen_latent = last.clone() if bool(torch.isfinite(last).all()) else None
         self._last_hold_kps = now_kps.copy()
+        self._hold_chain = chain + 1 if prev is not None else 0
 
         return {
             "latents": latents,
