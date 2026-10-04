@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from .__main__ import claim_port
+from .__main__ import claim_port, seed_defaults
 from .bind import probe_state
 from .ports import HOST, PORT
 
@@ -145,6 +145,7 @@ def main() -> int:
     code = claim_port()
     if code is not None:
         return code
+    seed_defaults()
 
     import uvicorn
 

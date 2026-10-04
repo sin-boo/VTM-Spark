@@ -596,7 +596,8 @@ class FaceBench:
             return self.status(publish=True)
         self.overlay_bgr = None
         self.rest_pts = None
-        book.clear()
+        # Authored shapes are the plan, not this still's: the track / set_rest
+        # that follows rebases them onto the new face.
         self._hair = []
         self._hair_still = []
         self._hair_rig = None

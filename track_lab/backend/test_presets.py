@@ -295,7 +295,8 @@ def test_save_parts_writes_rest_hair_while_posed(tmp_path, monkeypatch) -> None:
     assert saved["hair"][0]["polygon"] == painted[0]["polygon"]
 
 
-def test_set_source_clears_book_on_new_still(tmp_path, monkeypatch) -> None:
+def test_set_source_keeps_authored_shapes_on_new_still(tmp_path, monkeypatch) -> None:
+    """A new character still drops its rest only; track / set_rest rebases the plan."""
     import cv2
 
     from backend import face as face_mod
@@ -325,8 +326,28 @@ def test_set_source_clears_book_on_new_still(tmp_path, monkeypatch) -> None:
     book.set_mouth("smile", {str(i): [float(rest[i, 0]), float(rest[i, 1]), 1.0] for i in range(20, 28)}, rest)
     bench = FaceBench(rest_pts=rest.copy(), source_bgr=old)
     bench.set_source(bytes(buf), "source.png")
-    assert book.shapes == {}
+    assert set(book.shapes) == {"rest", "smile"}
+    assert (tmp_path / "mouth_presets.json").is_file()
     assert bench.rest_pts is None
+
+
+def test_seed_output_fills_only_missing_files(tmp_path, monkeypatch) -> None:
+    from backend import paths as paths_mod
+
+    shipped = tmp_path / "defaults"
+    out = tmp_path / "output"
+    shipped.mkdir()
+    out.mkdir()
+    (shipped / "mouth_presets.json").write_text('{"shipped": 1}', encoding="utf-8")
+    (shipped / "tracking_feel.json").write_text('{"shipped": 1}', encoding="utf-8")
+    (out / "tracking_feel.json").write_text('{"mine": 1}', encoding="utf-8")
+    monkeypatch.setattr(paths_mod, "DEFAULTS", shipped)
+    monkeypatch.setattr(paths_mod, "OUTPUT", out)
+
+    assert paths_mod.seed_output() == ["mouth_presets.json"]
+    assert (out / "mouth_presets.json").read_text(encoding="utf-8") == '{"shipped": 1}'
+    assert (out / "tracking_feel.json").read_text(encoding="utf-8") == '{"mine": 1}'
+    assert paths_mod.seed_output() == []
 
 
 def _circle_rest() -> np.ndarray:

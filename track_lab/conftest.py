@@ -17,6 +17,10 @@ import tempfile
 _OUTPUT = tempfile.mkdtemp(prefix="track_lab_test_output_")
 os.environ["TRACK_LAB_OUTPUT"] = _OUTPUT
 atexit.register(shutil.rmtree, _OUTPUT, True)
+# Nor do the shipped defaults: tests start from the built-in state.
+_DEFAULTS = tempfile.mkdtemp(prefix="track_lab_test_defaults_")
+os.environ["TRACK_LAB_DEFAULTS"] = _DEFAULTS
+atexit.register(shutil.rmtree, _DEFAULTS, True)
 
 import pytest  # noqa: E402
 

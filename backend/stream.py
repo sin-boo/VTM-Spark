@@ -1020,7 +1020,7 @@ class StreamRuntime:
         """Load the current character still into Track Lab and fit the rest mesh.
 
         Track Lab is the authoring tool. Boot / Start tracking must not wipe
-        mouth end-shapes. A new desk character still may replace them.
+        mouth end-shapes. A new desk character still rebases them onto its face.
 
         One at a time: a restart restore on the track poll thread and a
         Start tracking / load / boot on another could interleave their

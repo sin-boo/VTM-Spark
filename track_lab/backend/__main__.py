@@ -12,6 +12,7 @@ from .bind import (
     stale_message,
     _pause,
 )
+from .paths import seed_output
 from .ports import HOST, PORT
 
 
@@ -53,10 +54,18 @@ def claim_port() -> int | None:
     return None
 
 
+def seed_defaults() -> None:
+    """Shipped shapes / feel / limiters fill a fresh install before the API loads them."""
+    seeded = seed_output()
+    if seeded:
+        print(f"[track-lab] seeded defaults: {', '.join(seeded)}", flush=True)
+
+
 def main() -> int:
     code = claim_port()
     if code is not None:
         return code
+    seed_defaults()
     print(
         f"[track-lab] binding http://{HOST}:{PORT}  harness=/harness  ws=/harness/ws",
         flush=True,
