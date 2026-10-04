@@ -2,7 +2,7 @@
 # winexe: no console window. The stub opens start-menu.ps1 in a console only when it must.
 $ErrorActionPreference = "Stop"
 $Pack = $PSScriptRoot
-$Root = (Resolve-Path (Join-Path $Pack "..\..")).Path
+$Root = [IO.Path]::GetFullPath((Join-Path $Pack "..\.."))
 $Png = Join-Path $Root "ui\public\app-icon.png"
 $Ico = Join-Path $Pack "run.ico"
 $Cs = Join-Path $Pack "run-stub.cs"

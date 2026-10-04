@@ -5,7 +5,7 @@
 param([switch]$List)
 
 $ErrorActionPreference = "Continue"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $rootPrefix = $Root.TrimEnd('\') + '\'
 
 if (-not $List) {

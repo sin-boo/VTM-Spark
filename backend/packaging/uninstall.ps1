@@ -3,7 +3,7 @@
 # folder itself. Exit 0 = all removed, 2 = some steps need attention,
 # 3 = uninstall.bat deletes the folder once this script has exited.
 $ErrorActionPreference = "Continue"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $CamSetup = Join-Path $Root "vendor\tools\vtm_spark_cam\VTM Spark Camera Setup.exe"
 $script:Problems = 0
 

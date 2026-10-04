@@ -3,3 +3,8 @@
 # files as stored unless told otherwise, so .bat / .cmd always check out CRLF.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# GitHub's ZIP (git archive) writes the commit into this file, so a folder
+# unpacked from the ZIP knows its version (update.ps1). A clone keeps the
+# placeholder and asks git instead.
+backend/packaging/source-commit.txt export-subst

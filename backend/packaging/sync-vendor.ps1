@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $Repo = Split-Path $Root -Parent
 $Vendor = Join-Path $Root "vendor"
 

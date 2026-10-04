@@ -10,8 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-Set-Location $Root
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+Set-Location -LiteralPath $Root
 $VenvDir = Join-Path $Root ".venv-build"
 $Py = Join-Path $VenvDir "Scripts\python.exe"
 
@@ -26,6 +26,7 @@ $ManagedPythonVersion = "3.13"
 . (Join-Path $PSScriptRoot "console-progress.ps1")
 . (Join-Path $PSScriptRoot "venv-home.ps1")
 . (Join-Path $PSScriptRoot "node-tools.ps1")
+. (Join-Path $PSScriptRoot "install-stamps.ps1")
 
 function Get-UvExe {
   $cmd = Get-Command uv -ErrorAction SilentlyContinue
@@ -139,6 +140,7 @@ try {
         -Activity "npm install" `
         -HeartbeatSeconds 12
     }
+    if ($npmCode -eq 0) { Save-NpmStamp (Join-Path $Root "ui") }
     return [int]$npmCode
   }
   function Reset-UiPackages {
@@ -150,23 +152,22 @@ try {
     return (Install-UiPackages)
   }
 
-  if (-not (Test-Path "node_modules")) {
-    Write-LongStepHint "Installing UI npm packages (first run can take a few minutes)..."
+  # An update can bring a new package-lock.json; node_modules has to follow it.
+  $UiDir = Join-Path $Root "ui"
+  if (-not (Test-NpmPackagesCurrent $UiDir)) {
+    if (Test-Path "node_modules") {
+      Write-LongStepHint "UI packages changed - reinstalling UI npm packages..."
+    } else {
+      Write-LongStepHint "Installing UI npm packages (first run can take a few minutes)..."
+    }
     $code = Install-UiPackages
     if ($code -ne 0) { $code = Reset-UiPackages }
     if ($code -ne 0) { throw "npm install failed twice - see npm output above. Check your internet connection and re-run install.bat." }
   }
-  $UiDist = Join-Path $Root "ui\dist\index.html"
-  $NeedUiBuild = $true
-  if (Test-Path $UiDist) {
-    $distTime = (Get-Item $UiDist).LastWriteTimeUtc
-    $newestSrc = Get-ChildItem -Path (Join-Path $Root "ui\src"), (Join-Path $Root "ui\index.html") -Recurse -File -ErrorAction SilentlyContinue |
-      Sort-Object LastWriteTimeUtc -Descending |
-      Select-Object -First 1
-    if ($null -eq $newestSrc -or $newestSrc.LastWriteTimeUtc -le $distTime) {
-      Write-Host "    ui/dist is up to date - skipping vite build"
-      $NeedUiBuild = $false
-    }
+  $UiHash = Get-UiSourceHash $Root
+  $NeedUiBuild = -not (Test-UiBuildCurrent $Root)
+  if (-not $NeedUiBuild) {
+    Write-Host "    ui/dist is up to date - skipping vite build"
   }
   if ($NeedUiBuild) {
     Write-LongStepHint "Running Vite production build..."
@@ -187,6 +188,7 @@ try {
       }
     }
     if ($code -ne 0) { throw "UI build failed twice - see npm output above. Re-run install.bat; if it keeps failing, report the error above." }
+    Save-VtmStamp (Get-UiBuildStampPath $Root) $UiHash
   }
 } finally {
   $env:CI = $prevCi
@@ -418,11 +420,18 @@ $wantLine = ($want.Out | Where-Object { $_ -match '^cu\d+$' } | Select-Object -L
 if ($want.Code -eq 0 -and $wantLine) { $TorchBuild = "$wantLine".Trim() }
 Write-Host "==> torch build for this graphics card: $TorchBuild"
 
+# requirements.txt (and the torch build) the venv was last installed from.
+# An update that adds or bumps a package changes it, so -SkipDeps installs anyway.
+$DepsStamp = Join-Path $VenvDir ".vtm-requirements"
+$DepsHash = "$(Get-VtmFileHash (Join-Path $Root "requirements.txt")) $TorchBuild"
 $NeedDeps = -not $SkipDeps
 $DidInstallDeps = $false
 if (-not $NeedDeps) {
   Write-Host "==> -SkipDeps set - checking imports only"
-  if (-not (Test-RuntimeImports) -or -not (Test-CudaTorch) -or -not (Test-TorchBuild $TorchBuild)) {
+  if (-not (Test-VtmStamp $DepsStamp $DepsHash)) {
+    Write-Host "    requirements.txt changed since the last install - installing deps"
+    $NeedDeps = $true
+  } elseif (-not (Test-RuntimeImports) -or -not (Test-CudaTorch) -or -not (Test-TorchBuild $TorchBuild)) {
     Write-Host "    imports/CUDA incomplete - installing deps anyway (includes pyvirtualcam)"
     $NeedDeps = $true
   } else {
@@ -469,6 +478,7 @@ if ($NeedDeps) {
 if (-not (Test-RuntimeImports)) { throw "Build venv is missing required packages - re-run install.bat without -SkipDeps; if it persists, delete .venv-build and re-run install.bat." }
 if (-not (Test-CudaTorch)) { throw "Build venv must have CUDA torch - delete .venv-build and re-run install.bat." }
 Write-Host "    runtime imports OK (CUDA torch)"
+if ($DidInstallDeps) { Save-VtmStamp $DepsStamp $DepsHash }
 
 # A CUDA wheel is not a working card: make it run real work. If it fails and the
 # other torch build supports the card, put that one in and test again. What was

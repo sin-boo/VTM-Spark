@@ -13,6 +13,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -368,13 +369,22 @@ internal static class Program
         string index = Path.Combine(ui, "dist", "index.html");
         string node = Path.Combine(Root, ".tools", "node", "node.exe");
         string npmCli = Path.Combine(Root, ".tools", "node", "node_modules", "npm", "bin", "npm-cli.js");
-        Log("ui source newer than ui\\dist - rebuilding hidden");
+        Log("ui source changed since ui\\dist was built - rebuilding hidden");
+        string hash = UiSourceHash(Root);
         TimeSpan limit = TimeSpan.FromMinutes(10);
         int code = File.Exists(node) && File.Exists(npmCli)
             ? RunHidden(node, "\"" + npmCli + "\" run build", ui, limit)
             : RunHidden("cmd.exe", "/c npm run build", ui, limit);
         if (code == 0)
         {
+            try
+            {
+                File.WriteAllText(Path.Combine(ui, "dist", ".vtm-source"), hash);
+            }
+            catch (Exception ex)
+            {
+                Log("ui stamp not written: " + ex.Message);
+            }
             Log("ui rebuilt");
             return true;
         }
@@ -889,20 +899,45 @@ internal static class Program
         return null;
     }
 
-    // Mirrors Test-UiStale in start-menu.ps1.
+    // Mirrors Test-UiStale in start-menu.ps1: ui\dist is current only when the
+    // stamp its build left matches a hash of the sources now. File dates cannot
+    // tell: a GitHub ZIP update dates every file at the commit time.
     private static bool UiStale(string root)
     {
         string index = Path.Combine(root, "ui", "dist", "index.html");
-        if (!File.Exists(index))
+        string stamp = Path.Combine(root, "ui", "dist", ".vtm-source");
+        if (!File.Exists(index) || !File.Exists(stamp))
         {
             return true;
         }
-        DateTime built = File.GetLastWriteTimeUtc(index);
-        string ui = Path.Combine(root, "ui");
-        string html = Path.Combine(ui, "index.html");
-        if (File.Exists(html) && File.GetLastWriteTimeUtc(html) > built)
+        try
         {
+            return File.ReadAllText(stamp).Trim() != UiSourceHash(root);
+        }
+        catch (Exception ex)
+        {
+            Log("ui stamp check failed: " + ex.Message);
             return true;
+        }
+    }
+
+    // Same files and format as Get-UiSourceHash in install-stamps.ps1.
+    private static readonly string[] UiTopFiles =
+    {
+        "index.html", "package.json", "package-lock.json", "vite.config.ts",
+        "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json"
+    };
+
+    private static string UiSourceHash(string root)
+    {
+        string ui = Path.Combine(root, "ui");
+        List<string> files = new List<string>();
+        foreach (string name in UiTopFiles)
+        {
+            if (File.Exists(Path.Combine(ui, name)))
+            {
+                files.Add(name);
+            }
         }
         foreach (string dir in new[] { "src", "public" })
         {
@@ -917,13 +952,32 @@ internal static class Program
                 {
                     continue;
                 }
-                if (File.GetLastWriteTimeUtc(f) > built)
-                {
-                    return true;
-                }
+                files.Add(f.Substring(ui.Length + 1).Replace('\\', '/'));
             }
         }
-        return false;
+        files.Sort(StringComparer.Ordinal);
+        StringBuilder sb = new StringBuilder();
+        using (SHA256 sha = SHA256.Create())
+        {
+            foreach (string rel in files)
+            {
+                using (FileStream fs = File.OpenRead(Path.Combine(ui, rel)))
+                {
+                    sb.Append(rel).Append(' ').Append(Hex(sha.ComputeHash(fs))).Append('\n');
+                }
+            }
+            return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString())));
+        }
+    }
+
+    private static string Hex(byte[] bytes)
+    {
+        StringBuilder sb = new StringBuilder(bytes.Length * 2);
+        foreach (byte b in bytes)
+        {
+            sb.Append(b.ToString("x2"));
+        }
+        return sb.ToString();
     }
 
     // The only place a console appears, and only after the user said yes.

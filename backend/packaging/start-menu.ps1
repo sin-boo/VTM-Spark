@@ -1,7 +1,9 @@
 ﻿# VTM Spark — install.bat / run.exe
 param(
   [ValidateSet("install", "run")]
-  [string]$Action = "run"
+  [string]$Action = "run",
+  # update.ps1 runs the install and keeps its own window open afterwards.
+  [switch]$NoPause
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,8 +11,8 @@ $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
   $PSNativeCommandUseErrorActionPreference = $false
 }
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-Set-Location $Root
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+Set-Location -LiteralPath $Root
 
 $VenvPy = Join-Path $Root ".venv-build\Scripts\python.exe"
 $UiIndex = Join-Path $Root "ui\dist\index.html"
@@ -21,6 +23,7 @@ $Esc = [char]27
 . (Join-Path $PSScriptRoot "console-progress.ps1")
 . (Join-Path $PSScriptRoot "venv-home.ps1")
 . (Join-Path $PSScriptRoot "node-tools.ps1")
+. (Join-Path $PSScriptRoot "install-stamps.ps1")
 
 function Enable-PrettyConsole {
   try {
@@ -429,8 +432,8 @@ function Invoke-EnsureTrackLab {
     $ok = $false
   }
 
-  if (Test-Path -LiteralPath (Join-Path $labUi "node_modules")) {
-    Write-Ansi "    track_lab\ui\node_modules present - skipping npm" slate
+  if (Test-NpmPackagesCurrent $labUi) {
+    Write-Ansi "    track_lab\ui\node_modules up to date - skipping npm" slate
   } elseif (-not (Use-VtmNode -RepoRoot $Root)) {
     Write-Ansi "Node.js missing (.tools\node) - Track Lab UI packages not installed." amber
     $ok = $false
@@ -459,6 +462,8 @@ function Invoke-EnsureTrackLab {
     if ($npmCode -ne 0) {
       Write-Ansi "Track Lab npm install exited $npmCode." amber
       $ok = $false
+    } else {
+      Save-NpmStamp $labUi
     }
   }
 
@@ -547,8 +552,10 @@ function Invoke-SmartBuild {
     Write-Ansi "    - Antivirus or a running app locking .venv-build - close VTM Spark / pause AV and retry" slate
     Write-Ansi "  Re-running install.bat is safe; it keeps what finished and retries the rest." slate
     Write-Host ""
-    Write-Ansi "Press Enter to return..." slate
-    [void][Console]::ReadLine()
+    if (-not $NoPause) {
+      Write-Ansi "Press Enter to return..." slate
+      [void][Console]::ReadLine()
+    }
     $script:InstallExitCode = 1
     return
   }
@@ -589,18 +596,14 @@ function Invoke-SmartBuild {
   }
   Write-Ansi "  Double-click run.exe to open the desk." slate
   Write-Host ""
-  Write-Ansi "Press Enter to return..." slate
-  [void][Console]::ReadLine()
+  if (-not $NoPause) {
+    Write-Ansi "Press Enter to return..." slate
+    [void][Console]::ReadLine()
+  }
 }
 
 function Test-UiStale {
-  if (-not (Test-Path -LiteralPath $UiIndex)) { return $true }
-  $distTime = (Get-Item -LiteralPath $UiIndex).LastWriteTimeUtc
-  $newestSrc = Get-ChildItem -Path (Join-Path $Root "ui\src"), (Join-Path $Root "ui\index.html"), (Join-Path $Root "ui\public") -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike "_*" } |
-    Sort-Object LastWriteTimeUtc -Descending |
-    Select-Object -First 1
-  return ($null -ne $newestSrc -and $newestSrc.LastWriteTimeUtc -gt $distTime)
+  return (-not (Test-UiBuildCurrent $Root))
 }
 
 function Invoke-BuildDeskUi {
@@ -611,6 +614,7 @@ function Invoke-BuildDeskUi {
     return 1
   }
   $buildCode = 1
+  $uiHash = Get-UiSourceHash $Root
   Push-Location $uiDir
   # Plain vite output; its live progress overwrites the next console lines.
   $prevCi = $env:CI
@@ -632,6 +636,8 @@ function Invoke-BuildDeskUi {
   }
   if ($buildCode -ne 0) {
     Write-Ansi "UI rebuild exited $buildCode." rose
+  } else {
+    Save-VtmStamp (Get-UiBuildStampPath $Root) $uiHash
   }
   return [int]$buildCode
 }
