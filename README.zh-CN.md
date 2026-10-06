@@ -17,6 +17,7 @@
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6">
   <img alt="NVIDIA RTX 30/40/50" src="https://img.shields.io/badge/GPU-NVIDIA%20RTX%2030%20%7C%2040%20%7C%2050-76B900">
   <a href="#许可证"><img alt="许可证：Apache 2.0，另含第三方模型许可证" src="https://img.shields.io/badge/license-Apache%202.0%20%2B%20third--party%20models-blue"></a>
+  <a href="https://discord.gg/WEawvVs9KX"><img alt="加入 VTM Spark 的 Discord" src="https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E6%88%91%E4%BB%AC-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 ---

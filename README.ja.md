@@ -17,6 +17,7 @@
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6">
   <img alt="NVIDIA RTX 30/40/50" src="https://img.shields.io/badge/GPU-NVIDIA%20RTX%2030%20%7C%2040%20%7C%2050-76B900">
   <a href="#ライセンス"><img alt="ライセンス: Apache 2.0（サードパーティ製モデルは各ライセンス）" src="https://img.shields.io/badge/license-Apache%202.0%20%2B%20third--party%20models-blue"></a>
+  <a href="https://discord.gg/WEawvVs9KX"><img alt="VTM Spark の Discord に参加" src="https://img.shields.io/badge/Discord-%E5%8F%82%E5%8A%A0%E3%81%99%E3%82%8B-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 ---
