@@ -5,6 +5,10 @@
 <h1 align="center">VTM Spark</h1>
 
 <p align="center">
+  <b>English</b> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <b>Turn one anime picture into a live VTuber.</b><br>
   Your webcam or iPhone drives the character, an AI model draws every frame, and OBS / Discord / Zoom see it as a normal webcam.
 </p>
